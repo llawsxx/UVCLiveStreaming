@@ -64,6 +64,20 @@ class TimestampSmootherTest {
         }
     }
 
+    @Test fun aacOutputRemovesInputBatchTimestampStepsAndKeepsAudioOffset() {
+        val smoother = TimestampSmoother(48_000.0, 0.1)
+        val firstAudioPts = origin + 15_000_000L
+        // Output PTS snapped to 10-ms PCM batches produce 10/20/30-ms
+        // intervals. Every encoded AAC-LC access unit still has 1024 samples.
+        for (frame in 0..10_000) {
+            val offsetNs = (frame * 1_024_000_000_000.0 / 48_000).roundToLong()
+            val batchTimestamp = firstAudioPts + offsetNs / 10_000_000L * 10_000_000L
+            assertEquals(firstAudioPts + offsetNs, smoother.smooth(batchTimestamp, 1_024))
+        }
+        val afterGap = firstAudioPts + (10_001 * 1_024_000_000_000.0 / 48_000).roundToLong() + 200_000_000L
+        assertEquals(afterGap, smoother.smooth(afterGap, 1_024))
+    }
+
     @Test fun firstAudioAndVideoTimestampsKeepTheirOriginalOffset() {
         val video = TimestampSmoother(60.0, 0.1)
         val audio = TimestampSmoother(48_000.0, 0.1)

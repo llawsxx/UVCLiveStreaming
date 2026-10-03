@@ -773,7 +773,8 @@ private fun UsbCameraScreen() {
                 if (stats.httpStreaming) add("HTTP 串流中")
                 if (stats.rtmpStreaming) add("RTMP 推流中")
             }.joinToString(" + ")
-            Text("$modes · 平均 ${String.format(Locale.US, "%.1f", stats.averageFps)} fps" +
+            val recentFpsText = stats.recentFps?.let { String.format(Locale.US, "%.1f fps", it) } ?: "统计中"
+            Text("$modes · 近期（5秒）$recentFpsText · 平均 ${String.format(Locale.US, "%.1f", stats.averageFps)} fps" +
                 if (streaming) " · 串流 ${String.format(Locale.US, "%.0f", streamRate)} kbps" else "")
             stats.outputPath?.let { Text("文件：$it", style = MaterialTheme.typography.bodySmall) }
             if (stats.outputChangePending) Text("正在切换输出…", style = MaterialTheme.typography.bodySmall)

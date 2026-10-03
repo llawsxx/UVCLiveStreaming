@@ -17,6 +17,8 @@
 #include <unistd.h>
 
 extern "C" uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out);
+extern "C" uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
+    long *warnings, char *message, size_t message_size);
 
 namespace {
 constexpr const char *TAG = "UVCLiveStreamingUsb";
@@ -24,6 +26,45 @@ constexpr const char *TAG = "UVCLiveStreamingUsb";
 int64_t monotonic_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Process-wide counters cover both idle preview and recording decode workers.
+// Log summaries, not per-frame messages, so diagnostics do not flood logcat.
+void record_mjpeg_decode(bool no_soi, bool missing_eoi, bool leading_bytes,
+                         bool failed, long warnings, const char *detail,
+                         size_t bytes, int width, int height) {
+    static std::atomic<uint64_t> frames{0}, no_sois{0}, missing_eois{0}, prefixes{0},
+        failures{0}, warned_frames{0}, warning_count{0};
+    static std::atomic<int64_t> last_log_ns{0};
+    ++frames;
+    if (no_soi) ++no_sois;
+    if (missing_eoi) ++missing_eois;
+    if (leading_bytes) ++prefixes;
+    if (warnings > 0) {
+        const auto count = ++warned_frames;
+        warning_count += warnings;
+        if (count <= 3 || count % 1000 == 0)
+            __android_log_print(ANDROID_LOG_WARN, TAG,
+                "MJPEG tolerated warning: warnedFrames=%llu decoded=%d bytes=%zu mode=%dx%d detail=%s",
+                (unsigned long long)count, !failed, bytes, width, height, detail);
+    }
+    if (failed) {
+        const auto count = ++failures;
+        if (count <= 3 || count % 100 == 0)
+            __android_log_print(ANDROID_LOG_WARN, TAG,
+                "MJPEG decode rejected: count=%llu bytes=%zu mode=%dx%d reason=%s",
+                (unsigned long long)count, bytes, width, height, detail);
+    }
+    const auto now = monotonic_ns();
+    auto previous = last_log_ns.load();
+    if (now - previous >= 5000000000LL && last_log_ns.compare_exchange_strong(previous, now))
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+            "MJPEG process totals: frames=%llu failed=%llu noSOI=%llu missingEOI=%llu "
+            "prefix=%llu warnedFrames=%llu warnings=%llu lastDetail=%s",
+            (unsigned long long)frames.load(), (unsigned long long)failures.load(),
+            (unsigned long long)no_sois.load(), (unsigned long long)missing_eois.load(),
+            (unsigned long long)prefixes.load(), (unsigned long long)warned_frames.load(),
+            (unsigned long long)warning_count.load(), detail);
 }
 
 void throw_java(JNIEnv *env, const std::string &message) {
@@ -239,6 +280,11 @@ public:
         if (!video_method_ || (audio_config_ && !audio_method_))
             throw std::runtime_error("USB callback methods unavailable");
         running_ = true;
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+            "USB video negotiated: mode=%dx%d format=%d interval100ns=%u fps=%.6f maxFrame=%u maxPayload=%u",
+            width_, height_, supported_format(video_format_), video_ctrl_.dwFrameInterval,
+            video_ctrl_.dwFrameInterval ? 10000000.0 / video_ctrl_.dwFrameInterval : 0.0,
+            video_ctrl_.dwMaxVideoFrameSize, video_ctrl_.dwMaxPayloadTransferSize);
         event_thread_ = std::thread([this] {
             timeval timeout{0, 200000};
             while (running_) libusb_handle_events_timeout(usb_ctx_, &timeout);
@@ -302,6 +348,22 @@ private:
             frame->height != static_cast<uint32_t>(height_)) return;
         const size_t length = frame->data_bytes;
         if (length > 3840ULL * 2160 * 4) return;
+        const auto callback_start = monotonic_ns();
+        // libuvc stamps frame assembly with CLOCK_MONOTONIC. Do not timestamp
+        // after attaching to ART and allocating/copying the Java array: those
+        // operations can add GC/scheduling jitter unrelated to capture time.
+        const auto &finished = frame->capture_time_finished;
+        const int64_t captured_ns = finished.tv_sec >= 0 && finished.tv_nsec >= 0 &&
+            finished.tv_nsec < 1000000000L
+            ? static_cast<int64_t>(finished.tv_sec) * 1000000000LL + finished.tv_nsec : 0;
+        const auto timestamp_ns = captured_ns > 0 ? captured_ns : callback_start;
+        ++video_frames_;
+        video_bytes_ += length;
+        if (video_frames_ > 1) {
+            const uint32_t delta = frame->sequence - video_last_sequence_;
+            if (delta > 1 && delta < 0x80000000u) video_sequence_gaps_ += delta - 1;
+        }
+        video_last_sequence_ = frame->sequence;
         JNIEnv *env = nullptr;
         bool attached = vm_->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK;
         if (attached && vm_->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
@@ -310,11 +372,27 @@ private:
             env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(length),
                 reinterpret_cast<const jbyte *>(frame->data));
             env->CallVoidMethod(callback_, video_method_, bytes, format,
-                static_cast<jint>(frame->width), static_cast<jint>(frame->height), static_cast<jlong>(monotonic_ns()));
+                static_cast<jint>(frame->width), static_cast<jint>(frame->height), static_cast<jlong>(timestamp_ns));
             env->DeleteLocalRef(bytes);
         }
         if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
         if (attached) vm_->DetachCurrentThread();
+        const auto now = monotonic_ns();
+        video_callback_max_ns_ = std::max(video_callback_max_ns_, now - callback_start);
+        if (!video_last_log_ns_) {
+            video_last_log_ns_ = now;
+            video_last_log_frames_ = video_frames_;
+        } else if (now - video_last_log_ns_ >= 5000000000LL) {
+            __android_log_print(ANDROID_LOG_INFO, TAG,
+                "USB video callbacks: frames=%llu fps=%.3f sequenceGaps=%llu bytes=%llu callbackMaxMs=%.3f",
+                (unsigned long long)video_frames_,
+                (video_frames_ - video_last_log_frames_) * 1000000000.0 / (now - video_last_log_ns_),
+                (unsigned long long)video_sequence_gaps_, (unsigned long long)video_bytes_,
+                video_callback_max_ns_ / 1000000.0);
+            video_last_log_ns_ = now;
+            video_last_log_frames_ = video_frames_;
+            video_callback_max_ns_ = 0;
+        }
     }
 
     void audio_frame(uint8_t *data, uint count) {
@@ -385,6 +463,10 @@ private:
     int audio_subframe_bytes_ = 0;
     std::vector<jbyte> audio_aggregate_;
     uint64_t audio_packets_ = 0;
+    uint64_t video_frames_ = 0, video_bytes_ = 0, video_sequence_gaps_ = 0;
+    uint64_t video_last_log_frames_ = 0;
+    uint32_t video_last_sequence_ = 0;
+    int64_t video_last_log_ns_ = 0, video_callback_max_ns_ = 0;
     uint64_t audio_bytes_ = 0;
     uint64_t audio_batches_ = 0;
     int audio_peak_ = 0;
@@ -524,7 +606,11 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
         for (size_t i = 0; i + 1 < length; ++i) {
             if (src[i] == 0xff && src[i + 1] == 0xd8) { soi = i; break; }
         }
-        if (soi == length) { env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT); return nullptr; }
+        if (soi == length) {
+            record_mjpeg_decode(true, false, false, true, 0, "SOI not found", length, width, height);
+            env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
+            return nullptr;
+        }
         size_t end = length;
         bool eoi = false;
         for (size_t i = length; i >= soi + 2; --i) {
@@ -543,7 +629,12 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
         in.data = const_cast<uint8_t *>(payload);
         in.data_bytes = payload_size;
         in.width = width; in.height = height; in.frame_format = UVC_FRAME_FORMAT_MJPEG;
-        if (uvc_mjpeg2i420(&in, scratch.frame) == UVC_SUCCESS)
+        long warnings = 0;
+        char detail[256]{};
+        const auto decoded = uvc_mjpeg2i420_diagnostic(&in, scratch.frame, &warnings, detail, sizeof(detail));
+        record_mjpeg_decode(false, !eoi, soi != 0, decoded != UVC_SUCCESS,
+            warnings, detail, length, width, height);
+        if (decoded == UVC_SUCCESS)
             output = static_cast<const jbyte *>(scratch.frame->data);
     } else {
         scratch.raw.resize(size);

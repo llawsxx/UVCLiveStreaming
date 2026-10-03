@@ -7,9 +7,11 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresApi
 import java.nio.ByteBuffer
+import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -43,6 +45,8 @@ class UsbRecorderEngine(
         capacity = config.usbVideoBufferFrames.coerceIn(1, 30),
     )
     private val frameCount = AtomicLong()
+    private val receivedVideoFrames = AtomicLong()
+    private val renderedVideoFrames = AtomicLong()
     private val bytesWritten = AtomicLong()
     private val lastAudioLevelNs = AtomicLong()
     private val statsStarted = AtomicBoolean(false)
@@ -64,6 +68,7 @@ class UsbRecorderEngine(
     @Volatile private var videoFormatReady = false
     @Volatile private var audioFormatReady = false
     @Volatile private var streamRate = 0.0
+    @Volatile private var recentFps: Double? = null
     private var videoThread: Thread? = null
     private var videoRenderThread: Thread? = null
     private var audioThread: Thread? = null
@@ -79,6 +84,7 @@ class UsbRecorderEngine(
         TimestampSmoother(videoSmoothingFrameRate(config.fps, config.usbTimestampSmoothingNtscEnabled),
             config.usbTimestampSmoothingMaxDeltaSeconds) else null
     private var audioTimestampSmoother: TimestampSmoother? = null
+    private var audioOutputTimestampSmoother: TimestampSmoother? = null
     private val previewRevision = AtomicLong()
 
     override fun start(preview: Surface?, previewEnabled: Boolean, previewRotationDegrees: Int) {
@@ -118,6 +124,7 @@ class UsbRecorderEngine(
         audioCaptureEnabled = config.hasAudio && audioRate > 0 && audioChannels in 1..2
         if (audioCaptureEnabled && config.usbTimestampSmoothingEnabled) {
             audioTimestampSmoother = TimestampSmoother(audioRate.toDouble(), config.usbTimestampSmoothingMaxDeltaSeconds)
+            audioOutputTimestampSmoother = TimestampSmoother(audioRate.toDouble(), config.usbTimestampSmoothingMaxDeltaSeconds)
         }
         if (videoWidth != config.width || videoHeight != config.height) {
             onNotice("USB 摄像头使用 ${videoWidth}×${videoHeight}，所选分辨率不可用")
@@ -185,6 +192,10 @@ class UsbRecorderEngine(
         statsThread = Thread({
             var lastStreamBytes = 0L
             var lastStreamNs = System.nanoTime()
+            var lastVideoNs = lastStreamNs
+            var lastReceived = receivedVideoFrames.get()
+            var lastRendered = renderedVideoFrames.get()
+            var lastEncoded = frameCount.get()
             while (running.get()) {
                 val nowNs = System.nanoTime()
                 val streamBytes = outputs.snapshot().values.sumOf { it.bytesStreamed }
@@ -192,6 +203,22 @@ class UsbRecorderEngine(
                     (streamBytes - lastStreamBytes) * 8_000_000_000.0 / (nowNs - lastStreamNs) else 0.0
                 lastStreamBytes = streamBytes
                 lastStreamNs = nowNs
+                if (nowNs - lastVideoNs >= 5_000_000_000L) {
+                    val received = receivedVideoFrames.get()
+                    val rendered = renderedVideoFrames.get()
+                    val encoded = frameCount.get()
+                    val seconds = (nowNs - lastVideoNs) / 1_000_000_000.0
+                    recentFps = (encoded - lastEncoded) / seconds
+                    Log.i("UsbVideoDiagnostics", String.format(Locale.US,
+                        "Video fps: received=%.3f rendered=%.3f encoded=%.3f totals=%d/%d/%d MJPEG=%s",
+                        (received - lastReceived) / seconds, (rendered - lastRendered) / seconds,
+                        (encoded - lastEncoded) / seconds, received, rendered, encoded,
+                        mjpegDecodePool.diagnostics()))
+                    lastVideoNs = nowNs
+                    lastReceived = received
+                    lastRendered = rendered
+                    lastEncoded = encoded
+                }
                 onStats(captureStats())
                 try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
             }
@@ -200,6 +227,7 @@ class UsbRecorderEngine(
 
     override fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) {
         if (!running.get()) return
+        receivedVideoFrames.incrementAndGet()
         val smoothedTimestampNs = videoTimestampSmoother?.smooth(timestampNs) ?: timestampNs
         if (format == 1) {
             mjpegDecodePool.offer(bytes, format, width, height, smoothedTimestampNs)
@@ -233,6 +261,7 @@ class UsbRecorderEngine(
                             RecorderController.previewLowFrameRate,
                         )
                         gpu.render(frame, target)
+                        renderedVideoFrames.set(gpu.encodedFrameCount)
                     }
                 }
             } catch (_: InterruptedException) {
@@ -344,7 +373,14 @@ class UsbRecorderEngine(
                             index >= 0 -> {
                                 if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
                                     codec.getOutputBuffer(index)?.let {
-                                        outputs.write(EncodedSample(false, copyBuffer(it, info), info.presentationTimeUs, info.flags))
+                                        // PCM input batches are not AAC access units. Some encoders
+                                        // propagate batch PTS, leaving 11/30-ms steps even when PCM
+                                        // input was smoothed. AAC-LC output represents 1024 samples
+                                        // per access unit; smooth that output timeline separately.
+                                        val ptsUs = audioOutputTimestampSmoother?.smooth(
+                                            info.presentationTimeUs * 1_000, 1_024L,
+                                        )?.div(1_000) ?: info.presentationTimeUs
+                                        outputs.write(EncodedSample(false, copyBuffer(it, info), ptsUs, info.flags))
                                     }
                                     bytesWritten.addAndGet(info.size.toLong())
                                 }
@@ -428,6 +464,7 @@ class UsbRecorderEngine(
         return RecordingStats(
             elapsedMs = elapsedMs,
             averageFps = frameCount.get() * 1_000.0 / elapsedMs,
+            recentFps = recentFps,
             averageBitrateBitsPerSecond = bytesWritten.get() * 8_000.0 / elapsedMs,
             segment = recording?.segment ?: 0,
             outputPath = recording?.path,

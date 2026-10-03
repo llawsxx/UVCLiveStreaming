@@ -45,7 +45,13 @@ extern uvc_error_t uvc_ensure_frame_size(uvc_frame_t *frame, size_t need_bytes);
 struct error_mgr {
   struct jpeg_error_mgr super;
   jmp_buf jmp;
+  char diagnostic[JMSG_LENGTH_MAX];
 };
+
+static void _diagnostic_message(j_common_ptr dinfo) {
+  struct error_mgr *err = (struct error_mgr *)dinfo->err;
+  (*dinfo->err->format_message)(dinfo, err->diagnostic);
+}
 
 static void _error_exit(j_common_ptr dinfo) {
   struct error_mgr *myerr = (struct error_mgr *)dinfo->err;
@@ -124,22 +130,31 @@ static void insert_huff_tables(j_decompress_ptr dinfo) {
 
 /* Decode JPEG component planes without an intermediate RGB image. libjpeg's
    memory pool owns all scratch planes, including on longjmp/error cleanup. */
-uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out) {
+uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
+    long *warnings, char *message, size_t message_size) {
   struct jpeg_decompress_struct dinfo = {0};
-  struct error_mgr jerr;
+  struct error_mgr jerr = {0};
   JSAMPARRAY planes[3] = {0};
   JSAMPARRAY strip[3] = {0};
   size_t pixels = (size_t)in->width * in->height;
   size_t cw = (in->width + 1) / 2, ch = (in->height + 1) / 2;
   dinfo.err = jpeg_std_error(&jerr.super);
   jerr.super.error_exit = _error_exit;
+  jerr.super.output_message = _diagnostic_message;
+  if (warnings) *warnings = 0;
+  if (message && message_size) message[0] = '\0';
   if (setjmp(jerr.jmp)) goto fail_yuv;
   jpeg_create_decompress(&dinfo);
   jpeg_mem_src(&dinfo, in->data, in->data_bytes);
   jpeg_read_header(&dinfo, TRUE);
   if (dinfo.image_width != in->width || dinfo.image_height != in->height ||
       (dinfo.jpeg_color_space != JCS_YCbCr && dinfo.jpeg_color_space != JCS_GRAYSCALE) ||
-      (dinfo.num_components != 1 && dinfo.num_components != 3)) goto fail_yuv;
+      (dinfo.num_components != 1 && dinfo.num_components != 3)) {
+    snprintf(jerr.diagnostic, sizeof(jerr.diagnostic),
+        "JPEG geometry/color mismatch: %ux%u space=%d components=%d",
+        dinfo.image_width, dinfo.image_height, dinfo.jpeg_color_space, dinfo.num_components);
+    goto fail_yuv;
+  }
   if (!dinfo.dc_huff_tbl_ptrs[0]) insert_huff_tables(&dinfo);
   dinfo.raw_data_out = TRUE;
   dinfo.dct_method = JDCT_IFAST;
@@ -186,11 +201,20 @@ uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out) {
   out->frame_format = UVC_FRAME_FORMAT_I420;
   out->step = in->width;
   jpeg_finish_decompress(&dinfo);
+  if (warnings) *warnings = jerr.super.num_warnings;
+  if (message && message_size) snprintf(message, message_size, "%s", jerr.diagnostic);
   jpeg_destroy_decompress(&dinfo);
   return UVC_SUCCESS;
 fail_yuv:
+  if (warnings) *warnings = jerr.super.num_warnings;
+  if (message && message_size) snprintf(message, message_size, "%s",
+      jerr.diagnostic[0] ? jerr.diagnostic : "JPEG decode/allocation failed");
   jpeg_destroy_decompress(&dinfo);
   return UVC_ERROR_OTHER;
+}
+
+uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out) {
+  return uvc_mjpeg2i420_diagnostic(in, out, NULL, NULL, 0);
 }
 
 static uvc_error_t uvc_mjpeg_convert(uvc_frame_t *in, uvc_frame_t *out) {

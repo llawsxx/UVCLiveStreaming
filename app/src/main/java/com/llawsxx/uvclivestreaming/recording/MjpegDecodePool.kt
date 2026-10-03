@@ -16,6 +16,18 @@ internal class MjpegDecodePool(
     workerCount: Int = 4,
     capacity: Int = 10,
 ) {
+    data class Diagnostics(
+        val offered: Long,
+        val decodeAttempts: Long,
+        val decodeFailures: Long,
+        val inputDrops: Long,
+        val outputSkippedSequences: Long,
+        val lateCompletions: Long,
+        val delivered: Long,
+        val averageDecodeMs: Double,
+        val inputQueued: Int,
+        val outputQueued: Int,
+    )
     data class DecodedFrame(
         val width: Int,
         val height: Int,
@@ -45,6 +57,20 @@ internal class MjpegDecodePool(
     private var nextSequence = 0L
     private var nextOutput = 0L
     private var completedBytes = 0L
+    private var decodeAttempts = 0L
+    private var decodeFailures = 0L
+    private var inputDrops = 0L
+    private var outputSkippedSequences = 0L
+    private var lateCompletions = 0L
+    private var delivered = 0L
+    private var decodeTotalNs = 0L
+
+    fun diagnostics(): Diagnostics = synchronized(monitor) {
+        Diagnostics(nextSequence, decodeAttempts, decodeFailures, inputDrops,
+            outputSkippedSequences, lateCompletions, delivered,
+            if (decodeAttempts > 0) decodeTotalNs / 1_000_000.0 / decodeAttempts else 0.0,
+            input.size, completed.size)
+    }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -64,11 +90,13 @@ internal class MjpegDecodePool(
                 // Drop the oldest queued frame, but publish a completion for
                 // its sequence so ordered output never waits forever.
                 input.poll()?.let { dropped ->
+                    inputDrops++
                     addCompletedLocked(DecodedFrame(
                         dropped.width, dropped.height, dropped.timestampNs, null,
                     ), dropped.sequence)
                 }
                 if (!input.offer(frame)) {
+                    inputDrops++
                     addCompletedLocked(
                         DecodedFrame(frame.width, frame.height, frame.timestampNs, null),
                         frame.sequence,
@@ -86,6 +114,7 @@ internal class MjpegDecodePool(
                 completed.remove(nextOutput)?.let {
                     completedBytes -= it.yuv?.size?.toLong() ?: 0L
                     nextOutput++
+                    if (it.yuv != null) delivered++
                     return it
                 }
                 val remaining = deadline - System.nanoTime()
@@ -114,11 +143,16 @@ internal class MjpegDecodePool(
         while (running.get()) {
             val frame = try { input.poll(100, TimeUnit.MILLISECONDS) }
                 catch (_: InterruptedException) { break } ?: continue
+            val decodeStartNs = System.nanoTime()
             val yuv = runCatching {
                 decoder(frame.bytes, frame.format, frame.width, frame.height)
             }.getOrNull()
+            val decodeElapsedNs = System.nanoTime() - decodeStartNs
             synchronized(monitor) {
                 if (running.get()) {
+                    decodeAttempts++
+                    decodeTotalNs += decodeElapsedNs
+                    if (yuv == null) decodeFailures++
                     addCompletedLocked(DecodedFrame(
                         frame.width, frame.height, frame.timestampNs, yuv,
                     ), frame.sequence)
@@ -129,7 +163,10 @@ internal class MjpegDecodePool(
     }
 
     private fun addCompletedLocked(frame: DecodedFrame, sequence: Long) {
-        if (sequence < nextOutput) return
+        if (sequence < nextOutput) {
+            lateCompletions++
+            return
+        }
         val bounded = if (frame.yuv != null && frame.yuv.size.toLong() > maxCompletedBytes) {
             frame.copy(yuv = null)
         } else {
@@ -150,7 +187,10 @@ internal class MjpegDecodePool(
             val sequence = completed.firstKey()
             val removed = completed.remove(sequence) ?: break
             completedBytes -= removed.yuv?.size?.toLong() ?: 0L
-            if (sequence >= nextOutput) nextOutput = sequence + 1L
+            if (sequence >= nextOutput) {
+                outputSkippedSequences += sequence + 1L - nextOutput
+                nextOutput = sequence + 1L
+            }
         }
         while (completed.isNotEmpty() && completed.firstKey() < nextOutput) {
             val sequence = completed.firstKey()

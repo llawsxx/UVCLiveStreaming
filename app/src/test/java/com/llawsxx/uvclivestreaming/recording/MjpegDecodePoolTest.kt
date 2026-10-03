@@ -69,6 +69,36 @@ class MjpegDecodePoolTest {
             pool.offer(byteArrayOf(1), 1, 1, 1, 20L)
             assertNull(pool.poll(2_000)!!.yuv)
             assertEquals(20L, pool.poll(2_000)!!.timestampNs)
+            val diagnostics = pool.diagnostics()
+            assertEquals(2L, diagnostics.offered)
+            assertEquals(2L, diagnostics.decodeAttempts)
+            assertEquals(1L, diagnostics.decodeFailures)
+            assertEquals(0L, diagnostics.inputDrops)
+            assertEquals(0L, diagnostics.outputSkippedSequences)
+            assertEquals(1L, diagnostics.delivered)
         } finally { pool.close() }
+    }
+
+    @Test fun inputOverflowIsCountedSeparatelyFromDecodeFailure() {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val pool = MjpegDecodePool(decoder = { bytes, _, _, _ ->
+            if (bytes[0].toInt() == 0) {
+                started.countDown()
+                check(release.await(2, TimeUnit.SECONDS))
+            }
+            bytes
+        }, workerCount = 1, capacity = 1)
+        pool.start()
+        try {
+            pool.offer(byteArrayOf(0), 1, 1, 1, 0L)
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            pool.offer(byteArrayOf(1), 1, 1, 1, 1L)
+            pool.offer(byteArrayOf(2), 1, 1, 1, 2L)
+            val diagnostics = pool.diagnostics()
+            assertEquals(3L, diagnostics.offered)
+            assertEquals(1L, diagnostics.inputDrops)
+            assertEquals(0L, diagnostics.decodeFailures)
+        } finally { release.countDown(); pool.close() }
     }
 }

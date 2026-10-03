@@ -537,6 +537,8 @@ data class RecordingStats(
     val audioLevelDb: Float = -60f,
     val rawFrameBufferUsed: Int = 0,
     val rawFrameBufferCapacity: Int = 0,
+    /** Encoded video FPS over the most recent approximately five-second window. */
+    val recentFps: Double? = null,
 )
 
 data class CameraExposureState(

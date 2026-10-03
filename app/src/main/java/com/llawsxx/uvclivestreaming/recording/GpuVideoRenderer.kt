@@ -36,6 +36,8 @@ internal class GpuVideoRenderer(
     private var textureHeight = 0
     private var textureLayout = -1
     private var lastEncodedTimestamp = Long.MIN_VALUE
+    var encodedFrameCount = 0L
+        private set
     private var closed = false
     private var colorMatrix = initialMatrix
     private var sourceRange = initialSourceRange
@@ -114,6 +116,7 @@ internal class GpuVideoRenderer(
             check(EGLExt.eglPresentationTimeANDROID(display, encoderWindow, frame.timestampNs))
             check(EGL14.eglSwapBuffers(display, encoderWindow)) { "编码 EGL 提交失败" }
             lastEncodedTimestamp = frame.timestampNs
+            encodedFrameCount++
         }
         if (!showPreview) return false
         return try {
