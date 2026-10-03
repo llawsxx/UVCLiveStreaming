@@ -81,6 +81,10 @@ import com.llawsxx.uvclivestreaming.recording.UsbRecorderEngine
 import com.llawsxx.uvclivestreaming.recording.UsbVideoInputFormat
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
 import com.llawsxx.uvclivestreaming.recording.VideoCodec
+import com.llawsxx.uvclivestreaming.recording.VideoColorRange
+import com.llawsxx.uvclivestreaming.recording.VideoColorStandard
+import com.llawsxx.uvclivestreaming.recording.VideoColorMatrix
+import com.llawsxx.uvclivestreaming.recording.VideoColorTransfer
 import com.llawsxx.uvclivestreaming.recording.usbPcmLevelDb
 import com.llawsxx.uvclivestreaming.ui.theme.UVCLiveStreamingTheme
 import java.util.concurrent.CountDownLatch
@@ -191,6 +195,11 @@ private fun UsbCameraScreen() {
     var bitrateMode by rememberSaveable { mutableStateOf(uiSettings.bitrateMode) }
     var yuvMatrix by rememberSaveable { mutableStateOf(uiSettings.yuvMatrix) }
     var sourceRange by rememberSaveable { mutableStateOf(uiSettings.sourceRange) }
+    var forceSpsVui by rememberSaveable { mutableStateOf(uiSettings.forceSpsVui) }
+    var rewriteColorRange by rememberSaveable { mutableStateOf(uiSettings.rewriteColorRange) }
+    var rewriteColorStandard by rememberSaveable { mutableStateOf(uiSettings.rewriteColorStandard) }
+    var rewriteColorMatrix by rememberSaveable { mutableStateOf(uiSettings.rewriteColorMatrix) }
+    var rewriteColorTransfer by rememberSaveable { mutableStateOf(uiSettings.rewriteColorTransfer) }
     var matrixExpanded by remember { mutableStateOf(false) }
     var sourceRangeExpanded by remember { mutableStateOf(false) }
     var codecExpanded by remember { mutableStateOf(false) }
@@ -249,6 +258,7 @@ private fun UsbCameraScreen() {
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         timestampSmoothingMaxDeltaSeconds,
+        forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
     ) {
         UsbUiPreferences.save(context, UsbUiSettings(
             selectedDeviceName = selectedName,
@@ -268,6 +278,11 @@ private fun UsbCameraScreen() {
             bufferFrames = bufferFrames,
             yuvMatrix = yuvMatrix,
             sourceRange = sourceRange,
+            forceSpsVui = forceSpsVui,
+            rewriteColorRange = rewriteColorRange,
+            rewriteColorStandard = rewriteColorStandard,
+            rewriteColorMatrix = rewriteColorMatrix,
+            rewriteColorTransfer = rewriteColorTransfer,
             timestampSmoothingEnabled = timestampSmoothingEnabled,
             timestampSmoothingNtscEnabled = timestampSmoothingNtscEnabled,
             timestampSmoothingMaxDeltaSeconds = timestampSmoothingMaxDeltaSeconds,
@@ -490,6 +505,7 @@ private fun UsbCameraScreen() {
                 bFrames.toIntOrNull()?.coerceIn(0, 4) ?: 0,
                 timestampSmoothingEnabled, timestampSmoothingNtscEnabled, timestampSmoothingDelta ?: 0.1,
                 yuvMatrix, sourceRange,
+                forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
             )
             ConfigPreferences.save(context, config)
             previous?.stop {
@@ -595,6 +611,22 @@ private fun UsbCameraScreen() {
                     sourceRange = range; sourceRangeExpanded = false
                 })
             }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = forceSpsVui, onCheckedChange = { forceSpsVui = it }, enabled = !recording)
+            Text("重写编码后 H.26x 颜色元数据")
+        }
+        if (forceSpsVui) {
+            Text("以下设置用于录像和串流输出的颜色标记。",
+                style = MaterialTheme.typography.bodySmall)
+            UsbColorRewriteChoice("Range（范围）", VideoColorRange.entries, rewriteColorRange, !recording,
+                { if (it == VideoColorRange.DEFAULT) "保持原值" else it.label }) { rewriteColorRange = it }
+            UsbColorRewriteChoice("Primaries（色域）", VideoColorStandard.entries, rewriteColorStandard, !recording,
+                { if (it == VideoColorStandard.DEFAULT) "保持原值" else it.label }) { rewriteColorStandard = it }
+            UsbColorRewriteChoice("Transfer（传递函数）", VideoColorTransfer.entries, rewriteColorTransfer, !recording,
+                { if (it == VideoColorTransfer.DEFAULT) "保持原值" else it.label }) { rewriteColorTransfer = it }
+            UsbColorRewriteChoice("Matrix（矩阵系数）", VideoColorMatrix.entries, rewriteColorMatrix, !recording,
+                { if (it == VideoColorMatrix.DEFAULT) "保持原值" else it.label }) { rewriteColorMatrix = it }
         }
         OutlinedButton(onClick = { modesExpanded = true }, enabled = !recording,
             modifier = Modifier.fillMaxWidth()) {
@@ -796,6 +828,24 @@ private fun UsbCameraScreen() {
     }
 }
 
+@Composable
+private fun <T> UsbColorRewriteChoice(label: String, values: List<T>, selected: T, enabled: Boolean,
+                                     valueLabel: (T) -> String, onSelect: (T) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+            Text("$label：${valueLabel(selected)}")
+        }
+        DropdownMenu(expanded = expanded && enabled, onDismissRequest = { expanded = false }) {
+            values.forEach { value ->
+                DropdownMenuItem(text = { Text(valueLabel(value)) }, onClick = {
+                    onSelect(value); expanded = false
+                })
+            }
+        }
+    }
+}
+
 private fun usbVideoDevices(manager: UsbManager): List<UsbDevice> = manager.deviceList.values
     .filter { device -> (0 until device.interfaceCount).any { device.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_VIDEO } }
     .sortedBy { it.deviceName }
@@ -807,7 +857,10 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
                                gopSeconds: Int, bFrames: Int,
                                timestampSmoothingEnabled: Boolean, timestampSmoothingNtscEnabled: Boolean,
                                timestampSmoothingMaxDeltaSeconds: Double,
-                               yuvMatrix: UsbYuvMatrix, sourceRange: UsbSourceRange): RecordingConfig {
+                               yuvMatrix: UsbYuvMatrix, sourceRange: UsbSourceRange,
+                               forceSpsVui: Boolean, rewriteColorRange: VideoColorRange,
+                               rewriteColorStandard: VideoColorStandard, rewriteColorMatrix: VideoColorMatrix,
+                               rewriteColorTransfer: VideoColorTransfer): RecordingConfig {
     val saved = ConfigPreferences.load(context)
     return RecordingConfig(
         mode = if (audio) RecordingMode.AUDIO_VIDEO else RecordingMode.VIDEO,
@@ -820,6 +873,11 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
         usbVideoBufferFrames = bufferFrames,
         usbYuvMatrix = yuvMatrix,
         usbSourceRange = sourceRange,
+        forceSpsVui = forceSpsVui,
+        rewriteColorRange = rewriteColorRange,
+        rewriteColorStandard = rewriteColorStandard,
+        rewriteColorMatrix = rewriteColorMatrix,
+        rewriteColorTransfer = rewriteColorTransfer,
         usbTimestampSmoothingEnabled = timestampSmoothingEnabled,
         usbTimestampSmoothingNtscEnabled = timestampSmoothingNtscEnabled,
         usbTimestampSmoothingMaxDeltaSeconds = timestampSmoothingMaxDeltaSeconds,

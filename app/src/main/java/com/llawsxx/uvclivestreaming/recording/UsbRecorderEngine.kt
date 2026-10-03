@@ -55,6 +55,7 @@ class UsbRecorderEngine(
     private var videoCodec: MediaCodec? = null
     private var audioCodec: MediaCodec? = null
     private val outputs = EncodedOutputRouter<MediaFormat>(::onOutputFailure)
+    private val vuiRewriter = if (config.spsVuiRewriteEnabled) H26xVuiRewriter(config) else null
     @Volatile private var outputFactory: UsbEncodedOutputFactory? = null
     private val outputChanges = AtomicInteger()
     private val outputCommands = Executors.newSingleThreadExecutor { action ->
@@ -268,7 +269,8 @@ class UsbRecorderEngine(
                     val index = codec.dequeueOutputBuffer(info, 10_000)
                     when {
                         index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                            outputs.setVideoFormat(codec.outputFormat)
+                            val format = codec.outputFormat
+                            outputs.setVideoFormat(vuiRewriter?.rewriteFormat(format) ?: format)
                             videoFormatReady = true
                             markStarted()
                         }
@@ -279,7 +281,9 @@ class UsbRecorderEngine(
                                         (info.presentationTimeUs - startedAtNs / 1_000).coerceAtLeast(0), info.flags)
                                 }
                                 codec.getOutputBuffer(index)?.let {
-                                    outputs.write(EncodedSample(true, copyBuffer(it, adjusted), adjusted.presentationTimeUs,
+                                    val encoded = copyBuffer(it, adjusted)
+                                    val rewritten = vuiRewriter?.rewrite(encoded) ?: encoded
+                                    outputs.write(EncodedSample(true, rewritten, adjusted.presentationTimeUs,
                                         adjusted.flags, adjusted.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0))
                                 }
                                 frameCount.incrementAndGet()

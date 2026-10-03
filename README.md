@@ -16,6 +16,10 @@ Android USB camera recorder and streamer.
   accepts 16-512 kbps, and is saved for subsequent sessions. Recording and
   streaming use the same audio encoder settings.
 - Selectable BT.601/BT.709/BT.2020 NCL/SMPTE 240M YUV-to-RGB conversion and automatic/TV/full source range, shared by preview and encoding.
+- Optional encoded H.264/HEVC SPS/VUI color rewriting with independent Range,
+  Primaries, Transfer and Matrix selections; each field can preserve its original
+  value. Codec configuration and in-band SPS are rewritten once before all
+  recording/streaming outputs, without changing video pixels or timestamps.
 
 MJPG currently uses libjpeg-turbo software decoding. Android does not guarantee a portable `video/mjpeg` hardware decoder through MediaCodec, so software decoding is the reliable path.
 

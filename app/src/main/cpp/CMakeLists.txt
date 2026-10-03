@@ -7,6 +7,8 @@ add_library(
     SHARED
     mpegts_muxer.c
     mpegts_jni.c
+    h26x_vui_rewriter.c
+    h26x_vui_jni.c
 )
 
 target_compile_features(uvclivestreaming_mpegts PRIVATE c_std_11)

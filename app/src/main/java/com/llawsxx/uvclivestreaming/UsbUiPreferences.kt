@@ -7,6 +7,10 @@ import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
 import com.llawsxx.uvclivestreaming.recording.VideoCodec
 import com.llawsxx.uvclivestreaming.recording.UsbYuvMatrix
 import com.llawsxx.uvclivestreaming.recording.UsbSourceRange
+import com.llawsxx.uvclivestreaming.recording.VideoColorRange
+import com.llawsxx.uvclivestreaming.recording.VideoColorStandard
+import com.llawsxx.uvclivestreaming.recording.VideoColorMatrix
+import com.llawsxx.uvclivestreaming.recording.VideoColorTransfer
 
 internal data class UsbUiSettings(
     val selectedDeviceName: String? = null,
@@ -26,6 +30,11 @@ internal data class UsbUiSettings(
     val bufferFrames: Int = 2,
     val yuvMatrix: UsbYuvMatrix = UsbYuvMatrix.BT601,
     val sourceRange: UsbSourceRange = UsbSourceRange.AUTO,
+    val forceSpsVui: Boolean = false,
+    val rewriteColorRange: VideoColorRange = VideoColorRange.LIMITED,
+    val rewriteColorStandard: VideoColorStandard = VideoColorStandard.BT709,
+    val rewriteColorMatrix: VideoColorMatrix = VideoColorMatrix.BT709,
+    val rewriteColorTransfer: VideoColorTransfer = VideoColorTransfer.BT709,
     val timestampSmoothingEnabled: Boolean = true,
     val timestampSmoothingNtscEnabled: Boolean = false,
     val timestampSmoothingMaxDeltaSeconds: String = "0.1",
@@ -58,6 +67,11 @@ internal object UsbUiPreferences {
             bufferFrames = p.getInt("bufferFrames", 2).coerceIn(1, 30),
             yuvMatrix = enumValue(p.getString("yuvMatrix", null), UsbYuvMatrix.BT601),
             sourceRange = enumValue(p.getString("sourceRange", null), UsbSourceRange.AUTO),
+            forceSpsVui = p.getBoolean("forceSpsVui", false),
+            rewriteColorRange = enumValue(p.getString("rewriteColorRange", null), VideoColorRange.LIMITED),
+            rewriteColorStandard = enumValue(p.getString("rewriteColorStandard", null), VideoColorStandard.BT709),
+            rewriteColorMatrix = enumValue(p.getString("rewriteColorMatrix", null), VideoColorMatrix.BT709),
+            rewriteColorTransfer = enumValue(p.getString("rewriteColorTransfer", null), VideoColorTransfer.BT709),
             timestampSmoothingEnabled = p.getBoolean("timestampSmoothingEnabled", true),
             timestampSmoothingNtscEnabled = p.getBoolean("timestampSmoothingNtscEnabled", false),
             timestampSmoothingMaxDeltaSeconds = p.getString("timestampSmoothingMaxDeltaSeconds", "0.1").orEmpty(),
@@ -86,6 +100,11 @@ internal object UsbUiPreferences {
             .putInt("bufferFrames", settings.bufferFrames.coerceIn(1, 30))
             .putString("yuvMatrix", settings.yuvMatrix.name)
             .putString("sourceRange", settings.sourceRange.name)
+            .putBoolean("forceSpsVui", settings.forceSpsVui)
+            .putString("rewriteColorRange", settings.rewriteColorRange.name)
+            .putString("rewriteColorStandard", settings.rewriteColorStandard.name)
+            .putString("rewriteColorMatrix", settings.rewriteColorMatrix.name)
+            .putString("rewriteColorTransfer", settings.rewriteColorTransfer.name)
             .putBoolean("timestampSmoothingEnabled", settings.timestampSmoothingEnabled)
             .putBoolean("timestampSmoothingNtscEnabled", settings.timestampSmoothingNtscEnabled)
             .putString("timestampSmoothingMaxDeltaSeconds", settings.timestampSmoothingMaxDeltaSeconds)
