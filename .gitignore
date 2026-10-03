@@ -1,0 +1,34 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Machine-local IDE state and build caches
+/.idea/
+/.gradle-user/
+/.kotlin/
+**/build/
+/ninja.log
+
+# Generated packages and private signing/configuration files
+*.apk
+*.aab
+*.jks
+*.keystore
+/.env
+/.env.*
+
+# Python asset-generation cache
+__pycache__/
+*.pyc

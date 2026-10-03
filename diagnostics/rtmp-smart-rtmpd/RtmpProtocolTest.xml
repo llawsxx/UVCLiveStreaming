@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-10-03T15:02:40.752Z" hostname="PC-20231030HSXX" time="0.003">
+  <properties/>
+  <testcase name="receiverReassemblesInterleavedChunkStreams" classname="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" time="0.0"/>
+  <testcase name="outgoingMessagesUse128ByteChunksUntilNegotiated" classname="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" time="0.0"/>
+  <testcase name="receiverSupportsAllCompressedHeaderTypes" classname="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" time="0.0"/>
+  <testcase name="truncatedMessagesFailRatherThanReturningPartialCommands" classname="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" time="0.001"/>
+  <testcase name="negotiatedChunksAndExtendedTimestampsRoundTrip" classname="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" time="0.0"/>
+  <testcase name="largeServerChunkStreamIdsAreSupported" classname="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" time="0.0"/>
+  <testcase name="amfDecodesTransactionsAndStreamIdsStructurally" classname="com.llawsxx.uvclivestreaming.recording.RtmpProtocolTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

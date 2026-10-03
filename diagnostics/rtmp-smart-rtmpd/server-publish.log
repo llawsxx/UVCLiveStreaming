@@ -1,0 +1,32 @@
+﻿00000D30 [26-10- 3 23:04:33.480] I: rtmp-none(obj: 0E0BC5B8, ip: 192.168.10.165:44624, sock: 3404) set inchunk size to 4096
+000038B0 [26-10- 3 23:04:33.548] I: rtmp-none(obj: 0E0BC5B8, ip: 192.168.10.165:44624, sock: 3404) set inchunk size to 60000
+000038B0 [26-10- 3 23:04:33.548] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:44624, sock: 3404) stream connected.
+000038B0 [26-10- 3 23:04:33.550] I: rtmp-manager add application(obj: 0A5FF358, url: rtmp://192.168.10.166/live/stream)!
+000038B0 [26-10- 3 23:04:33.550] I: rtsp-manager add application(obj: 0E114EE0, url: rtsp://192.168.10.166:8554/live/stream)!
+000038B0 [26-10- 3 23:04:33.551] I: rtsp-manager add publisher(obj: 0A618880, url: rtsp://192.168.10.166:8554/live/stream)!
+000038B0 [26-10- 3 23:04:33.551] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) add rtsp(0A618880)
+000038B0 [26-10- 3 23:04:33.551] I: srt-manager add application(obj: 0E1156A8, url: srt://192.168.10.166:9000/live/stream)!
+000038B0 [26-10- 3 23:04:33.551] I: srt-manager add publisher(obj: 0E0E69C8, url: srt://192.168.10.166:9000/live/stream)!
+000038B0 [26-10- 3 23:04:33.551] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) add srt(0E0E69C8)
+000038B0 [26-10- 3 23:04:33.551] I: rtmp-manager add publisher(obj: 0E0BC5B8, url: rtmp://192.168.10.166/live/stream)!
+000038B0 [26-10- 3 23:04:33.552] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:44624, sock: 3404) build elapse 78 ms.
+00000D30 [26-10- 3 23:04:33.611] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:44624, sock: 3404) publish stream
+00000D30 [26-10- 3 23:04:33.611] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:44624, sock: 3404) transction id not zero.
+00007CE0 [26-10- 3 23:04:33.661] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) inital video(h264 size:1280x720 fps:0)
+00007CE0 [26-10- 3 23:04:33.662] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) inital audio(aac sample:48000 channel:2 bit:16)
+00008764 [26-10- 3 23:05:26.399] I: rtmp-none(obj: 0E0BC5B8, ip: 192.168.10.165:46636, sock: 3292) set inchunk size to 4096
+0000801C [26-10- 3 23:05:26.478] I: rtmp-none(obj: 0E0BC5B8, ip: 192.168.10.165:46636, sock: 3292) set inchunk size to 60000
+0000801C [26-10- 3 23:05:26.479] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:46636, sock: 3292) stream connected.
+0000801C [26-10- 3 23:05:26.479] I: rtsp-manager add application(obj: 0A647558, url: rtsp://192.168.10.166:8554/live/stream)!
+0000801C [26-10- 3 23:05:26.479] I: rtsp-manager add publisher(obj: 0A618880, url: rtsp://192.168.10.166:8554/live/stream)!
+0000801C [26-10- 3 23:05:26.479] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) add rtsp(0A618880)
+0000801C [26-10- 3 23:05:26.479] I: srt-manager add application(obj: 0E115810, url: srt://192.168.10.166:9000/live/stream)!
+0000801C [26-10- 3 23:05:26.479] I: srt-manager add publisher(obj: 0E0E5F80, url: srt://192.168.10.166:9000/live/stream)!
+0000801C [26-10- 3 23:05:26.479] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) add srt(0E0E5F80)
+0000801C [26-10- 3 23:05:26.479] I: rtmp-manager add publisher(obj: 0E0BC5B8, url: rtmp://192.168.10.166/live/stream)!
+0000801C [26-10- 3 23:05:26.479] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:46636, sock: 3292) build elapse 110 ms.
+00002A88 [26-10- 3 23:05:26.549] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:46636, sock: 3292) publish stream
+00002A88 [26-10- 3 23:05:26.549] I: rtmp-publisher(obj: 0E0BC5B8, ip: 192.168.10.165:46636, sock: 3292) transction id not zero.
+00007CE0 [26-10- 3 23:05:26.594] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) inital video(h264 size:1280x720 fps:0)
+00007CE0 [26-10- 3 23:05:26.594] I: rtmp-player(obj: 0E254128, ip: 127.0.0.1:11596, sock: 3420) inital video meta(sps)
+00007CE0 [26-10- 3 23:05:26.596] I: rtmp-app(obj:0A5FF358, url: rtmp://192.168.10.166/live/stream) inital audio(aac sample:48000 channel:2 bit:16)

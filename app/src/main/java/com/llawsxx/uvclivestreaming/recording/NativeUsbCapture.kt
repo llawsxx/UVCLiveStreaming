@@ -1,0 +1,42 @@
+package com.llawsxx.uvclivestreaming.recording
+
+import kotlin.math.log10
+import kotlin.math.sqrt
+
+/** RMS level of signed, little-endian PCM16 samples, in dBFS. */
+internal fun usbPcmLevelDb(bytes: ByteArray): Float {
+    val samples = bytes.size / 2
+    if (samples == 0) return -60f
+    var squares = 0.0
+    for (index in 0 until samples) {
+        val offset = index * 2
+        val sample = ((bytes[offset + 1].toInt() shl 8) or
+            (bytes[offset].toInt() and 0xff)).toShort().toInt()
+        squares += sample.toDouble() * sample
+    }
+    val rms = sqrt(squares / samples) / 32768.0
+    return (20.0 * log10(rms.coerceAtLeast(0.001))).toFloat().coerceIn(-60f, 0f)
+}
+
+internal interface UsbCaptureCallback {
+    /** Raw UVC frame: 1 MJPG, 2 YUYV, 3 UYVY, 4 RGB. */
+    fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long)
+    /** Signed 16-bit little-endian, interleaved PCM at the rate reported by nativeFormat. */
+    fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long)
+}
+
+internal object NativeUsbCapture {
+    init { System.loadLibrary("uvclivestreaming_usb") }
+
+    external fun nativeOpen(
+        fd: Int, width: Int, height: Int, fps: Int, videoFormat: Int, audio: Boolean, audioRate: Int,
+    ): Long
+    /** Format label, width, height, fps, input format value, and interval description. */
+    external fun nativeListVideoModes(fd: Int): Array<String>
+    /** Decode MJPEG or repack raw YUV into I420; never performs YUV-to-RGB conversion. */
+    external fun nativeDecodeToI420(bytes: ByteArray, format: Int, width: Int, height: Int): ByteArray?
+    /** [video width, video height, audio sample rate, audio channels]. */
+    external fun nativeFormat(handle: Long): IntArray
+    external fun nativeStart(handle: Long, callback: UsbCaptureCallback)
+    external fun nativeClose(handle: Long)
+}

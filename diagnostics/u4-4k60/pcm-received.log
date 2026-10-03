@@ -1,0 +1,50 @@
+﻿--------- beginning of main
+10-03 21:58:27.224  8669  8838 D UAC     : [uac_context.cpp:33/uac_context_impl] create context with usb context: 0xb4000076f7232690
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_device.cpp:122/uac_device_impl] try to scan device: 0bda:0102
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:58/uac_scan_device] found AUDIO Class interface, subclass=0x1, protocol=0
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:103/parse_audiocontrol] got HEADER descriptor. sizeof(9)
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:335/parse_ac_header] 	 got Audio Streaming interface at: 3
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(12) 36:2
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:358/parse_input_terminal] 	 got INPUT_TERMINAL 1: type=0x201
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(9) 36:3
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:374/parse_output_terminal] 	 got OUTPUT_TERMINAL 2: type=0x101
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(8) 36:6
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:413/parse_feature_unit] 	 FEATURE_UNIT 3 channel=0 controls=0x00000001
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:421/parse_feature_unit] 	 got FEATURE_UNIT 3: bSourceId=0x4 controlSize=1 masterControls=0x00000001 channels=0
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(7) 36:5
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:152/parse_audiocontrol] got SELECTOR_UNIT 4: pins=1
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:263/build_audio_topology] audio route chain : out 2 < unit 3 < unit 4 < in 1
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:638/uac_audio_route_impl] construct uac_audio_route_impl 0x757bff9d40
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:58/uac_scan_device] found AUDIO Class interface, subclass=0x2, protocol=0
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:191/scan_audiostreaming] parse AS interface 3
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:541/parse_audiostreaming_intf] parsing altsetting=1 descriptor...
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:560/parse_audiostreaming_intf] got AS_GENERAL descriptor
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:566/parse_audiostreaming_intf] got AS_FORMAT_TYPE descriptor
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:450/parse_as_format_type_1_3] AS FORMAT I: len=11 ch=2 subframe=2 bits=16 freqType=1
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:472/parse_as_format_type_1_3] supported freq 48000
+10-03 21:58:27.229  8669  8838 D UAC     : [uac_parser.cpp:614/parse_audiostreaming_intf] altsetting endpointAddress=83, wMaxPacketSize=208, endpoints=1
+10-03 21:58:27.252  8669  8838 D UAC     : [uac_device.cpp:261/start_streaming] claim AC intf(2)
+10-03 21:58:27.252  8669  8838 D UAC     : [uac_streaming.cpp:222/uac_stream_handle_impl] claim AS intf(3)
+10-03 21:58:27.252  8669  8838 D UAC     : [uac_streaming.cpp:255/start] configure iso packets: wMaxPacketSize=208, transfer_size=1664
+10-03 21:58:27.252  8669  8838 D UAC     : [uac_streaming.cpp:395/set_sampling_freq] set_sampling_freq (48000)
+10-03 21:58:27.266  8669  8838 D UAC     : [uac_streaming.cpp:268/start] set_altsetting 1 at intf(3) ep 0x83
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 0... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 1... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 2... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 3... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 4... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 5... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 6... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.276  8669  8838 D UAC     : [uac_streaming.cpp:306/start] submit transfer 7... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:58:27.283  8669  8840 W UAC     : [uac_streaming.cpp:62/cb] empty input packet count=1
+10-03 21:58:27.316  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=10 bytes=2080 peak16=0 Java batches=1
+10-03 21:58:32.324  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=5022 bytes=964476 peak16=156 Java batches=492
+10-03 21:58:37.324  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=10018 bytes=1923708 peak16=156 Java batches=979
+10-03 21:58:42.332  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=15024 bytes=2884864 peak16=156 Java batches=1470
+10-03 21:58:47.347  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=20040 bytes=3847932 peak16=156 Java batches=1961
+10-03 21:58:52.348  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=25045 bytes=4808892 peak16=156 Java batches=2449
+10-03 21:58:57.357  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=30048 bytes=5769472 peak16=156 Java batches=2937
+10-03 21:59:02.357  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=35052 bytes=6730236 peak16=156 Java batches=3426
+10-03 21:59:07.358  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=40047 bytes=7689280 peak16=156 Java batches=3915
+10-03 21:59:12.365  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=45060 bytes=8651776 peak16=156 Java batches=4406
+10-03 21:59:17.373  8669  8840 I UVCLiveStreamingUsb: USB PCM received: rate=48000 channels=2 packets=50065 bytes=9612732 peak16=156 Java batches=4896

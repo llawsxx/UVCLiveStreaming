@@ -1,0 +1,7 @@
+﻿--------- beginning of main
+10-03 21:23:56.998 27529 29217 W UVCLiveStreamingUsb: USB device exposes no UAC capture route; continuing without USB audio
+10-03 21:23:56.998 27529 29217 W UVCLiveStreamingUsb: USB UAC route found, but no compatible PCM rate; continuing without USB audio
+10-03 21:42:03.997 31700 31990 W UVCLiveStreamingUsb: USB device exposes no UAC capture route; continuing without USB audio
+10-03 21:42:21.147 31700 32139 W UVCLiveStreamingUsb: USB device exposes no UAC capture route; continuing without USB audio
+10-03 21:42:29.354 31700 32214 W UVCLiveStreamingUsb: USB device exposes no UAC capture route; continuing without USB audio
+10-03 21:45:29.141 32607   344 W UVCLiveStreamingUsb: USB device exposes no UAC capture route; continuing without USB audio

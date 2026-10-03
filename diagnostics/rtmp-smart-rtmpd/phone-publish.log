@@ -1,0 +1,15 @@
+﻿--------- beginning of main
+10-03 23:05:27.717 29959 30500 I RtmpStreamSink: TCP connect
+10-03 23:05:27.751 29959 30500 I RtmpStreamSink: handshake
+10-03 23:05:27.773 29959 30500 I RtmpStreamSink: connect
+10-03 23:05:27.853 29959 30500 I RtmpStreamSink: createStream
+10-03 23:05:27.921 29959 30500 I RtmpStreamSink: publish
+10-03 23:05:27.963 29959 30500 I RtmpStreamSink: NetStream.Publish.Start
+10-03 23:05:27.964 29959 30500 I RtmpStreamSink: NetStream.Publish.Start (streamId=1)
+10-03 23:07:11.322 29959 31453 I RtmpStreamSink: TCP connect
+10-03 23:07:11.351 29959 31453 I RtmpStreamSink: handshake
+10-03 23:07:11.376 29959 31453 I RtmpStreamSink: connect
+10-03 23:07:11.452 29959 31453 I RtmpStreamSink: createStream
+10-03 23:07:11.512 29959 31453 I RtmpStreamSink: publish
+10-03 23:07:11.516 29959 31453 I RtmpStreamSink: NetStream.Publish.Start
+10-03 23:07:11.516 29959 31453 I RtmpStreamSink: NetStream.Publish.Start (streamId=1)

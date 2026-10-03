@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.llawsxx.uvclivestreaming.recording.RtmpConnectionTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-03T15:02:40.661Z" hostname="PC-20231030HSXX" time="0.09">
+  <properties/>
+  <testcase name="stoppingClosesSocketDuringHandshake" classname="com.llawsxx.uvclivestreaming.recording.RtmpConnectionTest" time="0.028"/>
+  <testcase name="liveServerAcceptsPublishing" classname="com.llawsxx.uvclivestreaming.recording.RtmpConnectionTest" time="0.032"/>
+  <testcase name="publishingHandlesFragmentedResponsesTransactionsStreamIdAndLiveControl" classname="com.llawsxx.uvclivestreaming.recording.RtmpConnectionTest" time="0.025"/>
+  <testcase name="rejectedPublishReportsServerStatusAndClosesSocket" classname="com.llawsxx.uvclivestreaming.recording.RtmpConnectionTest" time="0.005"/>
+  <system-out><![CDATA[RTMP diagnostic: TCP connect
+RTMP diagnostic: handshake
+RTMP diagnostic: connect
+RTMP diagnostic: createStream
+RTMP diagnostic: publish
+RTMP diagnostic: NetStream.Publish.Start
+RTMP diagnostic: NetStream.Publish.Start (streamId=1)
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -1,0 +1,1027 @@
+package com.llawsxx.uvclivestreaming
+
+import android.Manifest
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
+import android.hardware.usb.UsbConstants
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.llawsxx.uvclivestreaming.recording.ConfigPreferences
+import com.llawsxx.uvclivestreaming.recording.ContainerFormat
+import com.llawsxx.uvclivestreaming.recording.NativeUsbCapture
+import com.llawsxx.uvclivestreaming.recording.MjpegDecodePool
+import com.llawsxx.uvclivestreaming.recording.GpuVideoFrame
+import com.llawsxx.uvclivestreaming.recording.GpuVideoRenderer
+import com.llawsxx.uvclivestreaming.recording.RecorderController
+import com.llawsxx.uvclivestreaming.recording.RecorderState
+import com.llawsxx.uvclivestreaming.recording.RecordingConfig
+import com.llawsxx.uvclivestreaming.recording.RecordingMode
+import com.llawsxx.uvclivestreaming.recording.UsbCaptureCallback
+import com.llawsxx.uvclivestreaming.recording.UsbYuvMatrix
+import com.llawsxx.uvclivestreaming.recording.UsbSourceRange
+import com.llawsxx.uvclivestreaming.recording.UsbRecorderEngine
+import com.llawsxx.uvclivestreaming.recording.UsbVideoInputFormat
+import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
+import com.llawsxx.uvclivestreaming.recording.VideoCodec
+import com.llawsxx.uvclivestreaming.recording.usbPcmLevelDb
+import com.llawsxx.uvclivestreaming.ui.theme.UVCLiveStreamingTheme
+import java.util.concurrent.CountDownLatch
+import java.io.Serializable
+import java.util.Locale
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.Semaphore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withContext
+
+class UsbCameraActivity : ComponentActivity() {
+    fun setUsbFullscreen(landscape: Boolean) {
+        window.decorView.systemUiVisibility = (android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+            or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+        requestedOrientation = if (landscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+
+    fun exitUsbFullscreen() {
+        window.decorView.systemUiVisibility = 0
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (UsbUiPreferences.load(this).keepScreenOn) {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        setContent {
+            UVCLiveStreamingTheme {
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    UsbCameraScreen()
+                }
+            }
+        }
+    }
+}
+
+private enum class UsbAction { NONE, PREVIEW, RECORD, STREAM, RTMP }
+
+private val usbPreviewGate = Semaphore(1)
+
+private data class UsbVideoMode(
+    val label: String, val width: Int, val height: Int, val fps: Int,
+    val inputFormat: UsbVideoInputFormat?, val detail: String,
+) : Serializable {
+    val canRecord: Boolean get() = inputFormat != null && width in 1..3840 &&
+        height in 1..2160 && fps in 1..240
+    val display: String get() = "$label · ${width}×$height · $fps fps" +
+        (if (detail.isBlank()) "" else " ($detail)") +
+        (if (canRecord) "" else " · 暂不可录制")
+}
+
+private fun parseUsbVideoMode(raw: String): UsbVideoMode? {
+    val parts = raw.split('|')
+    if (parts.size != 6) return null
+    val value = parts[4].toIntOrNull()
+    return UsbVideoMode(parts[0], parts[1].toIntOrNull() ?: return null,
+        parts[2].toIntOrNull() ?: return null, parts[3].toIntOrNull() ?: return null,
+        UsbVideoInputFormat.entries.firstOrNull { it.nativeValue == value }, parts[5])
+}
+
+@Composable
+private fun UsbCameraScreen() {
+    val context = LocalContext.current
+    val activity = context as? UsbCameraActivity
+    val uiSettings = remember { UsbUiPreferences.load(context) }
+    val manager = remember { context.getSystemService(UsbManager::class.java) }
+    val state by RecorderController.state.collectAsState()
+    val recording = state is RecorderState.Starting || state is RecorderState.Recording || state is RecorderState.Stopping
+    val streaming = (state as? RecorderState.Recording)?.stats?.let { it.httpStreaming || it.rtmpStreaming } == true
+    val fileRecording = (state as? RecorderState.Recording)?.stats?.fileRecording == true
+    val httpStreaming = (state as? RecorderState.Recording)?.stats?.httpStreaming == true
+    val rtmpStreaming = (state as? RecorderState.Recording)?.stats?.rtmpStreaming == true
+    val outputControlsEnabled = state !is RecorderState.Starting && state !is RecorderState.Stopping &&
+        (state as? RecorderState.Recording)?.stats?.outputChangePending != true
+    var devices by remember { mutableStateOf(usbVideoDevices(manager)) }
+    var selectedName by rememberSaveable { mutableStateOf(uiSettings.selectedDeviceName ?: devices.firstOrNull()?.deviceName) }
+    val selected = devices.firstOrNull { it.deviceName == selectedName }
+    var surface by remember { mutableStateOf<Surface?>(null) }
+    var surfaceRevision by remember { mutableStateOf(0) }
+    var idlePreview by remember { mutableStateOf<UsbIdlePreview?>(null) }
+    var pendingAction by remember { mutableStateOf(UsbAction.NONE) }
+    // Do not issue repeated requests while the system USB service is deciding
+    // (some vendor builds return permission=false without showing the dialog).
+    var usbPermissionRequestPending by remember { mutableStateOf(false) }
+    var usbPermissionEpoch by remember { mutableStateOf(0) }
+    var runtimePermissionEpoch by remember { mutableStateOf(0) }
+    var includeAudio by rememberSaveable { mutableStateOf(uiSettings.includeAudio) }
+    var previewEnabled by rememberSaveable { mutableStateOf(uiSettings.previewEnabled) }
+    var lowFrameRatePreview by rememberSaveable { mutableStateOf(uiSettings.lowFrameRatePreview) }
+    var keepScreenOn by rememberSaveable { mutableStateOf(uiSettings.keepScreenOn) }
+    var fullscreen by rememberSaveable { mutableStateOf(false) }
+    var container by rememberSaveable { mutableStateOf(uiSettings.container) }
+    var rtmpUrl by rememberSaveable { mutableStateOf(uiSettings.rtmpUrl) }
+    var videoBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.videoBitrateKbps) }
+    var audioBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.audioBitrateKbps) }
+    val audioBitrateValue = audioBitrateKbps.toIntOrNull()?.takeIf { it in 16..512 }
+    var gopSeconds by rememberSaveable { mutableStateOf(uiSettings.gopSeconds) }
+    var bFrames by rememberSaveable { mutableStateOf(uiSettings.bFrames) }
+    var videoCodec by rememberSaveable { mutableStateOf(uiSettings.videoCodec) }
+    var bitrateMode by rememberSaveable { mutableStateOf(uiSettings.bitrateMode) }
+    var yuvMatrix by rememberSaveable { mutableStateOf(uiSettings.yuvMatrix) }
+    var sourceRange by rememberSaveable { mutableStateOf(uiSettings.sourceRange) }
+    var matrixExpanded by remember { mutableStateOf(false) }
+    var sourceRangeExpanded by remember { mutableStateOf(false) }
+    var codecExpanded by remember { mutableStateOf(false) }
+    var bitrateModeExpanded by remember { mutableStateOf(false) }
+    var modes by remember { mutableStateOf<List<UsbVideoMode>>(emptyList()) }
+    var selectedMode by rememberSaveable { mutableStateOf<UsbVideoMode?>(null) }
+    var audioRate by rememberSaveable { mutableStateOf(uiSettings.audioRate) }
+    var bufferFrames by rememberSaveable { mutableStateOf(uiSettings.bufferFrames) }
+    var previewRequestRevision by remember { mutableStateOf(0L) }
+    var timestampSmoothingEnabled by rememberSaveable { mutableStateOf(uiSettings.timestampSmoothingEnabled) }
+    var timestampSmoothingNtscEnabled by rememberSaveable { mutableStateOf(uiSettings.timestampSmoothingNtscEnabled) }
+    var timestampSmoothingMaxDeltaSeconds by rememberSaveable { mutableStateOf(uiSettings.timestampSmoothingMaxDeltaSeconds) }
+    val timestampSmoothingDelta = timestampSmoothingMaxDeltaSeconds.toDoubleOrNull()
+        ?.takeIf { it.isFinite() && it >= 0 }
+    var previewRequested by rememberSaveable { mutableStateOf(false) }
+    var foregroundEpoch by remember { mutableStateOf(0) }
+    var idleAudioLevelDb by remember { mutableStateOf(-60f) }
+    val recordingAudioLevelDb by RecorderController.usbAudioLevelDb.collectAsState()
+    var modesReadyKey by remember { mutableStateOf<Pair<String?, Int>?>(null) }
+    var message by remember { mutableStateOf("选择 USB 摄像头并授权后即可预览或录像") }
+    var devicesExpanded by remember { mutableStateOf(false) }
+    var modesExpanded by remember { mutableStateOf(false) }
+    var ratesExpanded by remember { mutableStateOf(false) }
+    var bufferExpanded by remember { mutableStateOf(false) }
+    val audioRates = listOf(0, 16_000, 32_000, 44_100, 48_000, 96_000)
+    val bufferOptions = (1..30).toList()
+    val scrollState = rememberScrollState(uiSettings.scrollOffset)
+
+    LaunchedEffect(keepScreenOn) {
+        activity?.window?.let { window ->
+            if (keepScreenOn) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+    LaunchedEffect(scrollState.value) {
+        UsbUiPreferences.saveScrollOffset(context, scrollState.value)
+    }
+    DisposableEffect(activity) {
+        val owner = activity ?: return@DisposableEffect onDispose { }
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    idlePreview?.updateSurface(null)
+                    RecorderController.attachPreview(null, selectedMode?.width ?: 1280,
+                        selectedMode?.height ?: 720, enabled = false)
+                }
+                Lifecycle.Event.ON_RESUME -> foregroundEpoch++
+                else -> Unit
+            }
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(
+        selectedName, selectedMode?.display, includeAudio, previewEnabled, lowFrameRatePreview, keepScreenOn,
+        container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
+        bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
+        timestampSmoothingMaxDeltaSeconds,
+    ) {
+        UsbUiPreferences.save(context, UsbUiSettings(
+            selectedDeviceName = selectedName,
+            selectedModeDisplay = selectedMode?.display,
+            includeAudio = includeAudio,
+            previewEnabled = previewEnabled,
+            lowFrameRatePreview = lowFrameRatePreview,
+            container = container,
+            rtmpUrl = rtmpUrl,
+            videoBitrateKbps = videoBitrateKbps,
+            audioBitrateKbps = audioBitrateKbps,
+            gopSeconds = gopSeconds,
+            bFrames = bFrames,
+            videoCodec = videoCodec,
+            bitrateMode = bitrateMode,
+            audioRate = audioRate,
+            bufferFrames = bufferFrames,
+            yuvMatrix = yuvMatrix,
+            sourceRange = sourceRange,
+            timestampSmoothingEnabled = timestampSmoothingEnabled,
+            timestampSmoothingNtscEnabled = timestampSmoothingNtscEnabled,
+            timestampSmoothingMaxDeltaSeconds = timestampSmoothingMaxDeltaSeconds,
+            keepScreenOn = keepScreenOn,
+            scrollOffset = scrollState.value,
+        ))
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        runtimePermissionEpoch++
+        val cameraGranted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!cameraGranted) {
+            pendingAction = UsbAction.NONE
+            previewRequested = false
+            message = "未获得相机权限，无法录像或串流"
+        } else if (includeAudio && it.containsKey(Manifest.permission.RECORD_AUDIO) &&
+            it[Manifest.permission.RECORD_AUDIO] != true
+        ) {
+            // USB 音频是可选通道：拒绝麦克风权限时仍允许视频继续，
+            // 同时关闭音频，避免录像/串流整个流程被中止。
+            includeAudio = false
+            message = "未获得麦克风权限，已关闭音频，继续视频"
+        }
+    }
+
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context, intent: Intent) {
+                when (intent.action) {
+                    USB_PERMISSION_ACTION -> {
+                        usbPermissionRequestPending = false
+                        if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                            usbPermissionEpoch++
+                        } else {
+                            pendingAction = UsbAction.NONE
+                            // Stop the auto-preview effect from immediately
+                            // requesting again after an explicit denial.
+                            previewRequested = false
+                            message = "USB 权限被系统拒绝，请拔插设备后重新点击预览"
+                        }
+                    }
+                    UsbManager.ACTION_USB_DEVICE_ATTACHED, UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                        devices = usbVideoDevices(manager)
+                        if (devices.none { it.deviceName == selectedName }) {
+                            idlePreview?.stop()
+                            idlePreview = null
+                            if (RecorderController.state.value is RecorderState.Recording ||
+                                RecorderController.state.value is RecorderState.Starting
+                            ) RecorderController.stop(context)
+                            selectedName = devices.firstOrNull()?.deviceName
+                            selectedMode = null
+                            previewRequested = false
+                            usbPermissionRequestPending = false
+                        }
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(USB_PERMISSION_ACTION)
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        // The PendingIntent is package-scoped and the result is delivered back
+        // to this app. Keep the receiver private; exporting it can make some
+        // vendor USB permission managers reject the request outright.
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        onDispose {
+            context.unregisterReceiver(receiver)
+            idlePreview?.stop()
+            RecorderController.attachPreview(null)
+        }
+    }
+
+    LaunchedEffect(selectedName, usbPermissionEpoch) {
+        val scanKey = selectedName to usbPermissionEpoch
+        modesReadyKey = null
+        modes = emptyList()
+        val device = selected
+        if (device == null || !manager.hasPermission(device)) {
+            modesReadyKey = scanKey
+            return@LaunchedEffect
+        }
+        try {
+            val found = withContext(Dispatchers.IO) {
+                usbPreviewGate.acquire()
+                try {
+                val connection = checkNotNull(manager.openDevice(device)) { "无法打开 USB 摄像头" }
+                try { NativeUsbCapture.nativeListVideoModes(connection.fileDescriptor)
+                    .mapNotNull(::parseUsbVideoMode).distinct() }
+                finally { connection.close() }
+                } finally { usbPreviewGate.release() }
+            }
+            modes = found
+            if (selectedMode == null && uiSettings.selectedModeDisplay != null) {
+                selectedMode = found.firstOrNull { it.display == uiSettings.selectedModeDisplay }
+            }
+            if (selectedMode != null && selectedMode !in found) selectedMode = null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            message = "读取 USB 视频格式失败：${error.message}"
+        } finally {
+            modesReadyKey = scanKey
+        }
+    }
+
+    LaunchedEffect(surface, surfaceRevision, recording, previewEnabled, lowFrameRatePreview, foregroundEpoch) {
+        idlePreview?.updateSurface(surface)
+        RecorderController.attachPreview(surface, selectedMode?.width ?: 1280, selectedMode?.height ?: 720,
+            enabled = recording && previewEnabled && surface?.isValid == true, lowFrameRate = lowFrameRatePreview)
+    }
+
+    LaunchedEffect(idlePreview, yuvMatrix, sourceRange) {
+        idlePreview?.updateColorSettings(yuvMatrix, sourceRange)
+    }
+
+    LaunchedEffect(idlePreview, lowFrameRatePreview) {
+        idlePreview?.updateLowFrameRate(lowFrameRatePreview)
+    }
+
+    LaunchedEffect(surface, recording, previewRequested, modesReadyKey) {
+        if (previewRequested && !recording && surface?.isValid == true && idlePreview == null &&
+            pendingAction == UsbAction.NONE && modesReadyKey == (selectedName to usbPermissionEpoch)) {
+            pendingAction = UsbAction.PREVIEW
+        }
+    }
+
+    LaunchedEffect(pendingAction, selectedName, usbPermissionEpoch, runtimePermissionEpoch, modesReadyKey) {
+        if (pendingAction == UsbAction.NONE) return@LaunchedEffect
+        val device = selected ?: run {
+            pendingAction = UsbAction.NONE
+            message = "没有可用的 USB 摄像头"
+            return@LaunchedEffect
+        }
+        // Android P+ requires CAMERA runtime permission before USB permission
+        // can be granted for a USB video-class device. Request it first;
+        // requesting USB permission before CAMERA yields permission=false with
+        // no dialog on several devices.
+        if (pendingAction == UsbAction.PREVIEW ||
+            pendingAction == UsbAction.RECORD || pendingAction == UsbAction.STREAM ||
+            pendingAction == UsbAction.RTMP
+        ) {
+            val needed = buildList {
+                add(Manifest.permission.CAMERA)
+                if (pendingAction != UsbAction.PREVIEW && includeAudio) {
+                    add(Manifest.permission.RECORD_AUDIO)
+                }
+                if (pendingAction != UsbAction.PREVIEW && Build.VERSION.SDK_INT >= 33) {
+                    add(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+            if (needed.isNotEmpty()) {
+                permissionLauncher.launch(needed.toTypedArray())
+                return@LaunchedEffect
+            }
+        }
+        if (!manager.hasPermission(device)) {
+            if (usbPermissionRequestPending) return@LaunchedEffect
+            usbPermissionRequestPending = true
+            // The USB service appends EXTRA_DEVICE and
+            // EXTRA_PERMISSION_GRANTED to this PendingIntent, so it must be
+            // mutable on Android 12+.
+            val intent = Intent(USB_PERMISSION_ACTION).setPackage(context.packageName)
+            val flags = PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_MUTABLE
+            val requestCode = device.deviceId.coerceAtLeast(1)
+            manager.requestPermission(device, PendingIntent.getBroadcast(context, requestCode, intent, flags))
+            return@LaunchedEffect
+        }
+        usbPermissionRequestPending = false
+        if (modesReadyKey != (selectedName to usbPermissionEpoch)) return@LaunchedEffect
+        val requested = pendingAction
+        pendingAction = UsbAction.NONE
+        if (requested == UsbAction.PREVIEW) {
+            val requestRevision = ++previewRequestRevision
+            val target = surface?.takeIf { it.isValid }
+            if (target == null) {
+                message = "预览画面尚未准备好"
+            } else {
+                val previous = idlePreview
+                idlePreview = null
+                val width = selectedMode?.width ?: 1280
+                val height = selectedMode?.height ?: 720
+                val fps = selectedMode?.fps ?: 30
+                val videoFormat = selectedMode?.inputFormat ?: UsbVideoInputFormat.AUTO
+                val beginPreview: () -> Unit = {
+                    if (previewRequested && requestRevision == previewRequestRevision &&
+                        selectedName == device.deviceName && !recording && target.isValid) {
+                        UsbIdlePreview(manager, device, target, width, height, fps, videoFormat,
+                            bufferFrames, includeAudio, audioRate, yuvMatrix, sourceRange, lowFrameRatePreview,
+                            onMessage = { if (previewRequested) message = it },
+                            onAudioLevel = { if (previewRequested) idleAudioLevelDb = it }).also {
+                            idlePreview = it
+                            it.start()
+                        }
+                    }
+                }
+                previous?.stop(beginPreview) ?: beginPreview()
+            }
+        } else {
+            if (includeAudio && audioBitrateValue == null) {
+                message = "音频码率请输入 16～512 kbps 的整数"
+                return@LaunchedEffect
+            }
+            if (timestampSmoothingEnabled && timestampSmoothingDelta == null) {
+                message = "时间戳平滑最大偏差请输入大于或等于 0 的秒数"
+                return@LaunchedEffect
+            }
+            previewRequested = false
+            val previous = idlePreview
+            idlePreview = null
+            val config = usbRecordingConfig(
+                context, device, selectedMode, includeAudio, audioRate, bufferFrames, container,
+                requested == UsbAction.STREAM, requested == UsbAction.RTMP, rtmpUrl,
+                videoCodec, bitrateMode,
+                (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
+                (audioBitrateValue ?: 192) * 1_000,
+                gopSeconds.toIntOrNull()?.coerceIn(1, 30) ?: 2,
+                bFrames.toIntOrNull()?.coerceIn(0, 4) ?: 0,
+                timestampSmoothingEnabled, timestampSmoothingNtscEnabled, timestampSmoothingDelta ?: 0.1,
+                yuvMatrix, sourceRange,
+            )
+            ConfigPreferences.save(context, config)
+            previous?.stop {
+                if (requested == UsbAction.STREAM) RecorderController.startHttp(context, config)
+                else RecorderController.start(context, config)
+            } ?: if (requested == UsbAction.STREAM) RecorderController.startHttp(context, config)
+                else RecorderController.start(context, config)
+        }
+    }
+
+    if (fullscreen) {
+        Box(Modifier.fillMaxSize()) {
+            AndroidView(
+                factory = { viewContext -> SurfaceView(viewContext).apply {
+                    holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface; surfaceRevision++ }
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { surface = holder.surface; surfaceRevision++ }
+                        override fun surfaceDestroyed(holder: SurfaceHolder) { if (surface === holder.surface) surface = null }
+                    })
+                } },
+                modifier = Modifier.fillMaxSize(),
+            )
+            OutlinedButton(
+                onClick = { fullscreen = false; activity?.exitUsbFullscreen() },
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+            ) { Text("退出全屏") }
+        }
+        return
+    }
+
+    Column(
+        Modifier.fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .verticalScroll(scrollState)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("USB 摄像头串流", style = MaterialTheme.typography.headlineSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { devicesExpanded = true }, enabled = !recording) {
+                Text(selected?.productName?.takeIf { it.isNotBlank() } ?: selected?.deviceName ?: "选择摄像头")
+            }
+            DropdownMenu(expanded = devicesExpanded, onDismissRequest = { devicesExpanded = false }) {
+                devices.forEach { device ->
+                    DropdownMenuItem(text = { Text("${device.productName ?: "USB 摄像头"} · ${device.deviceName}") },
+                        onClick = {
+                            idlePreview?.stop()
+                            idlePreview = null
+                            previewRequested = false
+                            selectedMode = null
+                            selectedName = device.deviceName
+                            devicesExpanded = false
+                        })
+                }
+            }
+            OutlinedButton(onClick = {
+                devices = usbVideoDevices(manager)
+                if (devices.none { it.deviceName == selectedName }) selectedName = devices.firstOrNull()?.deviceName
+            }) { Text("刷新") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { codecExpanded = true }, enabled = !recording) { Text(videoCodec.label) }
+            DropdownMenu(expanded = codecExpanded, onDismissRequest = { codecExpanded = false }) {
+                VideoCodec.entries.forEach { codec -> DropdownMenuItem(text = { Text(codec.label) }, onClick = {
+                    videoCodec = codec; codecExpanded = false
+                }) }
+            }
+            OutlinedButton(onClick = { bitrateModeExpanded = true }, enabled = !recording) { Text(bitrateMode.label) }
+            DropdownMenu(expanded = bitrateModeExpanded, onDismissRequest = { bitrateModeExpanded = false }) {
+                VideoBitrateMode.entries.forEach { mode -> DropdownMenuItem(text = { Text(mode.label) }, onClick = {
+                    bitrateMode = mode; bitrateModeExpanded = false
+                }) }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(videoBitrateKbps, { videoBitrateKbps = it.filter(Char::isDigit) }, enabled = !recording,
+                singleLine = true, modifier = Modifier.weight(1f), label = { Text("视频码率 kbps") })
+            OutlinedTextField(gopSeconds, { gopSeconds = it.filter(Char::isDigit) }, enabled = !recording,
+                singleLine = true, modifier = Modifier.weight(1f), label = { Text("GOP 秒") })
+            OutlinedTextField(bFrames, { bFrames = it.filter(Char::isDigit) }, enabled = !recording,
+                singleLine = true, modifier = Modifier.weight(1f), label = { Text("B 帧") })
+        }
+        if (devices.isEmpty()) Text("没有检测到 UVC 视频接口；请连接 USB 摄像头。")
+        OutlinedButton(onClick = { matrixExpanded = true }, enabled = !recording,
+            modifier = Modifier.fillMaxWidth()) {
+            Text("YUV → RGB 矩阵：${yuvMatrix.label}")
+        }
+        DropdownMenu(expanded = matrixExpanded, onDismissRequest = { matrixExpanded = false }) {
+            UsbYuvMatrix.entries.forEach { matrix ->
+                DropdownMenuItem(text = { Text(matrix.label) }, onClick = {
+                    yuvMatrix = matrix; matrixExpanded = false
+                })
+            }
+        }
+        OutlinedButton(onClick = { sourceRangeExpanded = true }, enabled = !recording,
+            modifier = Modifier.fillMaxWidth()) {
+            Text("源范围：${sourceRange.label}")
+        }
+        DropdownMenu(expanded = sourceRangeExpanded, onDismissRequest = { sourceRangeExpanded = false }) {
+            UsbSourceRange.entries.forEach { range ->
+                DropdownMenuItem(text = { Text(range.label) }, onClick = {
+                    sourceRange = range; sourceRangeExpanded = false
+                })
+            }
+        }
+        OutlinedButton(onClick = { modesExpanded = true }, enabled = !recording,
+            modifier = Modifier.fillMaxWidth()) {
+            Text(selectedMode?.display ?: "自动 · 1280×720 · 30 fps")
+        }
+            DropdownMenu(expanded = modesExpanded, onDismissRequest = { modesExpanded = false }) {
+                DropdownMenuItem(text = { Text("自动 · 1280×720 · 30 fps") }, onClick = {
+                    selectedMode = null; modesExpanded = false
+                })
+                modes.forEach { mode ->
+                    DropdownMenuItem(text = { Text(mode.display) }, enabled = mode.canRecord,
+                        onClick = { selectedMode = mode; modesExpanded = false })
+                }
+            }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Checkbox(checked = includeAudio, onCheckedChange = { includeAudio = it }, enabled = !recording)
+            Text("USB 麦克风", modifier = Modifier.padding(top = 12.dp))
+            Checkbox(checked = previewEnabled, onCheckedChange = { previewEnabled = it })
+            Text("录制时预览", modifier = Modifier.padding(top = 12.dp))
+        }
+        OutlinedTextField(
+            value = audioBitrateKbps,
+            onValueChange = { audioBitrateKbps = it.filter(Char::isDigit) },
+            enabled = !recording && includeAudio,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            isError = includeAudio && audioBitrateValue == null,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("音频码率 kbps") },
+            supportingText = { Text(if (audioBitrateValue == null) "请输入 16～512 kbps 的整数"
+                else "AAC 编码码率；录像与串流共用，默认 192 kbps。") },
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Checkbox(checked = lowFrameRatePreview, onCheckedChange = { lowFrameRatePreview = it })
+            Text("低帧率预览（5 fps）", modifier = Modifier.padding(top = 12.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Checkbox(checked = keepScreenOn, onCheckedChange = { keepScreenOn = it })
+            Text("屏幕常亮", modifier = Modifier.padding(top = 12.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { ratesExpanded = true }, enabled = !recording && includeAudio) {
+                Text(if (audioRate == 0) "源采样率：自动" else "源采样率：$audioRate Hz")
+            }
+            DropdownMenu(expanded = ratesExpanded, onDismissRequest = { ratesExpanded = false }) {
+                audioRates.forEach { rate ->
+                    DropdownMenuItem(text = { Text(if (rate == 0) "自动" else "$rate Hz") }, onClick = {
+                        audioRate = rate; ratesExpanded = false
+                    })
+                }
+            }
+            OutlinedButton(onClick = { bufferExpanded = true }, enabled = !recording) {
+                Text("视频缓存：$bufferFrames 帧")
+            }
+            DropdownMenu(expanded = bufferExpanded, onDismissRequest = { bufferExpanded = false }) {
+                bufferOptions.forEach { count ->
+                    DropdownMenuItem(text = { Text("$count 帧") }, onClick = {
+                        bufferFrames = count; bufferExpanded = false
+                    })
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("录像格式")
+            ContainerFormat.entries.forEach { format ->
+                OutlinedButton(onClick = { container = format }, enabled = !fileRecording && outputControlsEnabled) {
+                    Text(if (container == format) "✓ ${format.label}" else format.label)
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Checkbox(checked = timestampSmoothingEnabled,
+                onCheckedChange = { timestampSmoothingEnabled = it }, enabled = !recording)
+            Text("音视频时间戳平滑", modifier = Modifier.padding(top = 12.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Checkbox(checked = timestampSmoothingNtscEnabled,
+                onCheckedChange = { timestampSmoothingNtscEnabled = it },
+                enabled = !recording && timestampSmoothingEnabled)
+            Text("按 NTSC 帧率平滑视频时间戳", modifier = Modifier.padding(top = 12.dp))
+        }
+        Text("开启后：60 → 59.94 fps，30 → 29.97 fps；音频仍按源采样率计算。",
+            style = MaterialTheme.typography.bodySmall)
+        OutlinedTextField(
+            value = timestampSmoothingMaxDeltaSeconds,
+            onValueChange = { timestampSmoothingMaxDeltaSeconds = it.filter { char -> char.isDigit() || char == '.' } },
+            enabled = !recording && timestampSmoothingEnabled,
+            singleLine = true,
+            isError = timestampSmoothingEnabled && timestampSmoothingDelta == null,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("时间戳最大偏差（秒）") },
+            supportingText = { Text(if (timestampSmoothingDelta == null) "请输入大于或等于 0 的秒数"
+                else "偏差不超过此值时使用计算时间戳；超过时跟随实际时间戳。") },
+        )
+        OutlinedTextField(
+            value = rtmpUrl,
+            onValueChange = { rtmpUrl = it },
+            enabled = !rtmpStreaming && outputControlsEnabled,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("RTMP 地址（可选）") },
+            placeholder = { Text("rtmp://服务器/app/串流密钥") },
+        )
+        AndroidView(
+            factory = { viewContext -> SurfaceView(viewContext).apply {
+                holder.addCallback(object : SurfaceHolder.Callback {
+                    override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface; surfaceRevision++ }
+                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                        surface = holder.surface; surfaceRevision++
+                    }
+                    override fun surfaceDestroyed(holder: SurfaceHolder) { if (surface === holder.surface) surface = null }
+                })
+            } },
+            modifier = Modifier.fillMaxWidth().height(if (fullscreen) 420.dp else 240.dp),
+        )
+        if (includeAudio) {
+            val levelDb = (if (recording) recordingAudioLevelDb else idleAudioLevelDb).coerceIn(-60f, 0f)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("USB 麦克风电平", style = MaterialTheme.typography.labelMedium)
+                Text("${String.format(Locale.US, "%.1f", levelDb)} dBFS",
+                    style = MaterialTheme.typography.labelMedium)
+            }
+            LinearProgressIndicator(progress = { (levelDb + 60f) / 60f },
+                modifier = Modifier.fillMaxWidth().height(8.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = {
+                fullscreen = true; activity?.setUsbFullscreen(false)
+            }) { Text("竖屏全屏") }
+            OutlinedButton(onClick = {
+                fullscreen = true; activity?.setUsbFullscreen(true)
+            }) { Text("横屏全屏") }
+            if (fullscreen) OutlinedButton(onClick = {
+                fullscreen = false; activity?.exitUsbFullscreen()
+            }) { Text("退出全屏") }
+        }
+        Text(message, style = MaterialTheme.typography.bodySmall)
+        if (state is RecorderState.Error) Text((state as RecorderState.Error).message, color = MaterialTheme.colorScheme.error)
+        if (state is RecorderState.Recording) {
+            val stats = (state as RecorderState.Recording).stats
+            val streamRate = stats.streamBitrateBitsPerSecond / 1000.0
+            val modes = buildList {
+                if (stats.fileRecording) add("录像中")
+                if (stats.httpStreaming) add("HTTP 串流中")
+                if (stats.rtmpStreaming) add("RTMP 推流中")
+            }.joinToString(" + ")
+            Text("$modes · 平均 ${String.format(Locale.US, "%.1f", stats.averageFps)} fps" +
+                if (streaming) " · 串流 ${String.format(Locale.US, "%.0f", streamRate)} kbps" else "")
+            stats.outputPath?.let { Text("文件：$it", style = MaterialTheme.typography.bodySmall) }
+            if (stats.outputChangePending) Text("正在切换输出…", style = MaterialTheme.typography.bodySmall)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { previewRequested = true; pendingAction = UsbAction.PREVIEW },
+                enabled = !recording && selected != null) {
+                Text("预览")
+            }
+            OutlinedButton(onClick = {
+                previewRequestRevision++
+                previewRequested = false
+                if (pendingAction == UsbAction.PREVIEW) pendingAction = UsbAction.NONE
+                idlePreview?.stop()
+                idlePreview = null
+                idleAudioLevelDb = -60f
+                message = "预览已停止"
+            }, enabled = !recording && (previewRequested || idlePreview != null || pendingAction == UsbAction.PREVIEW)) {
+                Text("停止预览")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                if (fileRecording) RecorderController.stopRecording(context)
+                else if (recording) RecorderController.startRecording(context, container)
+                else { previewRequested = false; pendingAction = UsbAction.RECORD }
+            }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                outputControlsEnabled) {
+                Text(if (fileRecording) "停止录制" else "开始录制")
+            }
+            OutlinedButton(onClick = {
+                if (httpStreaming) RecorderController.stopHttpOutput(context)
+                else if (recording) RecorderController.startHttpOutput(context)
+                else { previewRequested = false; pendingAction = UsbAction.STREAM }
+            }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                outputControlsEnabled) {
+                Text(if (httpStreaming) "停止 HTTP" else "HTTP 串流")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = {
+                if (rtmpStreaming) RecorderController.stopRtmpOutput(context)
+                else if (recording) RecorderController.startRtmpOutput(context, rtmpUrl)
+                else { previewRequested = false; pendingAction = UsbAction.RTMP }
+            }, enabled = selected != null && rtmpUrl.startsWith("rtmp://") &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && outputControlsEnabled,
+                modifier = Modifier.fillMaxWidth()) {
+                Text(if (rtmpStreaming) "停止 RTMP" else "RTMP 推流")
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+private fun usbVideoDevices(manager: UsbManager): List<UsbDevice> = manager.deviceList.values
+    .filter { device -> (0 until device.interfaceCount).any { device.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_VIDEO } }
+    .sortedBy { it.deviceName }
+
+private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVideoMode?, audio: Boolean,
+                               audioRate: Int, bufferFrames: Int, container: ContainerFormat,
+                               httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, videoCodec: VideoCodec,
+                               bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
+                               gopSeconds: Int, bFrames: Int,
+                               timestampSmoothingEnabled: Boolean, timestampSmoothingNtscEnabled: Boolean,
+                               timestampSmoothingMaxDeltaSeconds: Double,
+                               yuvMatrix: UsbYuvMatrix, sourceRange: UsbSourceRange): RecordingConfig {
+    val saved = ConfigPreferences.load(context)
+    return RecordingConfig(
+        mode = if (audio) RecordingMode.AUDIO_VIDEO else RecordingMode.VIDEO,
+        cameraId = UsbRecorderEngine.USB_CAMERA_PREFIX + device.deviceName,
+        width = mode?.width ?: 1280,
+        height = mode?.height ?: 720,
+        fps = (mode?.fps ?: 30).toDouble(),
+        usbVideoInputFormat = mode?.inputFormat ?: UsbVideoInputFormat.AUTO,
+        usbAudioSampleRate = audioRate,
+        usbVideoBufferFrames = bufferFrames,
+        usbYuvMatrix = yuvMatrix,
+        usbSourceRange = sourceRange,
+        usbTimestampSmoothingEnabled = timestampSmoothingEnabled,
+        usbTimestampSmoothingNtscEnabled = timestampSmoothingNtscEnabled,
+        usbTimestampSmoothingMaxDeltaSeconds = timestampSmoothingMaxDeltaSeconds,
+        videoCodec = videoCodec,
+        videoBitrate = videoBitrate,
+        videoBitrateMode = bitrateMode,
+        videoKeyFrameIntervalSeconds = gopSeconds,
+        videoMaxBFrames = bFrames,
+        audioBitrate = audioBitrate,
+        // Preserve the chosen recording container when starting a stream-only encoder session.
+        container = container,
+        httpStreamPort = saved.httpStreamPort,
+        httpBufferSeconds = saved.httpBufferSeconds,
+        httpStreamEnabled = httpEnabled,
+        httpServiceOnly = httpEnabled || rtmpEnabled,
+        rtmpEnabled = rtmpEnabled,
+        rtmpUrl = rtmpUrl,
+        outputTreeUri = saved.outputTreeUri,
+    )
+}
+
+private class UsbIdlePreview(
+    private val manager: UsbManager,
+    private val device: UsbDevice,
+    initialSurface: Surface,
+    private val width: Int,
+    private val height: Int,
+    private val fps: Int,
+    private val videoFormat: UsbVideoInputFormat,
+    bufferFrames: Int,
+    private val audioEnabled: Boolean,
+    private val audioRate: Int,
+    initialMatrix: UsbYuvMatrix,
+    initialSourceRange: UsbSourceRange,
+    initialLowFrameRate: Boolean,
+    private val onMessage: (String) -> Unit,
+    private val onAudioLevel: (Float) -> Unit,
+) : UsbCaptureCallback {
+    @Volatile private var surface: Surface? = initialSurface
+    @Volatile private var colorSettings = initialMatrix to initialSourceRange
+    @Volatile private var lowFrameRate = initialLowFrameRate
+    private data class Frame(
+        val bytes: ByteArray,
+        val format: Int,
+        val width: Int,
+        val height: Int,
+        val timestampNs: Long,
+    )
+    private val frameQueue = ArrayBlockingQueue<Frame>(bufferFrames.coerceIn(1, 30))
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val stopped = AtomicBoolean(false)
+    private val started = AtomicBoolean(false)
+    private val finished = CountDownLatch(1)
+    private val closed = CountDownLatch(1)
+    private var lastAudioLevelNs = 0L
+    private var renderThread: Thread? = null
+    private val previewRevision = AtomicLong()
+    private val mjpegDecodePool = MjpegDecodePool(
+        decoder = { bytes, format, frameWidth, frameHeight ->
+            NativeUsbCapture.nativeDecodeToI420(bytes, format, frameWidth, frameHeight)
+        },
+        capacity = bufferFrames.coerceIn(1, 30),
+    )
+
+    fun start() {
+        if (!started.compareAndSet(false, true)) return
+        mjpegDecodePool.start()
+        Thread({
+            var handle = 0L
+            var connection: android.hardware.usb.UsbDeviceConnection? = null
+            var gateAcquired = false
+            try {
+                usbPreviewGate.acquire()
+                gateAcquired = true
+                if (stopped.get()) return@Thread
+                connection = manager.openDevice(device)
+                checkNotNull(connection) { "无法打开 USB 摄像头" }
+                handle = NativeUsbCapture.nativeOpen(checkNotNull(connection).fileDescriptor, width, height, fps,
+                    videoFormat.nativeValue, audioEnabled, audioRate)
+                if (stopped.get()) return@Thread
+                val format = NativeUsbCapture.nativeFormat(handle)
+                mainHandler.post { onMessage("USB 预览：${format[0]}×${format[1]}") }
+                renderThread = Thread({ renderFrames() }, "usb-preview-render").apply { start() }
+                NativeUsbCapture.nativeStart(handle, this)
+                finished.await()
+            } catch (error: Throwable) {
+                if (!stopped.get()) mainHandler.post { onMessage("USB 预览失败：${error.message}") }
+            } finally {
+                if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
+                stopped.set(true)
+                frameQueue.clear()
+                mjpegDecodePool.close()
+                surface = null
+                renderThread?.interrupt()
+                runCatching { renderThread?.join(2_000) }
+                connection?.close()
+                if (gateAcquired) usbPreviewGate.release()
+                closed.countDown()
+            }
+        }, "usb-idle-preview").start()
+    }
+
+    fun updateSurface(newSurface: Surface?) {
+        surface = newSurface
+        previewRevision.incrementAndGet()
+    }
+
+    fun updateColorSettings(matrix: UsbYuvMatrix, range: UsbSourceRange) {
+        colorSettings = matrix to range
+    }
+
+    fun updateLowFrameRate(enabled: Boolean) { lowFrameRate = enabled }
+
+    fun stop(onStopped: (() -> Unit)? = null) {
+        stopped.set(true)
+        finished.countDown()
+        if (onStopped != null) Thread({
+            if (closed.await(10, TimeUnit.SECONDS)) mainHandler.post(onStopped)
+            else mainHandler.post { onMessage("USB 预览尚未释放，请稍后重试录制") }
+        }, "usb-preview-handoff").start()
+    }
+
+    override fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) {
+        if (stopped.get() || surface?.isValid != true) return
+        if (format == 1) {
+            mjpegDecodePool.offer(bytes, format, width, height, timestampNs)
+            return
+        }
+        val frame = Frame(bytes, format, width, height, timestampNs)
+        if (!frameQueue.offer(frame)) {
+            frameQueue.poll()
+            frameQueue.offer(frame)
+        }
+    }
+
+    private fun renderFrames() {
+        try {
+            GpuVideoRenderer().use { gpu ->
+                var reportStartedNs = System.nanoTime()
+                var renderedFrames = 0
+                var timestampOriginNs = Long.MIN_VALUE
+                var wallOriginNs = 0L
+                var boundRevision = -1L
+                while (!stopped.get()) {
+                    val decoded = mjpegDecodePool.poll(5)
+                    val frame = if (decoded != null) {
+                        decoded.yuv?.let {
+                            GpuVideoFrame(it, decoded.width, decoded.height, decoded.timestampNs, fullRange = true)
+                        } ?: continue
+                    } else {
+                        val raw = frameQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
+                        GpuVideoFrame.fromUsb(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs) ?: continue
+                    }
+                    val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate)
+                    val settings = colorSettings
+                    gpu.setColorSettings(settings.first, settings.second)
+                    if (target.surface?.isValid != true) continue
+                    val nowNs = System.nanoTime()
+                    if (timestampOriginNs == Long.MIN_VALUE || boundRevision != target.revision) {
+                        timestampOriginNs = frame.timestampNs
+                        wallOriginNs = nowNs
+                        boundRevision = target.revision
+                    }
+                    val targetNs = wallOriginNs + frame.timestampNs - timestampOriginNs
+                    if (nowNs - targetNs > 100_000_000L) {
+                        timestampOriginNs = frame.timestampNs
+                        wallOriginNs = nowNs
+                    } else if (targetNs > nowNs) {
+                        val waitNs = targetNs - nowNs
+                        Thread.sleep(waitNs / 1_000_000L, (waitNs % 1_000_000L).toInt())
+                    }
+                    if (stopped.get()) break
+                    if (gpu.render(frame, target)) renderedFrames++
+                    val reportNs = System.nanoTime()
+                    val elapsedNs = reportNs - reportStartedNs
+                    if (elapsedNs >= 1_000_000_000L) {
+                        val currentFps = renderedFrames * 1_000_000_000.0 / elapsedNs
+                        mainHandler.post {
+                            if (!stopped.get()) onMessage("USB 预览：${frame.width}×${frame.height} · " +
+                                String.format(Locale.US, "%.1f fps", currentFps))
+                        }
+                        renderedFrames = 0
+                        reportStartedNs = reportNs
+                    }
+                }
+            }
+        } catch (_: InterruptedException) {
+            // Normal preview shutdown.
+        } catch (error: Throwable) {
+            if (!stopped.get()) {
+                mainHandler.post { onMessage("USB GPU 预览失败：${error.message}") }
+                stop()
+            }
+        }
+    }
+
+    override fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long) {
+        if (stopped.get() || timestampNs - lastAudioLevelNs < 100_000_000L) return
+        lastAudioLevelNs = timestampNs
+        val level = usbPcmLevelDb(bytes)
+        mainHandler.post { if (!stopped.get()) onAudioLevel(level) }
+    }
+}
+
+private const val USB_PERMISSION_ACTION = "com.llawsxx.uvclivestreaming.USB_PERMISSION"

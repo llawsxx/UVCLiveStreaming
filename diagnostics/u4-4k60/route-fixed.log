@@ -1,0 +1,108 @@
+﻿--------- beginning of main
+10-03 21:52:38.353  4080  4646 W UAC     : [uac_streaming.cpp:62/cb] empty input packet count=1
+10-03 21:53:48.833  4080  4641 D UAC     : [uac_streaming.cpp:350/stop] Stop stream intf(3), altsetting=1
+10-03 21:53:48.833  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 8
+10-03 21:53:48.834  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 7
+10-03 21:53:48.834  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 6
+10-03 21:53:48.834  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 5
+10-03 21:53:48.834  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 4
+10-03 21:53:48.876  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 3
+10-03 21:53:48.876  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 2
+10-03 21:53:48.876  4080  4646 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 1
+10-03 21:53:48.876  4080  4641 D UAC     : [uac_streaming.cpp:367/stop] Free up transfers..
+10-03 21:53:48.876  4080  4641 D UAC     : [uac_streaming.cpp:243/~uac_stream_handle_impl] Destroy stream handle and release intf(3)
+10-03 21:53:49.078  4080  4641 V UAC     : [uac_device.cpp:228] begin close
+10-03 21:53:49.078  4080  4641 V UAC     : [uac_device.cpp:238] begin detach
+10-03 21:53:49.078  4080  4641 D UAC     : [uac_device.cpp:241/detach] release AC intf(2)
+10-03 21:53:49.178  4080  4641 D UAC     : [uac_context.cpp:59/~uac_context_impl] destroy context with usb context: 0xb4000076f7213bf0
+10-03 21:53:49.415  4080  5700 D UAC     : [uac_context.cpp:33/uac_context_impl] create context with usb context: 0xb4000076f72329b0
+10-03 21:53:49.418  4080  5700 D UAC     : [uac_device.cpp:122/uac_device_impl] try to scan device: 0bda:0102
+10-03 21:53:49.418  4080  5700 D UAC     : [uac_parser.cpp:58/uac_scan_device] found AUDIO Class interface, subclass=0x1, protocol=0
+10-03 21:53:49.418  4080  5700 D UAC     : [uac_parser.cpp:103/parse_audiocontrol] got HEADER descriptor. sizeof(9)
+10-03 21:53:49.418  4080  5700 D UAC     : [uac_parser.cpp:335/parse_ac_header] 	 got Audio Streaming interface at: 3
+10-03 21:53:49.418  4080  5700 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(12) 36:2
+10-03 21:53:49.418  4080  5700 D UAC     : [uac_parser.cpp:358/parse_input_terminal] 	 got INPUT_TERMINAL 1: type=0x201
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(9) 36:3
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:374/parse_output_terminal] 	 got OUTPUT_TERMINAL 2: type=0x101
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(8) 36:6
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:413/parse_feature_unit] 	 FEATURE_UNIT 3 channel=0 controls=0x00000001
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:421/parse_feature_unit] 	 got FEATURE_UNIT 3: bSourceId=0x4 controlSize=1 masterControls=0x00000001 channels=0
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(7) 36:5
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:152/parse_audiocontrol] got SELECTOR_UNIT 4: pins=1
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:263/build_audio_topology] audio route chain : out 2 < unit 3 < unit 4 < in 1
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:638/uac_audio_route_impl] construct uac_audio_route_impl 0x75d7bf9d40
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:58/uac_scan_device] found AUDIO Class interface, subclass=0x2, protocol=0
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:191/scan_audiostreaming] parse AS interface 3
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:541/parse_audiostreaming_intf] parsing altsetting=1 descriptor...
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:560/parse_audiostreaming_intf] got AS_GENERAL descriptor
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:566/parse_audiostreaming_intf] got AS_FORMAT_TYPE descriptor
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:450/parse_as_format_type_1_3] AS FORMAT I: len=11 ch=2 subframe=2 bits=16 freqType=1
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:472/parse_as_format_type_1_3] supported freq 48000
+10-03 21:53:49.419  4080  5700 D UAC     : [uac_parser.cpp:614/parse_audiostreaming_intf] altsetting endpointAddress=83, wMaxPacketSize=208, endpoints=1
+10-03 21:53:49.430  4080  5700 D UAC     : [uac_device.cpp:261/start_streaming] claim AC intf(2)
+10-03 21:53:49.431  4080  5700 D UAC     : [uac_streaming.cpp:222/uac_stream_handle_impl] claim AS intf(3)
+10-03 21:53:49.431  4080  5700 D UAC     : [uac_streaming.cpp:255/start] configure iso packets: wMaxPacketSize=208, transfer_size=1664
+10-03 21:53:49.431  4080  5700 D UAC     : [uac_streaming.cpp:395/set_sampling_freq] set_sampling_freq (48000)
+10-03 21:53:49.453  4080  5700 D UAC     : [uac_streaming.cpp:268/start] set_altsetting 1 at intf(3) ep 0x83
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 0... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 1... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 2... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 3... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 4... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 5... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 6... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.491  4080  5700 D UAC     : [uac_streaming.cpp:306/start] submit transfer 7... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:53:49.499  4080  5703 W UAC     : [uac_streaming.cpp:62/cb] empty input packet count=1
+10-03 21:54:00.377  4080  5700 D UAC     : [uac_streaming.cpp:350/stop] Stop stream intf(3), altsetting=1
+10-03 21:54:00.379  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 8
+10-03 21:54:00.379  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 7
+10-03 21:54:00.415  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 6
+10-03 21:54:00.415  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 5
+10-03 21:54:00.415  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 4
+10-03 21:54:00.415  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 3
+10-03 21:54:00.415  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 2
+10-03 21:54:00.415  4080  5703 D UAC     : [uac_streaming.cpp:103/cb] drop transfer... 1
+10-03 21:54:00.415  4080  5700 D UAC     : [uac_streaming.cpp:367/stop] Free up transfers..
+10-03 21:54:00.415  4080  5700 D UAC     : [uac_streaming.cpp:243/~uac_stream_handle_impl] Destroy stream handle and release intf(3)
+10-03 21:54:00.618  4080  5700 V UAC     : [uac_device.cpp:228] begin close
+10-03 21:54:00.619  4080  5700 V UAC     : [uac_device.cpp:238] begin detach
+10-03 21:54:00.619  4080  5700 D UAC     : [uac_device.cpp:241/detach] release AC intf(2)
+10-03 21:54:00.728  4080  5700 D UAC     : [uac_context.cpp:59/~uac_context_impl] destroy context with usb context: 0xb4000076f72329b0
+10-03 21:54:00.880  4080  5751 D UAC     : [uac_context.cpp:33/uac_context_impl] create context with usb context: 0xb4000076f72329b0
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_device.cpp:122/uac_device_impl] try to scan device: 0bda:0102
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:58/uac_scan_device] found AUDIO Class interface, subclass=0x1, protocol=0
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:103/parse_audiocontrol] got HEADER descriptor. sizeof(9)
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:335/parse_ac_header] 	 got Audio Streaming interface at: 3
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(12) 36:2
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:358/parse_input_terminal] 	 got INPUT_TERMINAL 1: type=0x201
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(9) 36:3
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:374/parse_output_terminal] 	 got OUTPUT_TERMINAL 2: type=0x101
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(8) 36:6
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:413/parse_feature_unit] 	 FEATURE_UNIT 3 channel=0 controls=0x00000001
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:421/parse_feature_unit] 	 got FEATURE_UNIT 3: bSourceId=0x4 controlSize=1 masterControls=0x00000001 channels=0
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:123/parse_audiocontrol] got descriptor sizeof(7) 36:5
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:152/parse_audiocontrol] got SELECTOR_UNIT 4: pins=1
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:263/build_audio_topology] audio route chain : out 2 < unit 3 < unit 4 < in 1
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:638/uac_audio_route_impl] construct uac_audio_route_impl 0x75d7fd1d40
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:58/uac_scan_device] found AUDIO Class interface, subclass=0x2, protocol=0
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:191/scan_audiostreaming] parse AS interface 3
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:541/parse_audiostreaming_intf] parsing altsetting=1 descriptor...
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:560/parse_audiostreaming_intf] got AS_GENERAL descriptor
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:566/parse_audiostreaming_intf] got AS_FORMAT_TYPE descriptor
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:450/parse_as_format_type_1_3] AS FORMAT I: len=11 ch=2 subframe=2 bits=16 freqType=1
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:472/parse_as_format_type_1_3] supported freq 48000
+10-03 21:54:00.888  4080  5751 D UAC     : [uac_parser.cpp:614/parse_audiostreaming_intf] altsetting endpointAddress=83, wMaxPacketSize=208, endpoints=1
+10-03 21:54:00.911  4080  5751 D UAC     : [uac_device.cpp:261/start_streaming] claim AC intf(2)
+10-03 21:54:00.911  4080  5751 D UAC     : [uac_streaming.cpp:222/uac_stream_handle_impl] claim AS intf(3)
+10-03 21:54:00.911  4080  5751 D UAC     : [uac_streaming.cpp:255/start] configure iso packets: wMaxPacketSize=208, transfer_size=1664
+10-03 21:54:00.911  4080  5751 D UAC     : [uac_streaming.cpp:395/set_sampling_freq] set_sampling_freq (48000)
+10-03 21:54:00.925  4080  5751 D UAC     : [uac_streaming.cpp:268/start] set_altsetting 1 at intf(3) ep 0x83
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 0... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 1... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 2... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 3... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 4... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 5... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 6... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.956  4080  5751 D UAC     : [uac_streaming.cpp:306/start] submit transfer 7... LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
+10-03 21:54:00.964  4080  5761 W UAC     : [uac_streaming.cpp:62/cb] empty input packet count=1
