@@ -641,6 +641,10 @@ uvc_error_t uvc_start_iso_streaming(
 
 void uvc_stop_streaming(uvc_device_handle_t *devh);
 
+/** Video endpoint bytes received, including UVC headers and rejected payloads.
+ * Caller must keep the device/stream handles alive during this read. */
+uint64_t uvc_get_received_video_bytes(uvc_device_handle_t *devh);
+
 uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh, uvc_stream_handle_t **strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_get_current_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
@@ -820,4 +824,3 @@ uvc_error_t uvc_mjpeg2gray(uvc_frame_t *in, uvc_frame_t *out);
 #endif
 
 #endif // !def(LIBUVC_H)
-

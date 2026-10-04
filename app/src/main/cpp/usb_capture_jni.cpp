@@ -15,6 +15,8 @@
 #include <thread>
 #include <vector>
 #include <unistd.h>
+#include <linux/usbdevice_fs.h>
+#include <sys/ioctl.h>
 #include "mjpeg_repair.h"
 
 extern "C" uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out);
@@ -291,11 +293,16 @@ public:
         if (!video_method_ || (audio_config_ && !audio_method_))
             throw std::runtime_error("USB callback methods unavailable");
         running_ = true;
+        // sysfs speed may be inaccessible on Android. Query the USB Host fd
+        // directly; this ioctl neither claims an interface nor changes it.
         __android_log_print(ANDROID_LOG_INFO, TAG,
-            "USB video negotiated: mode=%dx%d format=%d interval100ns=%u fps=%.6f maxFrame=%u maxPayload=%u",
+            "USB video link: kernelSpeedEnum=%d (3=HighSpeed480Mbps 5=SuperSpeed5Gbps 6=SuperSpeedPlus)",
+            ioctl(video_fd_, USBDEVFS_GET_SPEED, nullptr));
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+            "USB video negotiated: mode=%dx%d format=%d interval100ns=%u fps=%.6f maxFrame=%u maxPayload=%u clockHz=%u",
             width_, height_, supported_format(video_format_), video_ctrl_.dwFrameInterval,
             video_ctrl_.dwFrameInterval ? 10000000.0 / video_ctrl_.dwFrameInterval : 0.0,
-            video_ctrl_.dwMaxVideoFrameSize, video_ctrl_.dwMaxPayloadTransferSize);
+            video_ctrl_.dwMaxVideoFrameSize, video_ctrl_.dwMaxPayloadTransferSize, video_ctrl_.dwClockFrequency);
         event_thread_ = std::thread([this] {
             timeval timeout{0, 200000};
             while (running_) libusb_handle_events_timeout(usb_ctx_, &timeout);
@@ -346,6 +353,7 @@ public:
     int height() const { return height_; }
     int audio_rate() const { return audio_rate_; }
     int audio_channels() const { return audio_channels_; }
+    uint64_t received_video_bytes() const { return camera_ ? uvc_get_received_video_bytes(camera_) : 0; }
 
 private:
     static void video_callback(uvc_frame_t *frame, void *user) {
@@ -833,4 +841,10 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeStart(
 extern "C" JNIEXPORT void JNICALL
 Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeClose(JNIEnv *, jobject, jlong handle) {
     delete reinterpret_cast<UsbCapture *>(handle);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeReceivedVideoBytes(JNIEnv *, jobject, jlong handle) {
+    auto capture = reinterpret_cast<UsbCapture *>(handle);
+    return capture ? static_cast<jlong>(capture->received_video_bytes()) : 0;
 }

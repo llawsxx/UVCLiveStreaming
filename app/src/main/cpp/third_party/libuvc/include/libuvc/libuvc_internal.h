@@ -319,6 +319,22 @@ struct uvc_stream_handle {
   uint64_t diagnostic_bulk_repairs;
   size_t bulk_fixed_frame_size;
   uint64_t diagnostic_bulk_raw_repairs;
+  /* Receive-thread measurements; PTS presence is separate from its value
+   * because zero is valid at startup and at the 32-bit clock wrap. */
+  uint8_t diagnostic_pts_present, diagnostic_previous_pts_present;
+  uint32_t diagnostic_previous_pts;
+  uint64_t diagnostic_pts_samples, diagnostic_pts_ticks;
+  uint32_t diagnostic_pts_min, diagnostic_pts_max;
+  uint64_t diagnostic_pts_repeated, diagnostic_pts_backward, diagnostic_pts_missing;
+  uint64_t diagnostic_raw_short_frames, diagnostic_raw_long_frames, diagnostic_truncated_bytes;
+  int64_t diagnostic_previous_frame_ns, diagnostic_previous_callback_end_ns;
+  int64_t diagnostic_frame_ns, diagnostic_frame_min_ns, diagnostic_frame_max_ns;
+  uint64_t diagnostic_frame_intervals, diagnostic_long_frame_intervals;
+  int64_t diagnostic_in_frame_gap_max_ns, diagnostic_swap_wait_max_ns;
+  uint64_t diagnostic_in_frame_gaps_1ms, diagnostic_in_frame_gaps_3ms;
+  uint64_t diagnostic_transfer_bytes;
+  /* Access only with atomic builtins; UI/statistics readers run separately. */
+  uint64_t received_video_bytes;
 };
 
 /** Handle on an open UVC device

@@ -809,7 +809,42 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
 
   _uvc_check_frame_soi(strmh);
 
+  int64_t lock_start = _uvc_diagnostic_now();
   pthread_mutex_lock(&strmh->cb_mutex);
+  int64_t now = _uvc_diagnostic_now();
+  int64_t wait = now - lock_start;
+  if (wait > strmh->diagnostic_swap_wait_max_ns) strmh->diagnostic_swap_wait_max_ns = wait;
+
+  if (strmh->bulk_fixed_frame_size) {
+    if (strmh->got_bytes < strmh->bulk_fixed_frame_size) strmh->diagnostic_raw_short_frames++;
+    if (strmh->got_bytes > strmh->bulk_fixed_frame_size) strmh->diagnostic_raw_long_frames++;
+  }
+  if (strmh->diagnostic_previous_frame_ns) {
+    int64_t delta = now - strmh->diagnostic_previous_frame_ns;
+    if (!strmh->diagnostic_frame_intervals || delta < strmh->diagnostic_frame_min_ns)
+      strmh->diagnostic_frame_min_ns = delta;
+    if (delta > strmh->diagnostic_frame_max_ns) strmh->diagnostic_frame_max_ns = delta;
+    strmh->diagnostic_frame_ns += delta;
+    strmh->diagnostic_frame_intervals++;
+    if (strmh->cur_ctrl.dwFrameInterval && delta > (int64_t)strmh->cur_ctrl.dwFrameInterval * 150)
+      strmh->diagnostic_long_frame_intervals++;
+  }
+  strmh->diagnostic_previous_frame_ns = now;
+  if (!strmh->diagnostic_pts_present) strmh->diagnostic_pts_missing++;
+  else if (strmh->diagnostic_previous_pts_present) {
+    uint32_t delta = strmh->pts - strmh->diagnostic_previous_pts;
+    if (!delta) strmh->diagnostic_pts_repeated++;
+    else if (delta >= 0x80000000u) strmh->diagnostic_pts_backward++;
+    else {
+      if (!strmh->diagnostic_pts_samples || delta < strmh->diagnostic_pts_min)
+        strmh->diagnostic_pts_min = delta;
+      if (delta > strmh->diagnostic_pts_max) strmh->diagnostic_pts_max = delta;
+      strmh->diagnostic_pts_ticks += delta;
+      strmh->diagnostic_pts_samples++;
+    }
+  }
+  strmh->diagnostic_previous_pts_present = strmh->diagnostic_pts_present;
+  strmh->diagnostic_previous_pts = strmh->pts;
 
   (void)clock_gettime(CLOCK_MONOTONIC, &strmh->capture_time_finished);
 
@@ -836,6 +871,7 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
   strmh->meta_got_bytes = 0;
   strmh->last_scr = 0;
   strmh->pts = 0;
+  strmh->diagnostic_pts_present = 0;
 }
 
 /** @internal
@@ -939,6 +975,7 @@ static void _uvc_process_payload_data(uvc_stream_handle_t *strmh, uint8_t *paylo
 
     if (header_info & UVC_STREAM_PTS) {
       strmh->pts = DW_TO_INT(payload + variable_offset);
+      strmh->diagnostic_pts_present = 1;
       variable_offset += 4;
     }
 
@@ -959,8 +996,11 @@ static void _uvc_process_payload_data(uvc_stream_handle_t *strmh, uint8_t *paylo
   }
 
   if (data_len > 0) {
-    if (data_len > strmh->cur_ctrl.dwMaxVideoFrameSize - strmh->got_bytes)
+    if (data_len > strmh->cur_ctrl.dwMaxVideoFrameSize - strmh->got_bytes) {
+      strmh->diagnostic_truncated_bytes +=
+          data_len - (strmh->cur_ctrl.dwMaxVideoFrameSize - strmh->got_bytes);
       data_len = strmh->cur_ctrl.dwMaxVideoFrameSize - strmh->got_bytes; /* Avoid overflow. */
+    }
     memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
     strmh->got_bytes += data_len;
   }
@@ -1215,6 +1255,40 @@ static void _uvc_log_receive_diagnostics(uvc_stream_handle_t *strmh) {
         (unsigned long long)strmh->diagnostic_embedded_frame_headers,
         (unsigned long long)strmh->diagnostic_bulk_repairs, strmh->bulk_pending_bytes,
         (unsigned long long)strmh->diagnostic_bulk_raw_repairs);
+    __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+        "UVC receive timing: rawShort=%llu rawLong=%llu truncatedBytes=%llu "
+        "frameSamples=%llu frameMs[min/avg/max]=%.3f/%.3f/%.3f longFrames=%llu "
+        "ptsSamples=%llu ptsTicks[min/avg/max]=%u/%.3f/%u clockHz=%u "
+        "ptsMissing=%llu ptsRepeated=%llu ptsBackward=%llu "
+        "inFrameGapMaxUs=%lld inFrameGaps1ms=%llu inFrameGaps3ms=%llu swapWaitMaxUs=%lld receiveMBps=%.3f",
+        (unsigned long long)strmh->diagnostic_raw_short_frames,
+        (unsigned long long)strmh->diagnostic_raw_long_frames,
+        (unsigned long long)strmh->diagnostic_truncated_bytes,
+        (unsigned long long)strmh->diagnostic_frame_intervals,
+        strmh->diagnostic_frame_min_ns / 1000000.0,
+        strmh->diagnostic_frame_intervals ? strmh->diagnostic_frame_ns / 1000000.0 /
+            strmh->diagnostic_frame_intervals : 0.0,
+        strmh->diagnostic_frame_max_ns / 1000000.0,
+        (unsigned long long)strmh->diagnostic_long_frame_intervals,
+        (unsigned long long)strmh->diagnostic_pts_samples, strmh->diagnostic_pts_min,
+        strmh->diagnostic_pts_samples ? (double)strmh->diagnostic_pts_ticks /
+            strmh->diagnostic_pts_samples : 0.0, strmh->diagnostic_pts_max,
+        strmh->cur_ctrl.dwClockFrequency,
+        (unsigned long long)strmh->diagnostic_pts_missing,
+        (unsigned long long)strmh->diagnostic_pts_repeated,
+        (unsigned long long)strmh->diagnostic_pts_backward,
+        (long long)(strmh->diagnostic_in_frame_gap_max_ns / 1000),
+        (unsigned long long)strmh->diagnostic_in_frame_gaps_1ms,
+        (unsigned long long)strmh->diagnostic_in_frame_gaps_3ms,
+        (long long)(strmh->diagnostic_swap_wait_max_ns / 1000),
+        strmh->diagnostic_transfer_bytes * 1000.0 / (now - strmh->diagnostic_last_log_ns));
+    strmh->diagnostic_frame_intervals = strmh->diagnostic_long_frame_intervals = 0;
+    strmh->diagnostic_frame_ns = strmh->diagnostic_frame_min_ns = strmh->diagnostic_frame_max_ns = 0;
+    strmh->diagnostic_pts_samples = strmh->diagnostic_pts_ticks = 0;
+    strmh->diagnostic_pts_min = strmh->diagnostic_pts_max = 0;
+    strmh->diagnostic_in_frame_gap_max_ns = strmh->diagnostic_swap_wait_max_ns = 0;
+    strmh->diagnostic_in_frame_gaps_1ms = strmh->diagnostic_in_frame_gaps_3ms = 0;
+    strmh->diagnostic_transfer_bytes = 0;
     strmh->diagnostic_callback_max_ns = 0;
     strmh->diagnostic_last_log_ns = now;
   }
@@ -1226,6 +1300,15 @@ static void _uvc_log_receive_diagnostics(uvc_stream_handle_t *strmh) {
 void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
   uvc_stream_handle_t *strmh = transfer->user_data;
   int64_t callback_start = _uvc_diagnostic_now();
+  /* Restrict gap measurements to an unfinished frame: time between frames
+   * can simply be the source cadence. Gaps still include USB/device waits,
+   * so a large gap alone must not be described as host queue starvation. */
+  if (strmh->got_bytes && strmh->diagnostic_previous_callback_end_ns) {
+    int64_t gap = callback_start - strmh->diagnostic_previous_callback_end_ns;
+    if (gap > strmh->diagnostic_in_frame_gap_max_ns) strmh->diagnostic_in_frame_gap_max_ns = gap;
+    if (gap > 1000000) strmh->diagnostic_in_frame_gaps_1ms++;
+    if (gap > 3000000) strmh->diagnostic_in_frame_gaps_3ms++;
+  }
   if (transfer->status != LIBUSB_TRANSFER_COMPLETED && transfer->status != LIBUSB_TRANSFER_CANCELLED)
     strmh->diagnostic_transfer_errors++;
   if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
@@ -1237,7 +1320,17 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
   int resubmit = 1;
 
   switch (transfer->status) {
-  case LIBUSB_TRANSFER_COMPLETED:
+  case LIBUSB_TRANSFER_COMPLETED: {
+    uint64_t received = 0;
+    if (transfer->type == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
+      /* actual_length is not defined for ISO transfers; use packet lengths. */
+      for (int i = 0; i < transfer->num_iso_packets; ++i)
+        received += transfer->iso_packet_desc[i].actual_length;
+    } else {
+      received = transfer->actual_length;
+    }
+    strmh->diagnostic_transfer_bytes += received;
+    __atomic_fetch_add(&strmh->received_video_bytes, received, __ATOMIC_RELAXED);
     if (transfer->type != LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
       if (!transfer->actual_length) strmh->diagnostic_empty_transfers++;
       else if (transfer->actual_length < transfer->length) strmh->diagnostic_short_transfers++;
@@ -1265,7 +1358,8 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
       }
     }
     break;
-  case LIBUSB_TRANSFER_CANCELLED: 
+  }
+  case LIBUSB_TRANSFER_CANCELLED:
   case LIBUSB_TRANSFER_ERROR:
   case LIBUSB_TRANSFER_NO_DEVICE: {
     int i;
@@ -1349,9 +1443,19 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
       pthread_mutex_unlock(&strmh->cb_mutex);
     }
   }
-  int64_t callback_duration = _uvc_diagnostic_now() - callback_start;
+  strmh->diagnostic_previous_callback_end_ns = _uvc_diagnostic_now();
+  int64_t callback_duration = strmh->diagnostic_previous_callback_end_ns - callback_start;
   if (callback_duration > strmh->diagnostic_callback_max_ns)
     strmh->diagnostic_callback_max_ns = callback_duration;
+}
+
+uint64_t uvc_get_received_video_bytes(uvc_device_handle_t *devh) {
+  uint64_t bytes = 0;
+  uvc_stream_handle_t *strmh;
+  DL_FOREACH(devh->streams, strmh) {
+    bytes += __atomic_load_n(&strmh->received_video_bytes, __ATOMIC_RELAXED);
+  }
+  return bytes;
 }
 
 /** Begin streaming video from the camera into the callback function.
@@ -1683,6 +1787,15 @@ uvc_error_t uvc_stream_start(
           strmh->cur_ctrl.dwMaxPayloadTransferSize, _uvc_stream_callback,
           ( void* ) strmh, 5000 );
     }
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+        "UVC bulk receive setup: speedEnum=%d packetBytes=%zu requests=%d requestBytes=%u queuedBytes=%llu fixedFrameBytes=%zu",
+        libusb_get_device_speed(libusb_get_device(strmh->devh->usb_devh)),
+        strmh->bulk_packet_size, LIBUVC_NUM_TRANSFER_BUFS,
+        strmh->cur_ctrl.dwMaxPayloadTransferSize,
+        (unsigned long long)LIBUVC_NUM_TRANSFER_BUFS * strmh->cur_ctrl.dwMaxPayloadTransferSize,
+        strmh->bulk_fixed_frame_size);
+#endif
   }
 
   strmh->user_cb = cb;

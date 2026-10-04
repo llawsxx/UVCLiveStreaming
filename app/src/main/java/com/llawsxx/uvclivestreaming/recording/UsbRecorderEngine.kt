@@ -49,6 +49,9 @@ class UsbRecorderEngine(
     private val frameCount = AtomicLong()
     private val receivedVideoFrames = AtomicLong()
     private val renderedVideoFrames = AtomicLong()
+    private val rawQueueDrops = AtomicLong()
+    private val rawConversionFailures = AtomicLong()
+    private val videoTimestampSkips = AtomicLong()
     private val bytesWritten = AtomicLong()
     private val lastAudioLevelNs = AtomicLong()
     private val statsStarted = AtomicBoolean(false)
@@ -57,6 +60,7 @@ class UsbRecorderEngine(
     @Volatile private var preview: Surface? = null
     @Volatile private var previewEnabled = false
     @Volatile private var nativeHandle = 0L
+    private val nativeMetricsLock = Any()
     private var usbConnection: android.hardware.usb.UsbDeviceConnection? = null
     private var videoCodec: MediaCodec? = null
     private var audioCodec: MediaCodec? = null
@@ -71,6 +75,7 @@ class UsbRecorderEngine(
     @Volatile private var audioFormatReady = false
     @Volatile private var streamRate = 0.0
     @Volatile private var recentFps: Double? = null
+    @Volatile private var usbVideoReceiveRate: Double? = null
     private var videoThread: Thread? = null
     private var videoRenderThread: Thread? = null
     private var audioThread: Thread? = null
@@ -195,6 +200,7 @@ class UsbRecorderEngine(
         requestKeyFrame()
         onStarted(captureStats())
         statsThread = Thread({
+            val receiveRate = UsbReceiveRate()
             var lastStreamBytes = 0L
             var lastStreamNs = System.nanoTime()
             var lastVideoNs = lastStreamNs
@@ -202,6 +208,10 @@ class UsbRecorderEngine(
             var lastRendered = renderedVideoFrames.get()
             var lastEncoded = frameCount.get()
             while (running.get()) {
+                usbVideoReceiveRate = synchronized(nativeMetricsLock) {
+                    if (nativeHandle != 0L)
+                        receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(nativeHandle)) else null
+                }
                 val nowNs = System.nanoTime()
                 val streamBytes = outputs.snapshot().values.sumOf { it.bytesStreamed }
                 streamRate = if (streamBytes >= lastStreamBytes && nowNs > lastStreamNs)
@@ -215,10 +225,11 @@ class UsbRecorderEngine(
                     val seconds = (nowNs - lastVideoNs) / 1_000_000_000.0
                     recentFps = (encoded - lastEncoded) / seconds
                     Log.i("UsbVideoDiagnostics", String.format(Locale.US,
-                        "Video fps: received=%.3f rendered=%.3f encoded=%.3f totals=%d/%d/%d MJPEG=%s rawBuffers=%s",
+                        "Video fps: received=%.3f rendered=%.3f encoded=%.3f totals=%d/%d/%d MJPEG=%s rawBuffers=%s rawQueueDrops=%d rawConversionFailures=%d timestampSkips=%d rawQueued=%d",
                         (received - lastReceived) / seconds, (rendered - lastRendered) / seconds,
                         (encoded - lastEncoded) / seconds, received, rendered, encoded,
-                        mjpegDecodePool.diagnostics(), rawVideoConverter.diagnostics()))
+                        mjpegDecodePool.diagnostics(), rawVideoConverter.diagnostics(),
+                        rawQueueDrops.get(), rawConversionFailures.get(), videoTimestampSkips.get(), videoQueue.size))
                     lastVideoNs = nowNs
                     lastReceived = received
                     lastRendered = rendered
@@ -240,8 +251,8 @@ class UsbRecorderEngine(
         }
         val frame = VideoFrame(bytes, format, width, height, smoothedTimestampNs)
         if (!videoQueue.offer(frame)) {
-            videoQueue.poll()
-            videoQueue.offer(frame)
+            if (videoQueue.poll() != null) rawQueueDrops.incrementAndGet()
+            if (!videoQueue.offer(frame)) rawQueueDrops.incrementAndGet()
         }
     }
 
@@ -260,13 +271,18 @@ class UsbRecorderEngine(
                                 // an empty raw queue previously made MJPEG burst.
                                 val raw = videoQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
                                 converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
-                                converted?.frame ?: continue
+                                converted?.frame ?: run {
+                                    rawConversionFailures.incrementAndGet()
+                                    null
+                                } ?: continue
                             }
                             val target = GpuVideoRenderer.PreviewTarget(
                                 preview.takeIf { previewEnabled }, previewRevision.get(),
                                 RecorderController.previewLowFrameRate,
                             )
+                            val encodedBefore = gpu.encodedFrameCount
                             gpu.render(frame, target)
+                            if (gpu.encodedFrameCount == encodedBefore) videoTimestampSkips.incrementAndGet()
                             renderedVideoFrames.set(gpu.encodedFrameCount)
                         } finally {
                             converted?.close()
@@ -480,6 +496,7 @@ class UsbRecorderEngine(
             elapsedMs = elapsedMs,
             averageFps = frameCount.get() * 1_000.0 / elapsedMs,
             recentFps = recentFps,
+            usbVideoReceiveBitsPerSecond = usbVideoReceiveRate,
             averageBitrateBitsPerSecond = bytesWritten.get() * 8_000.0 / elapsedMs,
             segment = recording?.segment ?: 0,
             outputPath = recording?.path,
@@ -521,9 +538,11 @@ class UsbRecorderEngine(
         }
         try {
         mjpegDecodePool.close()
-        val handle = nativeHandle
-        nativeHandle = 0L
-        if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
+        synchronized(nativeMetricsLock) {
+            val handle = nativeHandle
+            nativeHandle = 0L
+            if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
+        }
         videoQueue.clear()
         rawVideoConverter.close()
         videoRenderThread?.interrupt()

@@ -82,6 +82,7 @@ import com.llawsxx.uvclivestreaming.recording.UsbCaptureCallback
 import com.llawsxx.uvclivestreaming.recording.UsbYuvMatrix
 import com.llawsxx.uvclivestreaming.recording.UsbSourceRange
 import com.llawsxx.uvclivestreaming.recording.UsbRecorderEngine
+import com.llawsxx.uvclivestreaming.recording.UsbReceiveRate
 import com.llawsxx.uvclivestreaming.recording.UsbVideoInputFormat
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
 import com.llawsxx.uvclivestreaming.recording.VideoCodec
@@ -94,6 +95,7 @@ import com.llawsxx.uvclivestreaming.ui.theme.UVCLiveStreamingTheme
 import java.util.concurrent.CountDownLatch
 import java.io.Serializable
 import java.util.Locale
+import kotlinx.coroutines.delay
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -224,6 +226,7 @@ private fun UsbCameraScreen() {
     var previewRequested by rememberSaveable { mutableStateOf(false) }
     var foregroundEpoch by remember { mutableStateOf(0) }
     var idleAudioLevelDb by remember { mutableStateOf(-60f) }
+    var idleUsbReceiveRate by remember { mutableStateOf<Double?>(null) }
     val recordingAudioLevelDb by RecorderController.usbAudioLevelDb.collectAsState()
     var modesReadyKey by remember { mutableStateOf<Pair<String?, Int>?>(null) }
     var message by remember { mutableStateOf("选择 USB 摄像头并授权后即可预览或录像") }
@@ -414,6 +417,15 @@ private fun UsbCameraScreen() {
 
     LaunchedEffect(idlePreview, lowFrameRatePreview) {
         idlePreview?.updateLowFrameRate(lowFrameRatePreview)
+    }
+
+    LaunchedEffect(idlePreview, recording) {
+        idleUsbReceiveRate = null
+        val preview = idlePreview?.takeIf { !recording } ?: return@LaunchedEffect
+        while (true) {
+            idleUsbReceiveRate = preview.usbVideoReceiveBitsPerSecond
+            delay(1_000)
+        }
     }
 
     LaunchedEffect(surface, recording, previewRequested, modesReadyKey) {
@@ -789,6 +801,13 @@ private fun UsbCameraScreen() {
                 fullscreen = false; activity?.exitUsbFullscreen()
             }) { Text("退出全屏") }
         }
+        val usbReceiveRate = if (recording)
+            (state as? RecorderState.Recording)?.stats?.usbVideoReceiveBitsPerSecond else idleUsbReceiveRate
+        if (recording || idlePreview != null) {
+            Text("USB 视频接收：" + (usbReceiveRate?.let {
+                String.format(Locale.US, "%.1f Mbps · %.2f MB/s", it / 1_000_000.0, it / 8_000_000.0)
+            } ?: "统计中"), style = MaterialTheme.typography.bodySmall)
+        }
         Text(message, style = MaterialTheme.typography.bodySmall)
         if (state is RecorderState.Error) Text((state as RecorderState.Error).message, color = MaterialTheme.colorScheme.error)
         if (state is RecorderState.Recording) {
@@ -948,6 +967,8 @@ private class UsbIdlePreview(
     private val onMessage: (String) -> Unit,
     private val onAudioLevel: (Float) -> Unit,
 ) : UsbCaptureCallback {
+    @Volatile var usbVideoReceiveBitsPerSecond: Double? = null
+        private set
     @Volatile private var surface: Surface? = initialSurface
     @Volatile private var colorSettings = initialMatrix to initialSourceRange
     @Volatile private var lowFrameRate = initialLowFrameRate
@@ -996,10 +1017,15 @@ private class UsbIdlePreview(
                 mainHandler.post { onMessage("USB 预览：${format[0]}×${format[1]}") }
                 renderThread = Thread({ renderFrames() }, "usb-preview-render").apply { start() }
                 NativeUsbCapture.nativeStart(handle, this)
-                finished.await()
+                val receiveRate = UsbReceiveRate()
+                receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(handle))
+                while (!finished.await(1, TimeUnit.SECONDS)) {
+                    usbVideoReceiveBitsPerSecond = receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(handle))
+                }
             } catch (error: Throwable) {
                 if (!stopped.get()) mainHandler.post { onMessage("USB 预览失败：${error.message}") }
             } finally {
+                usbVideoReceiveBitsPerSecond = null
                 if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
                 stopped.set(true)
                 frameQueue.clear()

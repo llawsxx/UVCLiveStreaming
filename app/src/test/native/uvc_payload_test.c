@@ -259,7 +259,41 @@ static void test_raw_sizes_and_false_boundaries(void) {
     }
 }
 
+static void test_receive_diagnostics(void) {
+    struct uvc_device_handle device = {0};
+    struct uvc_stream_handle stream;
+    init_bulk_stream(&stream, &device);
+    stream.frame_format = UVC_FRAME_FORMAT_YUYV;
+    stream.bulk_fixed_frame_size = 4;
+    // PTS wrap to zero is a valid positive delta, not a missing timestamp.
+    uint8_t frame[] = {6, 0x86, 0xff, 0xff, 0xff, 0xff, 1, 2, 3, 4};
+    _uvc_process_payload(&stream, frame, sizeof(frame));
+    memset(frame + 2, 0, 4);
+    _uvc_process_payload(&stream, frame, sizeof(frame));
+    assert(stream.diagnostic_pts_samples == 1 && stream.diagnostic_pts_ticks == 1);
+    assert(stream.diagnostic_pts_missing == 0 && stream.diagnostic_pts_backward == 0);
+    _uvc_process_payload(&stream, frame, sizeof(frame));
+    assert(stream.diagnostic_pts_repeated == 1);
+    memset(frame + 2, 0xff, 4);
+    _uvc_process_payload(&stream, frame, sizeof(frame));
+    assert(stream.diagnostic_pts_backward == 1 && stream.diagnostic_pts_samples == 1);
+    uint8_t no_pts[] = {2, 0x82, 1, 2, 3};
+    _uvc_process_payload(&stream, no_pts, sizeof(no_pts));
+    assert(stream.diagnostic_pts_missing == 1 && stream.diagnostic_raw_short_frames == 1);
+    frame[2] = 1; frame[3] = frame[4] = frame[5] = 0;
+    _uvc_process_payload(&stream, frame, sizeof(frame));
+    assert(stream.diagnostic_pts_samples == 1); // Do not bridge a frame without PTS.
+    assert(stream.diagnostic_frame_intervals == 5 && stream.diagnostic_frame_ns > 0);
+    assert(stream.diagnostic_raw_long_frames == 0);
+    stream.cur_ctrl.dwMaxVideoFrameSize = 3;
+    _uvc_process_payload(&stream, frame, sizeof(frame));
+    assert(stream.diagnostic_truncated_bytes == 1 && stream.hold_bytes == 3);
+    assert(stream.diagnostic_raw_short_frames == 2);
+    free_bulk_stream(&stream);
+}
+
 int main(void) {
+    test_receive_diagnostics();
     struct uvc_device_handle device = {0};
     struct uvc_stream_handle stream = {0};
     stream.devh = &device;

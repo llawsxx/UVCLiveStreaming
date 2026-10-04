@@ -49,5 +49,7 @@ internal object NativeUsbCapture {
     /** [video width, video height, audio sample rate, audio channels]. */
     external fun nativeFormat(handle: Long): IntArray
     external fun nativeStart(handle: Long, callback: UsbCaptureCallback)
+    /** Received video endpoint bytes including UVC headers; excludes audio and bus overhead. */
+    external fun nativeReceivedVideoBytes(handle: Long): Long
     external fun nativeClose(handle: Long)
 }

@@ -539,6 +539,8 @@ data class RecordingStats(
     val rawFrameBufferCapacity: Int = 0,
     /** Encoded video FPS over the most recent approximately five-second window. */
     val recentFps: Double? = null,
+    /** Recent USB video endpoint throughput; includes UVC headers, excludes audio/bus overhead. */
+    val usbVideoReceiveBitsPerSecond: Double? = null,
 )
 
 data class CameraExposureState(
