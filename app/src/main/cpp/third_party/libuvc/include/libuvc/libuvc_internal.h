@@ -257,6 +257,17 @@ typedef struct uvc_device_info {
 
 #define LIBUVC_XFER_META_BUF_SIZE ( 4 * 1024 )
 
+#define LIBUVC_DIAGNOSTIC_HISTORY 16
+struct uvc_payload_diagnostic {
+  uint64_t number;
+  int64_t time_ns;
+  size_t length, assembled_before;
+  uint32_t sequence, pts_before;
+  uint8_t fid_before, head_length, head[24];
+  uint8_t markers_inspected;
+  int32_t first_soi, first_eoi, embedded_frame_header;
+};
+
 struct uvc_stream_handle {
   struct uvc_device_handle *devh;
   struct uvc_stream_handle *prev, *next;
@@ -290,6 +301,24 @@ struct uvc_stream_handle {
   /* raw metadata buffer if available */
   uint8_t *meta_outbuf, *meta_holdbuf;
   size_t meta_got_bytes, meta_hold_bytes;
+  /* Event-thread-only receive diagnostics, cumulative for this stream. */
+  uint64_t diagnostic_payloads, diagnostic_bad_headers, diagnostic_error_payloads;
+  uint64_t diagnostic_fid_boundaries, diagnostic_size_boundaries, diagnostic_transfer_errors;
+  int64_t diagnostic_last_log_ns;
+  uint64_t diagnostic_missing_eoh, diagnostic_reserved_flags, diagnostic_submit_errors;
+  uint64_t diagnostic_empty_transfers, diagnostic_short_transfers, diagnostic_full_transfers;
+  uint64_t diagnostic_frames_without_soi;
+  uint64_t diagnostic_full_eof_transfers, diagnostic_embedded_frame_headers;
+  int64_t diagnostic_last_trace_ns, diagnostic_callback_max_ns;
+  unsigned diagnostic_history_count, diagnostic_history_next, diagnostic_post_trace;
+  struct uvc_payload_diagnostic diagnostic_history[LIBUVC_DIAGNOSTIC_HISTORY];
+  /* Reassemble bulk payloads after a missing short/ZLP frame delimiter. */
+  size_t bulk_packet_size, bulk_pending_bytes, bulk_pending_capacity;
+  uint8_t *bulk_pending_buf;
+  uint8_t bulk_realign_active;
+  uint64_t diagnostic_bulk_repairs;
+  size_t bulk_fixed_frame_size;
+  uint64_t diagnostic_bulk_raw_repairs;
 };
 
 /** Handle on an open UVC device
@@ -341,4 +370,3 @@ uvc_error_t uvc_release_if(uvc_device_handle_t *devh, int idx);
 
 #endif // !def(LIBUVC_INTERNAL_H)
 /** @endcond */
-

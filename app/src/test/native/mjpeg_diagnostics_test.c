@@ -4,6 +4,7 @@
 #include <string.h>
 #include <jpeglib.h>
 #include <libuvc/libuvc.h>
+#include "mjpeg_repair.h"
 
 extern uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *, uvc_frame_t *,
     long *, char *, size_t);
@@ -56,6 +57,23 @@ int main(void) {
         assert(warnings == 0 && message[0] == '\0');
         assert(out->data_bytes == 64 * 48 * 3 / 2);
 
+        unsigned char *reference = malloc(out->data_bytes);
+        assert(reference);
+        memcpy(reference, out->data, out->data_bytes);
+        assert(mjpeg_missing_soi_header(bytes + 2, size - 2, 64, 48) == 0);
+        assert(mjpeg_missing_soi_header(bytes + 2, size - 2, 128, 48) == SIZE_MAX);
+        assert(mjpeg_missing_soi_header(bytes + 2, 20, 64, 48) == SIZE_MAX);
+        unsigned char *repaired = malloc(size);
+        assert(repaired);
+        repaired[0] = 0xff; repaired[1] = 0xd8;
+        memcpy(repaired + 2, bytes + 2, size - 2);
+        in.data = repaired;
+        assert(uvc_mjpeg2i420_diagnostic(&in, out, &warnings, message, sizeof(message)) == UVC_SUCCESS);
+        assert(warnings == 0 && memcmp(reference, out->data, out->data_bytes) == 0);
+        free(reference);
+        free(repaired);
+        in.data = bytes;
+
         // A missing EOI is tolerated by libjpeg, but must remain observable.
         in.data_bytes = size - 2;
         assert(uvc_mjpeg2i420_diagnostic(&in, out, &warnings, message, sizeof(message)) == UVC_SUCCESS);
@@ -72,6 +90,7 @@ int main(void) {
             }
         }
         assert(entropy && entropy < size - 2);
+        assert(mjpeg_missing_soi_header(bytes + entropy, size - entropy, 64, 48) == SIZE_MAX);
         size_t truncated = entropy + (size - entropy) / 2;
         bytes[truncated] = 0xff;
         bytes[truncated + 1] = 0xd9;

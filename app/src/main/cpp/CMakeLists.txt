@@ -107,7 +107,7 @@ target_compile_options(uvc PRIVATE -O2)
 add_dependencies(uvc jpeg_turbo_build)
 target_link_libraries(uvc PRIVATE libusb jpeg_turbo)
 
-add_library(uvclivestreaming_usb SHARED usb_capture_jni.cpp)
+add_library(uvclivestreaming_usb SHARED usb_capture_jni.cpp mjpeg_repair.c)
 target_compile_features(uvclivestreaming_usb PRIVATE cxx_std_17)
 target_compile_options(uvclivestreaming_usb PRIVATE -O2)
 target_include_directories(uvclivestreaming_usb PRIVATE ${LIBUAC_ROOT}/include)

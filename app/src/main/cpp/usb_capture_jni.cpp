@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 #include <unistd.h>
+#include "mjpeg_repair.h"
 
 extern "C" uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out);
 extern "C" uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
@@ -31,15 +32,22 @@ int64_t monotonic_ns() {
 // Process-wide counters cover both idle preview and recording decode workers.
 // Log summaries, not per-frame messages, so diagnostics do not flood logcat.
 void record_mjpeg_decode(bool no_soi, bool missing_eoi, bool leading_bytes,
-                         bool failed, long warnings, const char *detail,
+                         bool repaired_soi, bool failed, long warnings, const char *detail,
                          size_t bytes, int width, int height) {
     static std::atomic<uint64_t> frames{0}, no_sois{0}, missing_eois{0}, prefixes{0},
-        failures{0}, warned_frames{0}, warning_count{0};
+        failures{0}, repaired_sois{0}, warned_frames{0}, warning_count{0};
     static std::atomic<int64_t> last_log_ns{0};
     ++frames;
     if (no_soi) ++no_sois;
     if (missing_eoi) ++missing_eois;
     if (leading_bytes) ++prefixes;
+    if (repaired_soi && !failed) {
+        const auto count = ++repaired_sois;
+        if (count <= 3 || count % 100 == 0)
+            __android_log_print(ANDROID_LOG_INFO, TAG,
+                "MJPEG SOI repaired: count=%llu bytes=%zu mode=%dx%d",
+                (unsigned long long)count, bytes, width, height);
+    }
     if (warnings > 0) {
         const auto count = ++warned_frames;
         warning_count += warnings;
@@ -60,10 +68,10 @@ void record_mjpeg_decode(bool no_soi, bool missing_eoi, bool leading_bytes,
     if (now - previous >= 5000000000LL && last_log_ns.compare_exchange_strong(previous, now))
         __android_log_print(ANDROID_LOG_INFO, TAG,
             "MJPEG process totals: frames=%llu failed=%llu noSOI=%llu missingEOI=%llu "
-            "prefix=%llu warnedFrames=%llu warnings=%llu lastDetail=%s",
+            "repairedSOI=%llu prefix=%llu warnedFrames=%llu warnings=%llu lastDetail=%s",
             (unsigned long long)frames.load(), (unsigned long long)failures.load(),
             (unsigned long long)no_sois.load(), (unsigned long long)missing_eois.load(),
-            (unsigned long long)prefixes.load(), (unsigned long long)warned_frames.load(),
+            (unsigned long long)repaired_sois.load(), (unsigned long long)prefixes.load(), (unsigned long long)warned_frames.load(),
             (unsigned long long)warning_count.load(), detail);
 }
 
@@ -606,10 +614,18 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
         for (size_t i = 0; i + 1 < length; ++i) {
             if (src[i] == 0xff && src[i + 1] == 0xd8) { soi = i; break; }
         }
-        if (soi == length) {
-            record_mjpeg_decode(true, false, false, true, 0, "SOI not found", length, width, height);
-            env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
-            return nullptr;
+        const bool missing_soi = soi == length;
+        if (missing_soi) {
+            soi = mjpeg_missing_soi_header(src, length, width, height);
+            if (soi == SIZE_MAX) {
+                char detail[192] = "SOI absent; no complete baseline header; first=";
+                size_t used = std::strlen(detail);
+                for (size_t i = 0; i < std::min(length, size_t{16}); ++i)
+                    used += std::snprintf(detail + used, sizeof(detail) - used, "%02X", src[i]);
+                record_mjpeg_decode(true, false, false, false, true, 0, detail, length, width, height);
+                env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
+                return nullptr;
+            }
         }
         size_t end = length;
         bool eoi = false;
@@ -618,10 +634,17 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
         }
         const uint8_t *payload = src + soi;
         size_t payload_size = end - soi;
-        if (!eoi) {
-            scratch.normalized.assign(payload, payload + payload_size);
-            scratch.normalized.push_back(0xff);
-            scratch.normalized.push_back(0xd9);
+        if (missing_soi || !eoi) {
+            scratch.normalized.clear();
+            if (missing_soi) {
+                scratch.normalized.push_back(0xff);
+                scratch.normalized.push_back(0xd8);
+            }
+            scratch.normalized.insert(scratch.normalized.end(), payload, payload + payload_size);
+            if (!eoi) {
+                scratch.normalized.push_back(0xff);
+                scratch.normalized.push_back(0xd9);
+            }
             payload = scratch.normalized.data();
             payload_size = scratch.normalized.size();
         }
@@ -632,7 +655,7 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
         long warnings = 0;
         char detail[256]{};
         const auto decoded = uvc_mjpeg2i420_diagnostic(&in, scratch.frame, &warnings, detail, sizeof(detail));
-        record_mjpeg_decode(false, !eoi, soi != 0, decoded != UVC_SUCCESS,
+        record_mjpeg_decode(missing_soi, !eoi, soi != 0, missing_soi, decoded != UVC_SUCCESS,
             warnings, detail, length, width, height);
         if (decoded == UVC_SUCCESS)
             output = static_cast<const jbyte *>(scratch.frame->data);

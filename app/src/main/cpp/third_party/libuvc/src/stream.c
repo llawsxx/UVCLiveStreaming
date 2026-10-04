@@ -39,6 +39,9 @@
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
 #include "errno.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #ifdef _MSC_VER
 
@@ -681,8 +684,130 @@ uvc_error_t uvc_probe_still_ctrl(
 /** @internal
  * @brief Swap the working buffer with the presented buffer and notify consumers
  */
+static int64_t _uvc_diagnostic_now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static void _uvc_log_payload_record(const struct uvc_payload_diagnostic *record,
+                                  const char *phase) {
+#ifdef __ANDROID__
+  char hex[49];
+  for (unsigned i = 0; i < record->head_length; ++i)
+    snprintf(hex + 2 * i, 3, "%02X", record->head[i]);
+  hex[2 * record->head_length] = 0;
+  __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+      "UVC raw %s: payload=%llu monoUs=%lld len=%zu seq=%u assembled=%zu fid=%u pts=%u head=%s "
+      "markersInspected=%u soiAt=%d eoiAt=%d embeddedFrameHeaderAt=%d",
+      phase, (unsigned long long)record->number, (long long)(record->time_ns / 1000),
+      record->length, record->sequence, record->assembled_before,
+      record->fid_before, record->pts_before, hex, record->markers_inspected,
+      record->first_soi, record->first_eoi, record->embedded_frame_header);
+#else
+  (void)record; (void)phase;
+#endif
+}
+
+static void _uvc_trace_anomaly(uvc_stream_handle_t *strmh, const char *reason);
+
+static void _uvc_trace_payload(uvc_stream_handle_t *strmh, const uint8_t *payload,
+                               size_t length) {
+  struct uvc_payload_diagnostic *record =
+      &strmh->diagnostic_history[strmh->diagnostic_history_next];
+  record->number = strmh->diagnostic_payloads;
+  record->time_ns = _uvc_diagnostic_now();
+  record->length = length;
+  record->assembled_before = strmh->got_bytes;
+  record->sequence = strmh->seq;
+  record->pts_before = strmh->pts;
+  record->fid_before = strmh->fid;
+  record->head_length = length < sizeof(record->head) ? length : sizeof(record->head);
+  if (record->head_length) memcpy(record->head, payload, record->head_length);
+  record->markers_inspected = 0;
+  record->first_soi = record->first_eoi = record->embedded_frame_header = -1;
+  /* U4's observed header is 12 bytes, with PTS and SCR and EOH. Inspect
+   * suspicious returns only; these diagnostics never change parsing. */
+  int u4_header = length >= 12 && payload[0] == 12 && (payload[1] & 0xfc) == 0x8c;
+  int full_eof = u4_header && (payload[1] & UVC_STREAM_EOF) &&
+      length == strmh->cur_ctrl.dwMaxPayloadTransferSize;
+  if (full_eof) strmh->diagnostic_full_eof_transfers++;
+  if (strmh->frame_format == UVC_FRAME_FORMAT_MJPEG && length && (!u4_header || full_eof)) {
+    record->markers_inspected = 1;
+    for (size_t i = u4_header ? 12 : 0; i + 1 < length; ++i) {
+      if (payload[i] == 0xff && payload[i + 1] == 0xd8 && record->first_soi < 0)
+        record->first_soi = (int32_t)i;
+      if (payload[i] == 0xff && payload[i + 1] == 0xd9 && record->first_eoi < 0)
+        record->first_eoi = (int32_t)i;
+    }
+    /* A complete observed UVC header followed immediately by a JPEG SOI
+     * and another JPEG marker is strong evidence of a new frame inside
+     * this return. The offset exposes a missing short/ZLP delimiter. */
+    for (size_t i = 1; i + 16 < length; ++i) {
+      if (payload[i] == 12 && (payload[i + 1] & 0xfc) == 0x8c &&
+          payload[i + 12] == 0xff && payload[i + 13] == 0xd8 &&
+          payload[i + 14] == 0xff && payload[i + 15] != 0 && payload[i + 15] != 0xff) {
+        record->embedded_frame_header = (int32_t)i;
+        strmh->diagnostic_embedded_frame_headers++;
+        break;
+      }
+    }
+  }
+  strmh->diagnostic_history_next =
+      (strmh->diagnostic_history_next + 1) % LIBUVC_DIAGNOSTIC_HISTORY;
+  if (strmh->diagnostic_history_count < LIBUVC_DIAGNOSTIC_HISTORY)
+    strmh->diagnostic_history_count++;
+  if (strmh->diagnostic_post_trace) {
+    _uvc_log_payload_record(record, "after");
+    strmh->diagnostic_post_trace--;
+  }
+  if (full_eof || record->embedded_frame_header >= 0) {
+    _uvc_trace_anomaly(strmh, record->embedded_frame_header >= 0
+        ? "embedded-UVC-header-and-JPEG-SOI" : "full-length-EOF-return");
+    /* Keep marker evidence even if another anomaly used the history dump
+     * limit. Full EOF returns occur rarely on the observed device. */
+    uint64_t marker_count = record->embedded_frame_header >= 0
+        ? strmh->diagnostic_embedded_frame_headers : strmh->diagnostic_full_eof_transfers;
+    if (marker_count <= 3 || marker_count % 100 == 0)
+      _uvc_log_payload_record(record, "boundary-markers");
+  }
+}
+
+static void _uvc_trace_anomaly(uvc_stream_handle_t *strmh, const char *reason) {
+  int64_t now = _uvc_diagnostic_now();
+  if (strmh->diagnostic_last_trace_ns && now - strmh->diagnostic_last_trace_ns < 5000000000LL)
+    return;
+  strmh->diagnostic_last_trace_ns = now;
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_WARN, "UVCLiveStreamingUsb",
+      "UVC boundary anomaly: reason=%s payload=%llu seq=%u assembled=%zu fid=%u pts=%u",
+      reason, (unsigned long long)strmh->diagnostic_payloads, strmh->seq,
+      strmh->got_bytes, strmh->fid, strmh->pts);
+#else
+  (void)reason;
+#endif
+  unsigned start = (strmh->diagnostic_history_next + LIBUVC_DIAGNOSTIC_HISTORY -
+                    strmh->diagnostic_history_count) % LIBUVC_DIAGNOSTIC_HISTORY;
+  for (unsigned i = 0; i < strmh->diagnostic_history_count; ++i)
+    _uvc_log_payload_record(&strmh->diagnostic_history[
+        (start + i) % LIBUVC_DIAGNOSTIC_HISTORY], "before");
+  strmh->diagnostic_post_trace = 8;
+}
+
+static void _uvc_check_frame_soi(uvc_stream_handle_t *strmh) {
+  if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG || strmh->got_bytes < 2) return;
+  /* Normal frames incur only a two-byte check. Scan only abnormal prefixes,
+   * matching the decoder's existing acceptance of leading bytes. */
+  for (size_t i = 0; i + 1 < strmh->got_bytes; ++i)
+    if (strmh->outbuf[i] == 0xff && strmh->outbuf[i + 1] == 0xd8) return;
+  strmh->diagnostic_frames_without_soi++;
+  _uvc_trace_anomaly(strmh, "published-frame-without-SOI");
+}
+
 void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
   uint8_t *tmp_buf;
+
+  _uvc_check_frame_soi(strmh);
 
   pthread_mutex_lock(&strmh->cb_mutex);
 
@@ -723,7 +848,7 @@ void _uvc_swap_buffers(uvc_stream_handle_t *strmh) {
  * transfer (bulk mode)
  * @param payload_len Length of the payload transfer
  */
-void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t payload_len) {
+static void _uvc_process_payload_data(uvc_stream_handle_t *strmh, uint8_t *payload, size_t payload_len) {
   size_t header_len;
   uint8_t header_info;
   size_t data_len;
@@ -735,8 +860,7 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
   };
 
   /* ignore empty payload transfers */
-  if (payload_len == 0)
-    return;
+  if (payload_len == 0) return;
 
   /* Certain iSight cameras have strange behavior: They send header
    * information in a packet with no image data, and then the following
@@ -755,7 +879,9 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
   } else {
     header_len = payload[0];
 
-    if (header_len > payload_len) {
+    if (header_len < 2 || header_len > payload_len) {
+      strmh->diagnostic_bad_headers++;
+      _uvc_trace_anomaly(strmh, "invalid-header-length");
       UVC_DEBUG("bogus packet: actual_len=%zd, header_len=%zd\n", payload_len, header_len);
       return;
     }
@@ -773,13 +899,36 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
     size_t variable_offset = 2;
 
     header_info = payload[1];
+    /* Observe weak headers without rejecting nonconforming devices yet. */
+    if (!(header_info & UVC_STREAM_EOH)) {
+      strmh->diagnostic_missing_eoh++;
+      _uvc_trace_anomaly(strmh, "missing-EOH");
+    }
+    if (header_info & UVC_STREAM_RES) {
+      strmh->diagnostic_reserved_flags++;
+      _uvc_trace_anomaly(strmh, "reserved-header-flag");
+    }
+
+    /* Validate optional fields before reading them or acting on FID. A
+     * malformed/truncated bulk header must not create a false frame boundary. */
+    size_t required_header = 2 + ((header_info & UVC_STREAM_PTS) ? 4 : 0) +
+        ((header_info & UVC_STREAM_SCR) ? 6 : 0);
+    if (header_len < required_header) {
+      strmh->diagnostic_bad_headers++;
+      _uvc_trace_anomaly(strmh, "truncated-PTS-SCR");
+      return;
+    }
 
     if (header_info & UVC_STREAM_ERR) {
+      strmh->diagnostic_error_payloads++;
+      _uvc_trace_anomaly(strmh, "parsed-ERR-flag");
       UVC_DEBUG("bad packet: error bit set");
       return;
     }
 
     if (strmh->fid != (header_info & UVC_STREAM_FID) && strmh->got_bytes != 0) {
+      strmh->diagnostic_fid_boundaries++;
+      _uvc_trace_anomaly(strmh, "FID-changed-without-EOF");
       /* The frame ID bit was flipped, but we have image data sitting
          around from prior transfers. This means the camera didn't send
          an EOF for the last transfer of the previous frame. */
@@ -810,15 +959,219 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
   }
 
   if (data_len > 0) {
-    if (strmh->got_bytes + data_len > strmh->cur_ctrl.dwMaxVideoFrameSize)
+    if (data_len > strmh->cur_ctrl.dwMaxVideoFrameSize - strmh->got_bytes)
       data_len = strmh->cur_ctrl.dwMaxVideoFrameSize - strmh->got_bytes; /* Avoid overflow. */
     memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
     strmh->got_bytes += data_len;
+  }
 
+  /* EOF can be carried by a header-only payload. Publish the accumulated
+   * frame even when this particular transfer contains no image bytes. */
+  if (strmh->got_bytes > 0) {
     if (header_info & UVC_STREAM_EOF || strmh->got_bytes == strmh->cur_ctrl.dwMaxVideoFrameSize) {
+      if (!(header_info & UVC_STREAM_EOF)) strmh->diagnostic_size_boundaries++;
       /* The EOF bit is set, so publish the complete frame */
       _uvc_swap_buffers(strmh);
     }
+  }
+}
+
+static void _uvc_record_payload(uvc_stream_handle_t *strmh, const uint8_t *payload, size_t length) {
+  if (length) strmh->diagnostic_payloads++;
+  _uvc_trace_payload(strmh, payload, length);
+}
+
+void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t length) {
+  _uvc_record_payload(strmh, payload, length);
+  _uvc_process_payload_data(strmh, payload, length);
+}
+
+/* Restricted to the observed MJPEG failure: an EOF payload ends with EOI
+ * on a physical USB packet boundary, immediately followed by a new frame's
+ * 12-byte PTS/SCR header, toggled FID, changed PTS and JPEG beginning. */
+static size_t _uvc_mjpeg_bulk_boundary(uvc_stream_handle_t *strmh,
+                                      const uint8_t *data, size_t length) {
+  size_t packet_size = strmh->bulk_packet_size;
+  if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG || strmh->devh->is_isight ||
+      packet_size < 16 || packet_size > 1024 || length < 12 ||
+      length > strmh->cur_ctrl.dwMaxPayloadTransferSize ||
+      data[0] != 12 || (data[1] & 0xfc) != 0x8c || !(data[1] & UVC_STREAM_EOF))
+    return SIZE_MAX;
+  for (size_t offset = packet_size; offset + 16 < length; offset += packet_size) {
+    const uint8_t *next = data + offset;
+    if (data[offset - 2] != 0xff || data[offset - 1] != 0xd9 ||
+        next[0] != 12 || (next[1] & 0xfc) != 0x8c ||
+        !((next[1] ^ data[1]) & UVC_STREAM_FID) ||
+        DW_TO_INT(next + 2) == DW_TO_INT(data + 2) ||
+        next[12] != 0xff || next[13] != 0xd8 || next[14] != 0xff)
+      continue;
+    uint8_t marker = next[15];
+    if (marker != 0xdb && marker != 0xc0 && marker != 0xc4 && marker != 0xdd &&
+        marker != 0xfe && !(marker >= 0xe0 && marker <= 0xef))
+      continue;
+    return offset;
+  }
+  return SIZE_MAX;
+}
+
+/* Only tightly packed fixed-size formats used by the current app. A larger
+ * allocation limit is not a frame length; derive the actual size from the
+ * format and geometry and refuse incompatible advertised row strides. */
+size_t _uvc_bulk_fixed_frame_size(enum uvc_frame_format format, size_t width, size_t height,
+                                  size_t row_stride, size_t allocation_size) {
+  if (!width || !height || width > SIZE_MAX / height) return 0;
+  size_t pixels = width * height, multiplier = 0, divisor = 1, row_bytes = 0;
+  switch (format) {
+  case UVC_FRAME_FORMAT_YUYV:
+  case UVC_FRAME_FORMAT_UYVY:
+    if (width & 1) return 0;
+    multiplier = 2; row_bytes = width * 2; break;
+  case UVC_FRAME_FORMAT_RGB:
+  case UVC_FRAME_FORMAT_BGR:
+    multiplier = 3; row_bytes = width * 3; break;
+  case UVC_FRAME_FORMAT_GRAY8:
+    multiplier = 1; row_bytes = width; break;
+  case UVC_FRAME_FORMAT_GRAY16:
+    multiplier = 2; row_bytes = width * 2; break;
+  case UVC_FRAME_FORMAT_NV12:
+  case UVC_FRAME_FORMAT_NV21:
+  case UVC_FRAME_FORMAT_I420:
+    if ((width | height) & 1) return 0;
+    multiplier = 3; divisor = 2; row_bytes = width; break;
+  case UVC_FRAME_FORMAT_P010:
+    if ((width | height) & 1) return 0;
+    multiplier = 3; row_bytes = width * 2; break;
+  default:
+    return 0;
+  }
+  if (pixels > SIZE_MAX / multiplier || (row_stride && row_stride != row_bytes)) return 0;
+  size_t bytes = pixels * multiplier / divisor;
+  return bytes <= allocation_size ? bytes : 0;
+}
+
+static int _uvc_bulk_pts_header(const uint8_t *data, size_t length) {
+  if (length < 6) return 0;
+  uint8_t flags = data[1];
+  if ((flags & (UVC_STREAM_EOH | UVC_STREAM_PTS | UVC_STREAM_ERR | UVC_STREAM_RES)) !=
+      (UVC_STREAM_EOH | UVC_STREAM_PTS)) return 0;
+  size_t header = 6 + ((flags & UVC_STREAM_SCR) ? 6 : 0);
+  return data[0] == header && length >= header;
+}
+
+static size_t _uvc_raw_bulk_boundary(uvc_stream_handle_t *strmh,
+                                    const uint8_t *data, size_t length) {
+  size_t frame_size = strmh->bulk_fixed_frame_size, packet_size = strmh->bulk_packet_size;
+  if (!frame_size || strmh->devh->is_isight || packet_size < 16 || packet_size > 1024 ||
+      length > strmh->cur_ctrl.dwMaxPayloadTransferSize ||
+      !_uvc_bulk_pts_header(data, length) || !(data[1] & UVC_STREAM_EOF) ||
+      strmh->got_bytes > frame_size)
+    return SIZE_MAX;
+  /* Data already assembled must belong to this same EOF frame. A missing
+   * earlier payload makes the exact-size check fail instead of guessing. */
+  if (strmh->got_bytes && (strmh->fid != (data[1] & UVC_STREAM_FID) ||
+                          strmh->pts != DW_TO_INT(data + 2))) return SIZE_MAX;
+  size_t remaining = frame_size - strmh->got_bytes;
+  if (remaining > length - data[0]) return SIZE_MAX;
+  size_t offset = remaining + data[0];
+  if (offset < packet_size || offset % packet_size || offset >= length ||
+      !_uvc_bulk_pts_header(data + offset, length - offset)) return SIZE_MAX;
+  const uint8_t *next = data + offset;
+  if (!((next[1] ^ data[1]) & UVC_STREAM_FID) ||
+      DW_TO_INT(next + 2) == DW_TO_INT(data + 2)) return SIZE_MAX;
+  return offset;
+}
+
+static size_t _uvc_bulk_frame_boundary(uvc_stream_handle_t *strmh,
+                                      const uint8_t *data, size_t length) {
+  return strmh->frame_format == UVC_FRAME_FORMAT_MJPEG
+      ? _uvc_mjpeg_bulk_boundary(strmh, data, length)
+      : _uvc_raw_bulk_boundary(strmh, data, length);
+}
+
+static void _uvc_note_bulk_repair(uvc_stream_handle_t *strmh, size_t length, size_t split) {
+  strmh->diagnostic_bulk_repairs++;
+  if (strmh->frame_format != UVC_FRAME_FORMAT_MJPEG) strmh->diagnostic_bulk_raw_repairs++;
+#ifdef __ANDROID__
+  uint64_t count = strmh->diagnostic_bulk_repairs;
+  if (count <= 3 || count % 100 == 0)
+    __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+        "UVC bulk boundary repaired: count=%llu bytes=%zu splitAt=%zu packetSize=%zu seq=%u "
+        "format=%d fixedFrameBytes=%zu",
+        (unsigned long long)count, length, split, strmh->bulk_packet_size, strmh->seq,
+        strmh->frame_format, strmh->bulk_fixed_frame_size);
+#else
+  (void)length; (void)split;
+#endif
+}
+
+void _uvc_process_bulk_payload(uvc_stream_handle_t *strmh, uint8_t *payload,
+                               size_t length, int short_transfer) {
+  _uvc_record_payload(strmh, payload, length); /* Record actual returns, not reconstructed packets. */
+  size_t maximum = strmh->cur_ctrl.dwMaxPayloadTransferSize;
+  if (!strmh->bulk_realign_active) {
+    size_t split = _uvc_bulk_frame_boundary(strmh, payload, length);
+    if (split == SIZE_MAX) {
+      _uvc_process_payload_data(strmh, payload, length);
+      return;
+    }
+    /* Allocation is needed only once an actual coalesced boundary is found.
+     * Bound the additional storage independently of the frame buffer. */
+    if (!maximum || maximum > 1024 * 1024) {
+      _uvc_process_payload_data(strmh, payload, length);
+      return;
+    }
+    if (strmh->bulk_pending_capacity < maximum) {
+      uint8_t *buf = realloc(strmh->bulk_pending_buf, maximum);
+      if (!buf) {
+        _uvc_trace_anomaly(strmh, "bulk-repair-buffer-unavailable");
+        _uvc_process_payload_data(strmh, payload, length);
+        return;
+      }
+      strmh->bulk_pending_buf = buf;
+      strmh->bulk_pending_capacity = maximum;
+    }
+    _uvc_note_bulk_repair(strmh, length, split);
+    _uvc_process_payload_data(strmh, payload, split);
+    strmh->bulk_realign_active = 1;
+    strmh->bulk_pending_bytes = 0;
+    payload += split;
+    length -= split;
+  }
+
+  /* Following returns begin in the middle of a payload. Preserve every byte
+   * until a complete negotiated-size payload or a short/ZLP end is available. */
+  while (length) {
+    size_t take = maximum - strmh->bulk_pending_bytes;
+    if (take > length) take = length;
+    memcpy(strmh->bulk_pending_buf + strmh->bulk_pending_bytes, payload, take);
+    strmh->bulk_pending_bytes += take;
+    payload += take;
+    length -= take;
+    if (strmh->bulk_pending_bytes == maximum) {
+      size_t split = _uvc_bulk_frame_boundary(strmh, strmh->bulk_pending_buf, maximum);
+      size_t consume = split == SIZE_MAX ? maximum : split;
+      if (split != SIZE_MAX) _uvc_note_bulk_repair(strmh, maximum, split);
+      _uvc_process_payload_data(strmh, strmh->bulk_pending_buf, consume);
+      strmh->bulk_pending_bytes -= consume;
+      if (strmh->bulk_pending_bytes)
+        memmove(strmh->bulk_pending_buf, strmh->bulk_pending_buf + consume,
+                strmh->bulk_pending_bytes);
+    }
+  }
+  if (short_transfer) {
+    /* A short packet (including a separate zero-length return) restores
+     * alignment. A small next frame may itself be coalesced into this tail. */
+    size_t offset = 0;
+    while (offset < strmh->bulk_pending_bytes) {
+      size_t left = strmh->bulk_pending_bytes - offset;
+      size_t split = _uvc_bulk_frame_boundary(strmh, strmh->bulk_pending_buf + offset, left);
+      size_t consume = split == SIZE_MAX ? left : split;
+      if (split != SIZE_MAX) _uvc_note_bulk_repair(strmh, left, split);
+      _uvc_process_payload_data(strmh, strmh->bulk_pending_buf + offset, consume);
+      offset += consume;
+    }
+    strmh->bulk_pending_bytes = 0;
+    strmh->bulk_realign_active = 0;
   }
 }
 
@@ -830,16 +1183,67 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
  *
  * @param transfer Active transfer
  */
+static void _uvc_log_receive_diagnostics(uvc_stream_handle_t *strmh) {
+#ifdef __ANDROID__
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+  if (!strmh->diagnostic_last_log_ns) {
+    strmh->diagnostic_last_log_ns = now;
+  } else if (now - strmh->diagnostic_last_log_ns >= 5000000000LL) {
+    __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+        "UVC assembly totals: frames=%u payloads=%llu badHeaders=%llu errorPayloads=%llu "
+        "fidWithoutEOF=%llu sizeWithoutEOF=%llu transferErrors=%llu "
+        "missingEOH=%llu reservedFlags=%llu frameNoSOI=%llu submitErrors=%llu "
+        "emptyTransfers=%llu shortTransfers=%llu fullTransfers=%llu callbackMaxUs=%lld "
+        "fullEOF=%llu embeddedFrameHeaders=%llu bulkRepairs=%llu bulkPending=%zu bulkRawRepairs=%llu",
+        strmh->seq - 1, (unsigned long long)strmh->diagnostic_payloads,
+        (unsigned long long)strmh->diagnostic_bad_headers,
+        (unsigned long long)strmh->diagnostic_error_payloads,
+        (unsigned long long)strmh->diagnostic_fid_boundaries,
+        (unsigned long long)strmh->diagnostic_size_boundaries,
+        (unsigned long long)strmh->diagnostic_transfer_errors,
+        (unsigned long long)strmh->diagnostic_missing_eoh,
+        (unsigned long long)strmh->diagnostic_reserved_flags,
+        (unsigned long long)strmh->diagnostic_frames_without_soi,
+        (unsigned long long)strmh->diagnostic_submit_errors,
+        (unsigned long long)strmh->diagnostic_empty_transfers,
+        (unsigned long long)strmh->diagnostic_short_transfers,
+        (unsigned long long)strmh->diagnostic_full_transfers,
+        (long long)(strmh->diagnostic_callback_max_ns / 1000),
+        (unsigned long long)strmh->diagnostic_full_eof_transfers,
+        (unsigned long long)strmh->diagnostic_embedded_frame_headers,
+        (unsigned long long)strmh->diagnostic_bulk_repairs, strmh->bulk_pending_bytes,
+        (unsigned long long)strmh->diagnostic_bulk_raw_repairs);
+    strmh->diagnostic_callback_max_ns = 0;
+    strmh->diagnostic_last_log_ns = now;
+  }
+#else
+  (void)strmh;
+#endif
+}
+
 void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
   uvc_stream_handle_t *strmh = transfer->user_data;
+  int64_t callback_start = _uvc_diagnostic_now();
+  if (transfer->status != LIBUSB_TRANSFER_COMPLETED && transfer->status != LIBUSB_TRANSFER_CANCELLED)
+    strmh->diagnostic_transfer_errors++;
+  if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+    strmh->bulk_pending_bytes = 0;
+    strmh->bulk_realign_active = 0;
+  }
+  _uvc_log_receive_diagnostics(strmh);
 
   int resubmit = 1;
 
   switch (transfer->status) {
   case LIBUSB_TRANSFER_COMPLETED:
     if (transfer->type != LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
-      /* This is a bulk mode transfer, so it just has one payload transfer */
-      _uvc_process_payload(strmh, transfer->buffer, transfer->actual_length);
+      if (!transfer->actual_length) strmh->diagnostic_empty_transfers++;
+      else if (transfer->actual_length < transfer->length) strmh->diagnostic_short_transfers++;
+      else strmh->diagnostic_full_transfers++;
+      _uvc_process_bulk_payload(strmh, transfer->buffer, transfer->actual_length,
+          transfer->actual_length < transfer->length);
     } else {
       /* This is an isochronous mode transfer, so each packet has a payload transfer */
       int packet_id;
@@ -901,6 +1305,8 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
       int libusbRet = libusb_submit_transfer(transfer);
       if (libusbRet < 0)
       {
+        strmh->diagnostic_submit_errors++;
+        _uvc_trace_anomaly(strmh, "resubmit-failed");
         int i;
         pthread_mutex_lock(&strmh->cb_mutex);
 
@@ -943,6 +1349,9 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
       pthread_mutex_unlock(&strmh->cb_mutex);
     }
   }
+  int64_t callback_duration = _uvc_diagnostic_now() - callback_start;
+  if (callback_duration > strmh->diagnostic_callback_max_ns)
+    strmh->diagnostic_callback_max_ns = callback_duration;
 }
 
 /** Begin streaming video from the camera into the callback function.
@@ -1133,6 +1542,10 @@ uvc_error_t uvc_stream_start(
   strmh->pts = 0;
   strmh->last_scr = 0;
 
+  strmh->bulk_pending_bytes = 0;
+  strmh->bulk_realign_active = 0;
+  strmh->bulk_packet_size = 0;
+
   frame_desc = uvc_find_frame_desc_stream(strmh, ctrl->bFormatIndex, ctrl->bFrameIndex);
   if (!frame_desc) {
     ret = UVC_ERROR_INVALID_PARAM;
@@ -1145,6 +1558,9 @@ uvc_error_t uvc_stream_start(
     ret = UVC_ERROR_NOT_SUPPORTED;
     goto fail;
   }
+  strmh->bulk_fixed_frame_size = format_desc->bVariableSize ? 0 :
+      _uvc_bulk_fixed_frame_size(strmh->frame_format, frame_desc->wWidth, frame_desc->wHeight,
+          frame_desc->dwBytesPerLine, ctrl->dwMaxVideoFrameSize);
 
   // Get the interface that provides the chosen format and frame configuration
   interface_id = strmh->stream_if->bInterfaceNumber;
@@ -1247,6 +1663,14 @@ uvc_error_t uvc_stream_start(
       libusb_set_iso_packet_lengths(transfer, endpoint_bytes_per_packet);
     }
   } else {
+    const struct libusb_interface_descriptor *altsetting = interface->altsetting;
+    for (int ep_idx = 0; ep_idx < altsetting->bNumEndpoints; ++ep_idx) {
+      const struct libusb_endpoint_descriptor *endpoint = altsetting->endpoint + ep_idx;
+      if (endpoint->bEndpointAddress == format_desc->parent->bEndpointAddress) {
+        strmh->bulk_packet_size = endpoint->wMaxPacketSize & 0x07ff;
+        break;
+      }
+    }
     for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS;
         ++transfer_id) {
       transfer = libusb_alloc_transfer(0);
@@ -1594,6 +2018,7 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 
   free(strmh->outbuf);
   free(strmh->holdbuf);
+  free(strmh->bulk_pending_buf);
 
   free(strmh->meta_outbuf);
   free(strmh->meta_holdbuf);
