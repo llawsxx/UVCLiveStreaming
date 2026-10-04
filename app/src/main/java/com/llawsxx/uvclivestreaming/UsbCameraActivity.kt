@@ -201,6 +201,7 @@ private fun UsbCameraScreen() {
     var audioBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.audioBitrateKbps) }
     val audioBitrateValue = audioBitrateKbps.toIntOrNull()?.takeIf { it in 16..512 }
     var gopSeconds by rememberSaveable { mutableStateOf(uiSettings.gopSeconds) }
+    val gopSecondsValue = gopSeconds.toFloatOrNull()?.takeIf { it.isFinite() && it in 0f..30f }
     var bFrames by rememberSaveable { mutableStateOf(uiSettings.bFrames) }
     var videoCodec by rememberSaveable { mutableStateOf(uiSettings.videoCodec) }
     var bitrateMode by rememberSaveable { mutableStateOf(uiSettings.bitrateMode) }
@@ -537,6 +538,10 @@ private fun UsbCameraScreen() {
                 previous?.stop(beginPreview) ?: beginPreview()
             }
         } else {
+            if (gopSecondsValue == null) {
+                message = "GOP 请输入 0～30 秒，可使用小数；0 表示每帧关键帧"
+                return@LaunchedEffect
+            }
             if (includeAudio && audioBitrateValue == null) {
                 message = "音频码率请输入 16～512 kbps 的整数"
                 return@LaunchedEffect
@@ -554,8 +559,8 @@ private fun UsbCameraScreen() {
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
                 (audioBitrateValue ?: 192) * 1_000,
-                gopSeconds.toIntOrNull()?.coerceIn(1, 30) ?: 2,
-                bFrames.toIntOrNull()?.coerceIn(0, 4) ?: 0,
+                gopSecondsValue,
+                if (gopSecondsValue == 0f) 0 else bFrames.toIntOrNull()?.coerceIn(0, 4) ?: 0,
                 timestampSmoothingEnabled, timestampSmoothingNtscEnabled, timestampSmoothingDelta ?: 0.1,
                 yuvMatrix, sourceRange,
                 encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -638,11 +643,17 @@ private fun UsbCameraScreen() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedTextField(videoBitrateKbps, { videoBitrateKbps = it.filter(Char::isDigit) }, enabled = !recording,
                 singleLine = true, modifier = Modifier.weight(1f), label = { Text("视频码率 kbps") })
-            OutlinedTextField(gopSeconds, { gopSeconds = it.filter(Char::isDigit) }, enabled = !recording,
-                singleLine = true, modifier = Modifier.weight(1f), label = { Text("GOP 秒") })
-            OutlinedTextField(bFrames, { bFrames = it.filter(Char::isDigit) }, enabled = !recording,
+            OutlinedTextField(gopSeconds, { gopSeconds = it.filter { char -> char.isDigit() || char == '.' } }, enabled = !recording,
+                singleLine = true, modifier = Modifier.weight(1f), label = { Text("GOP 秒") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                isError = gopSecondsValue == null)
+            OutlinedTextField(if (gopSecondsValue == 0f) "0" else bFrames, { bFrames = it.filter(Char::isDigit) }, enabled = !recording && gopSecondsValue != 0f,
                 singleLine = true, modifier = Modifier.weight(1f), label = { Text("B 帧") })
         }
+        Text(if (gopSecondsValue == null) "GOP 请输入 0～30 秒，可使用小数。"
+            else if (gopSecondsValue == 0f) "GOP 0：每帧关键帧，自动禁用 B 帧；同码率下画质可能降低。"
+            else "GOP 支持小数（如 0.5 秒）；设为 0 表示每帧关键帧。",
+            style = MaterialTheme.typography.bodySmall)
         if (devices.isEmpty()) Text("没有检测到 UVC 视频接口；请连接 USB 摄像头。")
         OutlinedButton(onClick = { matrixExpanded = true }, enabled = !recording,
             modifier = Modifier.fillMaxWidth()) {
@@ -942,7 +953,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
                                audioRate: Int, bufferFrames: Int, container: ContainerFormat,
                                httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, videoCodec: VideoCodec,
                                bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
-                               gopSeconds: Int, bFrames: Int,
+                               gopSeconds: Float, bFrames: Int,
                                timestampSmoothingEnabled: Boolean, timestampSmoothingNtscEnabled: Boolean,
                                timestampSmoothingMaxDeltaSeconds: Double,
                                yuvMatrix: UsbYuvMatrix, sourceRange: UsbSourceRange,

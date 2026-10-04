@@ -164,10 +164,7 @@ class UsbRecorderEngine(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, config.videoBitrate.coerceAtLeast(100_000))
             setInteger(MediaFormat.KEY_FRAME_RATE, config.fps.toInt().coerceIn(1, 240))
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, config.videoKeyFrameIntervalSeconds.coerceIn(1, 30))
-            if (config.videoMaxBFrames > 0) {
-                setInteger(MediaFormat.KEY_MAX_B_FRAMES, config.videoMaxBFrames.coerceIn(0, 4))
-            }
+            applyEncoderGopSettings(config)
             config.videoBitrateMode.mediaFormatValue?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
             applyEncoderColorSettings(config)
         }
@@ -347,6 +344,7 @@ class UsbRecorderEngine(
             val info = MediaCodec.BufferInfo()
             try {
                 var ended = false
+                var reportedNonKeyFrame = false
                 while (!ended) {
                     val index = codec.dequeueOutputBuffer(info, 10_000)
                     when {
@@ -361,6 +359,11 @@ class UsbRecorderEngine(
                         }
                         index >= 0 -> {
                             if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                                if (config.videoKeyFrameIntervalSeconds == 0f &&
+                                    info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME == 0 && !reportedNonKeyFrame) {
+                                    reportedNonKeyFrame = true
+                                    onNotice("当前视频编码器未按每帧关键帧设置输出，可尝试切换 H.264／HEVC")
+                                }
                                 val adjusted = MediaCodec.BufferInfo().apply {
                                     set(info.offset, info.size,
                                         (info.presentationTimeUs - startedAtNs / 1_000).coerceAtLeast(0), info.flags)

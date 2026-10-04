@@ -100,7 +100,9 @@ object ConfigPreferences {
             rawShadowLiftSmoothness = p.getFloat("rawShadowLiftSmoothness", 0.50f).coerceIn(0f, 1f),
             videoBitrate = p.getInt("videoBitrate", 12_000_000),
             videoBitrateMode = enumValue(p.getString("videoBitrateMode", null), VideoBitrateMode.DEFAULT),
-            videoKeyFrameIntervalSeconds = p.getInt("videoKeyFrameIntervalSeconds", 2).coerceIn(0, 60),
+            // The previous version stored whole seconds as Int under the same key.
+            videoKeyFrameIntervalSeconds = (p.all["videoKeyFrameIntervalSeconds"] as? Number)
+                ?.toFloat()?.takeIf { it.isFinite() }?.coerceIn(0f, 60f) ?: 2f,
             videoMaxBFrames = p.getInt("videoMaxBFrames", 0).coerceIn(0, 4),
             audioBitrate = p.getInt("audioBitrate", 192_000),
             audioAacProfile = enumValue(p.getString("audioAacProfile", null), AudioAacProfile.LC),
@@ -290,7 +292,7 @@ object ConfigPreferences {
             .putFloat("rawShadowLiftSmoothness", c.effectiveRawShadowLiftSmoothness)
             .putInt("videoBitrate", c.videoBitrate)
             .putString("videoBitrateMode", c.videoBitrateMode.name)
-            .putInt("videoKeyFrameIntervalSeconds", c.videoKeyFrameIntervalSeconds)
+            .putFloat("videoKeyFrameIntervalSeconds", c.videoKeyFrameIntervalSeconds)
             .putInt("videoMaxBFrames", c.videoMaxBFrames)
             .putInt("audioBitrate", c.audioBitrate)
             .putString("audioAacProfile", c.audioAacProfile.name)
