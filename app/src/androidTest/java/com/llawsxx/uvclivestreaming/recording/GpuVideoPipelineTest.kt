@@ -8,16 +8,96 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.SystemClock
+import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.nio.ByteBuffer
 
 @RunWith(AndroidJUnit4::class)
 class GpuVideoPipelineTest {
     private fun bytes(vararg values: Int) = values.map { it.toByte() }.toByteArray()
+
+    @Test fun hevcSurfaceOutputProducesDecodableEnhancedFlv() {
+        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 256, 256).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+            setInteger(MediaFormat.KEY_BIT_RATE, 300_000)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        }
+        val frames = mutableListOf<Pair<Boolean, ByteArray>>()
+        var configuration: ByteArray? = null
+        var lengthSize = 4
+        var eos = false
+        var surface: android.view.Surface? = null
+        val info = MediaCodec.BufferInfo()
+        fun copy(buffer: ByteBuffer) = ByteArray(buffer.remaining()).also { buffer.duplicate().get(it) }
+        fun drain() {
+            while (true) {
+                val index = codec.dequeueOutputBuffer(info, 10_000)
+                if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val output = codec.outputFormat
+                    val csd = copy(checkNotNull(output.getByteBuffer("csd-0")))
+                    lengthSize = RtmpHevc.sourceLengthSize(csd)
+                    configuration = RtmpHevc.configuration(csd, output.getByteBuffer("csd-1")?.let(::copy))
+                } else if (index >= 0) {
+                    try {
+                        if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                            val buffer = checkNotNull(codec.getOutputBuffer(index)).duplicate().apply {
+                                position(info.offset); limit(info.offset + info.size)
+                            }
+                            frames += (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) to
+                                RtmpHevc.codedFrame(copy(buffer), lengthSize)
+                        }
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) eos = true
+                    } finally { codec.releaseOutputBuffer(index, false) }
+                } else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return
+            }
+        }
+        try {
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            surface = codec.createInputSurface()
+            codec.start()
+            GpuVideoRenderer(surface).use { gpu ->
+                repeat(6) { frame ->
+                    val rgb = ByteArray(256 * 256 * 3) { if (it % 3 == frame % 3) 200.toByte() else 50 }
+                    gpu.render(GpuVideoFrame(rgb, 256, 256, 50_000_000_000L + frame * 33_333_333L,
+                        GpuVideoFrame.RGB, true))
+                    drain()
+                }
+            }
+            codec.signalEndOfInputStream()
+            val deadline = SystemClock.elapsedRealtime() + 5_000
+            while (!eos && SystemClock.elapsedRealtime() < deadline) drain()
+            assertTrue("HEVC encoder did not reach EOS", eos)
+            assertEquals(6, frames.size)
+            val header = checkNotNull(configuration)
+            assertEquals(4, RtmpHevc.sourceLengthSize(header))
+            val flv = ByteArrayOutputStream()
+            DataOutputStream(flv).use { out ->
+                out.write(bytes(0x46, 0x4c, 0x56, 1, 1, 0, 0, 0, 9)); out.writeInt(0)
+                fun tag(time: Int, payload: ByteArray) {
+                    out.writeByte(9)
+                    out.writeByte(payload.size ushr 16); out.writeByte(payload.size ushr 8); out.writeByte(payload.size)
+                    out.writeByte(time ushr 16); out.writeByte(time ushr 8); out.writeByte(time); out.writeByte(time ushr 24)
+                    out.write(bytes(0, 0, 0)); out.write(payload); out.writeInt(11 + payload.size)
+                }
+                tag(0, bytes(0x90, 0x68, 0x76, 0x63, 0x31) + header)
+                frames.forEachIndexed { index, (key, frame) ->
+                    tag(index * 1000 / 30, bytes(if (key) 0x91 else 0xa1, 0x68, 0x76, 0x63, 0x31, 0, 0, 0) + frame)
+                }
+            }
+            // A host smoke runner can decode this with FFmpeg, without installing the test APK.
+            println("RTMP_HEVC_FLV_BASE64=" + Base64.encodeToString(flv.toByteArray(), Base64.NO_WRAP))
+            println("${codec.name}: normalized HEVC CSD and ${frames.size} Surface frames")
+        } finally {
+            runCatching { codec.stop() }; codec.release(); surface?.release()
+        }
+    }
 
     @Test fun encoderColorRequestsReachH264AndHevcOutput() {
         for ((videoCodec, mime) in listOf(VideoCodec.H264 to MediaFormat.MIMETYPE_VIDEO_AVC,

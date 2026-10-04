@@ -30,6 +30,7 @@ internal class RtmpStreamSink(
     private var queuedBytes = 0L
     private var videoConfig: ByteArray? = null
     private var videoCodec = VideoCodec.H264
+    private var hevcInputLengthSize = 4
     private var audioConfig: ByteArray? = null
     private var width = 0
     private var height = 0
@@ -70,8 +71,11 @@ internal class RtmpStreamSink(
         fps = format.getInteger(MediaFormat.KEY_FRAME_RATE, 30).toDouble()
         val csd0 = format.getByteBuffer("csd-0")?.let(::copyBuffer)
         val csd1 = format.getByteBuffer("csd-1")?.let(::copyBuffer)
+        hevcInputLengthSize = RtmpHevc.sourceLengthSize(csd0 ?: ByteArray(0))
         videoConfig = if (videoCodec == VideoCodec.H265)
-            makeHevcDecoderConfiguration(csd0 ?: ByteArray(0), csd1)
+            runCatching { RtmpHevc.configuration(csd0 ?: ByteArray(0), csd1) }
+                .onFailure { onNotice("RTMP HEVC 编码配置无效：${it.message}"); Log.e(TAG, "Invalid HEVC CSD", it) }
+                .getOrNull()
         else makeAvcDecoderConfiguration(csd0 ?: ByteArray(0), csd1)
         videoReady = videoConfig?.isNotEmpty() == true
         lock.withLock { changed.signalAll() }
@@ -88,7 +92,10 @@ internal class RtmpStreamSink(
 
     fun writeVideo(data: ByteArray, ptsUs: Long, keyFrame: Boolean) {
         if (!running || !videoReady || data.isEmpty()) return
-        val avcc = annexBToLengthPrefixed(data)
+        val avcc = if (videoCodec == VideoCodec.H265) {
+            runCatching { RtmpHevc.codedFrame(data, hevcInputLengthSize) }
+                .getOrElse { Log.e(TAG, "Invalid HEVC frame framing", it); return }
+        } else annexBToLengthPrefixed(data)
         if (avcc.isEmpty()) return
         val payload = if (videoCodec == VideoCodec.H265) {
             ByteArray(8 + avcc.size).also {
@@ -222,29 +229,6 @@ internal class RtmpStreamSink(
             return byteArrayOf(1, sps[1], sps[2], sps[3], 0xff.toByte(), 0xe1.toByte(),
                 (sps.size ushr 8).toByte(), sps.size.toByte()) + sps + byteArrayOf(1,
                 (pps.size ushr 8).toByte(), pps.size.toByte()) + pps
-        }
-
-        /** Build a conservative HEVCDecoderConfigurationRecord from MediaCodec csd. */
-        fun makeHevcDecoderConfiguration(csd0: ByteArray, csd1: ByteArray?): ByteArray {
-            if (csd0.size >= 23 && csd0[0].toInt() == 1) return csd0
-            val nals = extractNals(csd0) + (csd1?.let(::extractNals) ?: emptyList())
-            val groups = listOf(32, 33, 34).map { type ->
-                type to nals.filter { it.size >= 2 && ((it[0].toInt() and 0x7e) ushr 1) == type }
-            }.filter { it.second.isNotEmpty() }
-            if (groups.isEmpty()) return ByteArray(0)
-            val out = ByteArrayOutputStream()
-            out.write(byteArrayOf(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120,
-                0xf0.toByte(), 0, 0xfc.toByte(), 0xfd.toByte(), 0xf8.toByte(), 0xf8.toByte(),
-                0, 0, 0x0f))
-            out.write(groups.size)
-            groups.forEach { (type, values) ->
-                out.write(0x80 or type)
-                out.write(values.size ushr 8); out.write(values.size)
-                values.forEach { nal ->
-                    out.write(nal.size ushr 8); out.write(nal.size); out.write(nal)
-                }
-            }
-            return out.toByteArray()
         }
 
         fun annexBToLengthPrefixed(data: ByteArray): ByteArray {
