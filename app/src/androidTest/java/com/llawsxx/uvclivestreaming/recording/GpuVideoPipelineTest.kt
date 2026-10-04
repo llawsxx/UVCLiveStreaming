@@ -19,6 +19,73 @@ import java.nio.ByteBuffer
 class GpuVideoPipelineTest {
     private fun bytes(vararg values: Int) = values.map { it.toByte() }.toByteArray()
 
+    @Test fun encoderColorRequestsReachH264AndHevcOutput() {
+        for ((videoCodec, mime) in listOf(VideoCodec.H264 to MediaFormat.MIMETYPE_VIDEO_AVC,
+            VideoCodec.H265 to MediaFormat.MIMETYPE_VIDEO_HEVC)) {
+            val config = RecordingConfig(videoCodec = videoCodec,
+                colorStandard = VideoColorStandard.BT709,
+                colorTransfer = VideoColorTransfer.BT709,
+                colorRange = VideoColorRange.LIMITED,
+                // Independent SPS override settings must not affect codec initialization.
+                forceSpsVui = true, rewriteColorStandard = VideoColorStandard.BT2020,
+                rewriteColorTransfer = VideoColorTransfer.ST2084, rewriteColorRange = VideoColorRange.FULL)
+            val format = MediaFormat.createVideoFormat(mime, 256, 256).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                setInteger(MediaFormat.KEY_BIT_RATE, 300_000)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                applyEncoderColorSettings(RecordingConfig())
+                assertFalse(containsKey(MediaFormat.KEY_COLOR_STANDARD))
+                assertFalse(containsKey(MediaFormat.KEY_COLOR_TRANSFER))
+                assertFalse(containsKey(MediaFormat.KEY_COLOR_RANGE))
+                applyEncoderColorSettings(config)
+            }
+            val codec = MediaCodec.createEncoderByType(mime)
+            val caps = checkNotNull(codec.codecInfo.getCapabilitiesForType(mime).videoCapabilities)
+            println("${codec.name}: supports256=${caps.isSizeSupported(256, 256)} widths=${caps.supportedWidths} heights=${caps.supportedHeights}; request=$format")
+            var surface: android.view.Surface? = null
+            var reported: MediaFormat? = null
+            var samples = 0
+            var eos = false
+            val info = MediaCodec.BufferInfo()
+            fun drain(timeoutUs: Long) {
+                while (true) {
+                    val index = codec.dequeueOutputBuffer(info, timeoutUs)
+                    if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) reported = codec.outputFormat
+                    else if (index >= 0) {
+                        if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) samples++
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) eos = true
+                        codec.releaseOutputBuffer(index, false)
+                    } else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return
+                }
+            }
+            try {
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                surface = codec.createInputSurface()
+                codec.start()
+                GpuVideoRenderer(surface).use { gpu ->
+                    val rgb = ByteArray(256 * 256 * 3) { if (it % 3 == 1) 200.toByte() else 50 }
+                    repeat(3) {
+                        gpu.render(GpuVideoFrame(rgb, 256, 256, 50_000_000_000L + it * 33_333_333L, GpuVideoFrame.RGB, true))
+                        drain(10_000)
+                    }
+                }
+                codec.signalEndOfInputStream()
+                val deadline = SystemClock.elapsedRealtime() + 5_000
+                while (!eos && SystemClock.elapsedRealtime() < deadline) drain(10_000)
+                assertTrue("$mime did not reach EOS", eos)
+                assertEquals("$mime lost encoded frames", 3, samples)
+                val output = checkNotNull(reported)
+                assertEquals(MediaFormat.COLOR_STANDARD_BT709, output.getInteger(MediaFormat.KEY_COLOR_STANDARD))
+                assertEquals(MediaFormat.COLOR_TRANSFER_SDR_VIDEO, output.getInteger(MediaFormat.KEY_COLOR_TRANSFER))
+                assertEquals(MediaFormat.COLOR_RANGE_LIMITED, output.getInteger(MediaFormat.KEY_COLOR_RANGE))
+                println("${codec.name}: reported BT.709 / SDR / Limited after Surface encoding")
+            } finally {
+                runCatching { codec.stop() }; codec.release(); surface?.release()
+            }
+        }
+    }
+
     @Test fun rawDirectOutputMatchesLegacyAndProtectsBufferBounds() {
         for (format in listOf(2, 3, 5, 6, 7, 4, 9)) {
             val dimensions = if (format in listOf(4, 6, 9)) listOf(2 to 2, 8 to 6, 33 to 31)

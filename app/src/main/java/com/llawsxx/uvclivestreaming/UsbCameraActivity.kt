@@ -69,6 +69,8 @@ import com.llawsxx.uvclivestreaming.recording.ContainerFormat
 import com.llawsxx.uvclivestreaming.recording.NativeUsbCapture
 import com.llawsxx.uvclivestreaming.recording.MjpegDecodePool
 import com.llawsxx.uvclivestreaming.recording.RawVideoConverter
+import com.llawsxx.uvclivestreaming.recording.encoderLabel
+import com.llawsxx.uvclivestreaming.recording.encoderTransferOptions
 import com.llawsxx.uvclivestreaming.recording.GpuVideoFrame
 import com.llawsxx.uvclivestreaming.recording.GpuVideoRenderer
 import com.llawsxx.uvclivestreaming.recording.RecorderController
@@ -196,6 +198,9 @@ private fun UsbCameraScreen() {
     var bitrateMode by rememberSaveable { mutableStateOf(uiSettings.bitrateMode) }
     var yuvMatrix by rememberSaveable { mutableStateOf(uiSettings.yuvMatrix) }
     var sourceRange by rememberSaveable { mutableStateOf(uiSettings.sourceRange) }
+    var encoderColorStandard by rememberSaveable { mutableStateOf(uiSettings.encoderColorStandard) }
+    var encoderColorTransfer by rememberSaveable { mutableStateOf(uiSettings.encoderColorTransfer) }
+    var encoderColorRange by rememberSaveable { mutableStateOf(uiSettings.encoderColorRange) }
     var forceSpsVui by rememberSaveable { mutableStateOf(uiSettings.forceSpsVui) }
     var rewriteColorRange by rememberSaveable { mutableStateOf(uiSettings.rewriteColorRange) }
     var rewriteColorStandard by rememberSaveable { mutableStateOf(uiSettings.rewriteColorStandard) }
@@ -258,6 +263,7 @@ private fun UsbCameraScreen() {
         selectedName, selectedMode?.display, includeAudio, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
+        encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
         forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
     ) {
@@ -279,6 +285,9 @@ private fun UsbCameraScreen() {
             bufferFrames = bufferFrames,
             yuvMatrix = yuvMatrix,
             sourceRange = sourceRange,
+            encoderColorStandard = encoderColorStandard,
+            encoderColorTransfer = encoderColorTransfer,
+            encoderColorRange = encoderColorRange,
             forceSpsVui = forceSpsVui,
             rewriteColorRange = rewriteColorRange,
             rewriteColorStandard = rewriteColorStandard,
@@ -506,6 +515,7 @@ private fun UsbCameraScreen() {
                 bFrames.toIntOrNull()?.coerceIn(0, 4) ?: 0,
                 timestampSmoothingEnabled, timestampSmoothingNtscEnabled, timestampSmoothingDelta ?: 0.1,
                 yuvMatrix, sourceRange,
+                encoderColorStandard, encoderColorTransfer, encoderColorRange,
                 forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
             )
             ConfigPreferences.save(context, config)
@@ -613,12 +623,26 @@ private fun UsbCameraScreen() {
                 })
             }
         }
+        Text("编码目标颜色", style = MaterialTheme.typography.titleMedium)
+        UsbColorRewriteChoice("颜色标准（Primaries / RGB → YUV 矩阵）",
+            VideoColorStandard.entries, encoderColorStandard, !recording,
+            { if (it == VideoColorStandard.BT2020) "BT.2020 / NCL 矩阵" else it.label }) { encoderColorStandard = it }
+        UsbColorRewriteChoice("编码 Transfer（传递函数）",
+            encoderTransferOptions, encoderColorTransfer, !recording,
+            { it.encoderLabel() }) { encoderColorTransfer = it }
+        UsbColorRewriteChoice("编码 Range（范围）",
+            VideoColorRange.entries, encoderColorRange, !recording,
+            { it.label }) { encoderColorRange = it }
+        Text("颜色标准同时选择色域和 RGB → YUV 矩阵；下次启动录像或串流生效。",
+            style = MaterialTheme.typography.bodySmall)
+        Text("Transfer 设置不自动转换输入画面为 HDR；设备可能调整所请求的颜色参数。",
+            style = MaterialTheme.typography.bodySmall)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = forceSpsVui, onCheckedChange = { forceSpsVui = it }, enabled = !recording)
             Text("重写编码后 H.26x 颜色元数据")
         }
         if (forceSpsVui) {
-            Text("以下设置用于录像和串流输出的颜色标记。",
+            Text("以下设置重写输出颜色标记，不转换像素；请与编码目标匹配。",
                 style = MaterialTheme.typography.bodySmall)
             UsbColorRewriteChoice("Range（范围）", VideoColorRange.entries, rewriteColorRange, !recording,
                 { if (it == VideoColorRange.DEFAULT) "保持原值" else it.label }) { rewriteColorRange = it }
@@ -860,6 +884,8 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
                                timestampSmoothingEnabled: Boolean, timestampSmoothingNtscEnabled: Boolean,
                                timestampSmoothingMaxDeltaSeconds: Double,
                                yuvMatrix: UsbYuvMatrix, sourceRange: UsbSourceRange,
+                               encoderColorStandard: VideoColorStandard, encoderColorTransfer: VideoColorTransfer,
+                               encoderColorRange: VideoColorRange,
                                forceSpsVui: Boolean, rewriteColorRange: VideoColorRange,
                                rewriteColorStandard: VideoColorStandard, rewriteColorMatrix: VideoColorMatrix,
                                rewriteColorTransfer: VideoColorTransfer): RecordingConfig {
@@ -875,6 +901,9 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
         usbVideoBufferFrames = bufferFrames,
         usbYuvMatrix = yuvMatrix,
         usbSourceRange = sourceRange,
+        colorStandard = encoderColorStandard,
+        colorTransfer = encoderColorTransfer,
+        colorRange = encoderColorRange,
         forceSpsVui = forceSpsVui,
         rewriteColorRange = rewriteColorRange,
         rewriteColorStandard = rewriteColorStandard,

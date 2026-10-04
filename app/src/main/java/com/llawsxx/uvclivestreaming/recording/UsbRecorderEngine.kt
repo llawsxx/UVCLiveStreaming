@@ -143,7 +143,10 @@ class UsbRecorderEngine(
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, config.videoMaxBFrames.coerceIn(0, 4))
             }
             config.videoBitrateMode.mediaFormatValue?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
+            applyEncoderColorSettings(config)
         }
+        Log.i("UsbVideoDiagnostics", "Encoder color request: standard=${config.colorStandard.label} " +
+            "transfer=${config.colorTransfer.encoderLabel()} range=${config.colorRange.label}")
         videoCodec = MediaCodec.createEncoderByType(videoMime).apply {
             configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
@@ -307,6 +310,9 @@ class UsbRecorderEngine(
                     when {
                         index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                             val format = codec.outputFormat
+                            Log.i("UsbVideoDiagnostics", "Encoder reported colors: " +
+                                listOf(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.KEY_COLOR_RANGE)
+                                    .joinToString { key -> "$key=${if (format.containsKey(key)) format.getInteger(key) else "unspecified"}" })
                             outputs.setVideoFormat(vuiRewriter?.rewriteFormat(format) ?: format)
                             videoFormatReady = true
                             markStarted()

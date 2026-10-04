@@ -30,6 +30,9 @@ internal data class UsbUiSettings(
     val bufferFrames: Int = 2,
     val yuvMatrix: UsbYuvMatrix = UsbYuvMatrix.BT601,
     val sourceRange: UsbSourceRange = UsbSourceRange.AUTO,
+    val encoderColorStandard: VideoColorStandard = VideoColorStandard.DEFAULT,
+    val encoderColorTransfer: VideoColorTransfer = VideoColorTransfer.DEFAULT,
+    val encoderColorRange: VideoColorRange = VideoColorRange.DEFAULT,
     val forceSpsVui: Boolean = false,
     val rewriteColorRange: VideoColorRange = VideoColorRange.LIMITED,
     val rewriteColorStandard: VideoColorStandard = VideoColorStandard.BT709,
@@ -67,6 +70,9 @@ internal object UsbUiPreferences {
             bufferFrames = p.getInt("bufferFrames", 2).coerceIn(1, 30),
             yuvMatrix = enumValue(p.getString("yuvMatrix", null), UsbYuvMatrix.BT601),
             sourceRange = enumValue(p.getString("sourceRange", null), UsbSourceRange.AUTO),
+            encoderColorStandard = enumValue(p.getString("encoderColorStandard", null), VideoColorStandard.DEFAULT),
+            encoderColorTransfer = enumValue(p.getString("encoderColorTransfer", null), VideoColorTransfer.DEFAULT),
+            encoderColorRange = enumValue(p.getString("encoderColorRange", null), VideoColorRange.DEFAULT),
             forceSpsVui = p.getBoolean("forceSpsVui", false),
             rewriteColorRange = enumValue(p.getString("rewriteColorRange", null), VideoColorRange.LIMITED),
             rewriteColorStandard = enumValue(p.getString("rewriteColorStandard", null), VideoColorStandard.BT709),
@@ -100,6 +106,9 @@ internal object UsbUiPreferences {
             .putInt("bufferFrames", settings.bufferFrames.coerceIn(1, 30))
             .putString("yuvMatrix", settings.yuvMatrix.name)
             .putString("sourceRange", settings.sourceRange.name)
+            .putString("encoderColorStandard", settings.encoderColorStandard.name)
+            .putString("encoderColorTransfer", settings.encoderColorTransfer.name)
+            .putString("encoderColorRange", settings.encoderColorRange.name)
             .putBoolean("forceSpsVui", settings.forceSpsVui)
             .putString("rewriteColorRange", settings.rewriteColorRange.name)
             .putString("rewriteColorStandard", settings.rewriteColorStandard.name)
