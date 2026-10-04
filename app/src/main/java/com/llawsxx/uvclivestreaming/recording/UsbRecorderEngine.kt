@@ -38,9 +38,10 @@ class UsbRecorderEngine(
     private val releaseDone = CountDownLatch(1)
     private data class VideoFrame(val bytes: ByteArray, val format: Int, val width: Int, val height: Int, val timestampNs: Long)
     private val videoQueue = ArrayBlockingQueue<VideoFrame>(config.usbVideoBufferFrames.coerceIn(1, 30))
+    private val rawVideoConverter = RawVideoConverter()
     private val mjpegDecodePool = MjpegDecodePool(
-        decoder = { bytes, format, width, height ->
-            NativeUsbCapture.nativeDecodeToI420(bytes, format, width, height)
+        decoder = { bytes, format, width, height, destination ->
+            format == 1 && NativeUsbCapture.nativeDecodeMjpegToI420(bytes, width, height, destination)
         },
         capacity = config.usbVideoBufferFrames.coerceIn(1, 30),
     )
@@ -210,10 +211,10 @@ class UsbRecorderEngine(
                     val seconds = (nowNs - lastVideoNs) / 1_000_000_000.0
                     recentFps = (encoded - lastEncoded) / seconds
                     Log.i("UsbVideoDiagnostics", String.format(Locale.US,
-                        "Video fps: received=%.3f rendered=%.3f encoded=%.3f totals=%d/%d/%d MJPEG=%s",
+                        "Video fps: received=%.3f rendered=%.3f encoded=%.3f totals=%d/%d/%d MJPEG=%s rawBuffers=%s",
                         (received - lastReceived) / seconds, (rendered - lastRendered) / seconds,
                         (encoded - lastEncoded) / seconds, received, rendered, encoded,
-                        mjpegDecodePool.diagnostics()))
+                        mjpegDecodePool.diagnostics(), rawVideoConverter.diagnostics()))
                     lastVideoNs = nowNs
                     lastReceived = received
                     lastRendered = rendered
@@ -246,28 +247,35 @@ class UsbRecorderEngine(
                 GpuVideoRenderer(checkNotNull(encoderInputSurface), config.usbYuvMatrix, config.usbSourceRange).use { gpu ->
                     while (running.get()) {
                         val decoded = mjpegDecodePool.poll(5)
-                        val frame = if (decoded != null) {
-                            decoded.yuv?.let {
-                                GpuVideoFrame(it, decoded.width, decoded.height, decoded.timestampNs, fullRange = true)
-                            } ?: continue
-                        } else {
-                            // Wait on the active format only; a 50-ms wait on
-                            // an empty raw queue previously made MJPEG burst.
-                            val raw = videoQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
-                            GpuVideoFrame.fromUsb(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs) ?: continue
+                        var converted: RawVideoConverter.ConvertedFrame? = null
+                        try {
+                            val frame = if (decoded != null) {
+                                GpuVideoFrame.fromDecoded(decoded) ?: continue
+                            } else {
+                                // Wait on the active format only; a 50-ms wait on
+                                // an empty raw queue previously made MJPEG burst.
+                                val raw = videoQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
+                                converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
+                                converted?.frame ?: continue
+                            }
+                            val target = GpuVideoRenderer.PreviewTarget(
+                                preview.takeIf { previewEnabled }, previewRevision.get(),
+                                RecorderController.previewLowFrameRate,
+                            )
+                            gpu.render(frame, target)
+                            renderedVideoFrames.set(gpu.encodedFrameCount)
+                        } finally {
+                            converted?.close()
+                            decoded?.close()
                         }
-                        val target = GpuVideoRenderer.PreviewTarget(
-                            preview.takeIf { previewEnabled }, previewRevision.get(),
-                            RecorderController.previewLowFrameRate,
-                        )
-                        gpu.render(frame, target)
-                        renderedVideoFrames.set(gpu.encodedFrameCount)
                     }
                 }
             } catch (_: InterruptedException) {
                 // Normal session shutdown.
             } catch (error: Throwable) {
                 if (running.get()) onError("USB GPU 视频处理失败：${error.message}")
+            } finally {
+                rawVideoConverter.close()
             }
         }, "usb-video-render").apply { start() }
     }
@@ -510,6 +518,7 @@ class UsbRecorderEngine(
         nativeHandle = 0L
         if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
         videoQueue.clear()
+        rawVideoConverter.close()
         videoRenderThread?.interrupt()
         runCatching { videoRenderThread?.join() }
         runCatching { videoCodec?.signalEndOfInputStream() }

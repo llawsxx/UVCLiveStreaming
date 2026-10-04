@@ -140,9 +140,15 @@ internal class GpuVideoRenderer(
         val ch = (frame.height + 1) / 2
         val ySize = frame.width * frame.height
         val required = if (frame.layout == GpuVideoFrame.I420) ySize + 2 * cw * ch else ySize * 3
-        require(frame.bytes.size >= required)
-        if ((uploadBuffer?.capacity() ?: 0) < required) uploadBuffer = ByteBuffer.allocateDirect(required)
-        val buffer = checkNotNull(uploadBuffer).apply { clear(); put(frame.bytes, 0, required); flip() }
+        val buffer = frame.directBuffer?.let {
+            require(it.isDirect && it.capacity() >= required)
+            it.duplicate().apply { clear(); limit(required) }
+        } ?: run {
+            val bytes = requireNotNull(frame.bytes)
+            require(bytes.size >= required)
+            if ((uploadBuffer?.capacity() ?: 0) < required) uploadBuffer = ByteBuffer.allocateDirect(required)
+            checkNotNull(uploadBuffer).apply { clear(); put(bytes, 0, required); flip() }
+        }
         val changed = textureWidth != frame.width || textureHeight != frame.height || textureLayout != frame.layout
         val planes = if (frame.layout == GpuVideoFrame.I420) 3 else 1
         var offset = 0

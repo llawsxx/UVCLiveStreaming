@@ -163,3 +163,31 @@ UVC 原生测试新增伪包头路径、诊断头内容、环形记录覆盖及�
 H.264 等可变长度压缩源未加入这套固定帧长修复，也没有新增 H.264／HEVC 采集支持；编码输出的 H.264／HEVC 与 USB 源格式是不同层次。
 
 原生模拟测试在 vivo V2338A 上通过：全部上述格式的两帧粘包组装输出与输入逐字节一致；覆盖 6／12 字节头、像素内伪包头、缺像素、同 FID／PTS、旧帧 PTS 不匹配、ERR、无 EOF，以及行跨度／奇数 YUV420 尺寸／容量不足／溢出检查。MJPEG 原生回归测试继续通过。ARM64 APK 构建通过；这版尚未覆盖安装，非 MJPEG 采集流尚未实测。
+
+## MJPEG 直接输出缓冲池
+
+MJPEG 解码工作线程现在借用 `DirectVideoBufferPool` 中的直接缓冲区。JNI 使用 `GetDirectBufferAddress`，将其作为 `library_owns_data=0` 的目标帧交给原有 JPEG 解码器；最终 I420 直接写到该缓冲区，GPU 从同一块内存上传。移除了原有 native I420 → Java ByteArray、ByteArray → GL 上传缓冲区两次整帧复制，以及每帧 I420 Java 数组分配。压缩 JPEG 输入、JPEG 内部平面处理及 GPU 上传仍有各自开销，不能称为整条链路零复制。
+
+借用的缓冲区在有序结果队列、渲染等待及 GL 上传期间保持独占。预览和录像／串流的消费者均通过 `finally` 归还；解码失败、迟到结果、队列淘汰和关闭也会归还。池关闭不会释放仍在 JNI／渲染线程使用的内存；后续归还不再缓存。空闲缓存最多 32 MiB，缓冲数量受工作线程和输出队列容量约束；完成结果仍保留原有 8 帧／32 MiB 上限，32 MiB 不是整个解码过程的内存上限。
+
+`MjpegDecodePool.Diagnostics.outputBuffers` 提供 allocations／reuses／inUse／cached。固定分辨率稳定运行后应看到 allocations 基本停止增长、reuses 持续增加；停止并归还全部消费者后 inUse／cached 为零。
+
+验证：46 项 JVM 单元测试通过，覆盖乱序、消费者持帧期间不可覆盖、归还后的复用、失败／迟到／关闭释放、缓存边界及分辨率变化。在 vivo V2338A 的独立 `app_process` 中运行 4 项 APK 内测试通过：新旧 I420 输出逐字节一致（33×31 奇数尺寸、前后杂字节、缺 SOI／EOI）、非直接／只读／容量不足缓冲的拒绝与越界哨兵检查、直接缓冲 GPU 像素／方向与复用、原始 YUV 和 JPEG 容错回归。测试不覆盖安装，不停止当前 APP；测试前后 APP PID 均为 11332。
+
+原有 Android DHT 测试在旧版 APK 上同样出现 76 与 75 的像素差异。`Bitmap.compress` 可能输出自定义霍夫曼表，移除 DHT 后用默认表不能要求恢复原始像素；该断言已改为确认新旧输出路径的默认表回退结果一致。
+
+ARM64 APK 构建通过并复制到 `app/build/outputs/apk/debug/app-debug.apk`，SHA256 为 `B16CE807DD00173AB5AAE26D50A2A157C9877626BC4A56F16F66D94F16BE055B`。当前未覆盖安装，实际采集期间的解码耗时、CPU 和 GC 改善尚待运行新版后测量。
+
+## 未压缩格式直接输出
+
+预览和录像／串流的未压缩图像现在通过 `RawVideoConverter` 借用直接缓冲区，在渲染线程调用 `nativeConvertRawToGpuBuffer`。YUYV／UYVY、NV12、P010 转换为 I420 时直接写入该缓冲区，移除 native 转换结果 → Java ByteArray → 上传缓冲区两次复制，以及每帧转换结果数组分配。YUYV／UYVY 的色度两行平均和舍入、NV12 的 UV 拆分、P010 保留高 8 位等算法与旧路径共享；色彩范围、矩阵选择、时间戳保持原语义。
+
+I420、RGB／BGR 使用 `GetByteArrayRegion` 从输入数组直接复制到池中，没有额外的输入临时缓冲或格式转换。RGB／BGR 保持原布局，由 GPU 处理通道顺序。I420／RGB／BGR 原本已有可复用的 GL 上传缓冲，因此此次复制次数没有下降，不应宣称所有未压缩格式均减少两次复制。
+
+以 USB 接收缓冲区起、GPU 上传前的明确 CPU 复制为口径：YUYV／UYVY、NV12、P010 从 5 次降为 3 次，另有一次格式转换；这些格式的 `GetByteArrayElements` 仍可能产生额外输入复制。I420／RGB／BGR 仍为 4 次。libuvc 组帧、回调帧及输入 Java 数组的复制和 GPU 上传仍存在，没有改动 USB 回调的帧内存所有权。Java 输入队列继续有界，转换在出队后执行，因此排队丢帧不持有直接缓冲。结果在完成渲染、预览无效、被中断和异常时均通过 `finally` 归还；关闭池不会破坏仍被转换／渲染持有的帧。
+
+原始图像池最多缓存 1 个缓冲（空闲字节上限 32 MiB），尺寸变化时丢弃不匹配的空闲缓冲。`UsbVideoDiagnostics` 新增 `rawBuffers` 的 allocations／reuses／inUse／cached 计数，固定尺寸运行时应主要增加 reuses。
+
+验证：51 项 JVM 单元测试通过，新增原始格式的输出尺寸／布局／范围／时间戳、源长度和几何验证、持帧独占、复用、转换失败／异常释放及关闭测试。vivo V2338A 独立 `app_process` 中 6 项 JNI／GPU 测试通过，新增覆盖 7 种原始格式、I420／RGB 奇数尺寸、输入不被修改、缓冲切片前后哨兵、只读／非直接／容量不足拒绝、新旧有效图像字节及 GPU 像素一致；4 项 MJPEG／旧格式回归继续通过。测试前后正在运行的 APP PID 均为 19494，未覆盖安装。
+
+最新 ARM64 APK：`app/build/outputs/apk/debug/app-debug.apk`，SHA256 `B1D3875647BED81B6AACA9211F2CBFCC0122C10638C693F424101F4BE8AAA4EB`。实际 USB 未压缩采集流的性能改善仍需运行新版后测量。

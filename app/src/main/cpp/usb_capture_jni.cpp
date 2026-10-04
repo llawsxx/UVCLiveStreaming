@@ -582,6 +582,155 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeFormat(JNIEnv
     return array;
 }
 
+static bool decode_mjpeg_i420(const uint8_t *src, size_t length, int width, int height,
+                              uvc_frame_t *destination) {
+    thread_local std::vector<uint8_t> normalized;
+    size_t soi = length;
+    for (size_t i = 0; i + 1 < length; ++i) {
+        if (src[i] == 0xff && src[i + 1] == 0xd8) { soi = i; break; }
+    }
+    const bool missing_soi = soi == length;
+    if (missing_soi) {
+        soi = mjpeg_missing_soi_header(src, length, width, height);
+        if (soi == SIZE_MAX) {
+            char detail[192] = "SOI absent; no complete baseline header; first=";
+            size_t used = std::strlen(detail);
+            for (size_t i = 0; i < std::min(length, size_t{16}); ++i)
+                used += std::snprintf(detail + used, sizeof(detail) - used, "%02X", src[i]);
+            record_mjpeg_decode(true, false, false, false, true, 0, detail, length, width, height);
+            return false;
+        }
+    }
+    size_t end = length;
+    bool eoi = false;
+    for (size_t i = length; i >= soi + 2; --i) {
+        if (src[i - 2] == 0xff && src[i - 1] == 0xd9) { end = i; eoi = true; break; }
+    }
+    const uint8_t *payload = src + soi;
+    size_t payload_size = end - soi;
+    if (missing_soi || !eoi) {
+        normalized.clear();
+        if (missing_soi) {
+            normalized.push_back(0xff);
+            normalized.push_back(0xd8);
+        }
+        normalized.insert(normalized.end(), payload, payload + payload_size);
+        if (!eoi) {
+            normalized.push_back(0xff);
+            normalized.push_back(0xd9);
+        }
+        payload = normalized.data();
+        payload_size = normalized.size();
+    }
+    uvc_frame_t in{};
+    in.data = const_cast<uint8_t *>(payload);
+    in.data_bytes = payload_size;
+    in.width = width; in.height = height; in.frame_format = UVC_FRAME_FORMAT_MJPEG;
+    long warnings = 0;
+    char detail[256]{};
+    const auto decoded = uvc_mjpeg2i420_diagnostic(&in, destination, &warnings, detail, sizeof(detail));
+    record_mjpeg_decode(missing_soi, !eoi, soi != 0, missing_soi, decoded != UVC_SUCCESS,
+        warnings, detail, length, width, height);
+    return decoded == UVC_SUCCESS;
+}
+
+static void *writable_direct_output(JNIEnv *env, jobject destination, size_t size) {
+    if (!destination) return nullptr;
+    auto *data = env->GetDirectBufferAddress(destination);
+    const auto capacity = env->GetDirectBufferCapacity(destination);
+    if (!data || capacity < static_cast<jlong>(size)) return nullptr;
+    // Kotlin supplies writable buffers. Reject read-only aliases as well as undersized/non-direct ones.
+    auto buffer_class = env->GetObjectClass(destination);
+    if (!buffer_class) return nullptr;
+    auto is_read_only = env->GetMethodID(buffer_class, "isReadOnly", "()Z");
+    const bool read_only = is_read_only && env->CallBooleanMethod(destination, is_read_only);
+    env->DeleteLocalRef(buffer_class);
+    return env->ExceptionCheck() || read_only ? nullptr : data;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegToI420(
+    JNIEnv *env, jobject, jbyteArray encoded, jint width, jint height, jobject destination) {
+    if (!encoded || width <= 0 || height <= 0 || width > 3840 || height > 2160)
+        return JNI_FALSE;
+    const size_t size = static_cast<size_t>(width) * height +
+        2 * static_cast<size_t>((width + 1) / 2) * ((height + 1) / 2);
+    auto *data = writable_direct_output(env, destination, size);
+    if (!data) return JNI_FALSE;
+    const size_t length = env->GetArrayLength(encoded);
+    auto elements = env->GetByteArrayElements(encoded, nullptr);
+    if (!elements) return JNI_FALSE;
+    // libuvc treats this as caller-owned memory: it must neither realloc nor free it.
+    uvc_frame_t output{};
+    output.data = data;
+    output.data_bytes = size;
+    bool success = false;
+    try {
+        success = decode_mjpeg_i420(reinterpret_cast<const uint8_t *>(elements), length, width, height, &output);
+    } catch (const std::exception &error) {
+        env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
+        throw_java(env, error.what());
+        return JNI_FALSE;
+    }
+    env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
+    return success ? JNI_TRUE : JNI_FALSE;
+}
+
+static void repack_raw_i420(const uint8_t *src, int format, int width, int height, uint8_t *dst) {
+    const size_t pixels = static_cast<size_t>(width) * height;
+    const size_t cw = (width + 1) / 2, ch = (height + 1) / 2;
+    auto read8 = [&](size_t off) -> uint8_t {
+        // P010 stores 10 significant bits in the MSBs; the current SDR path retains the high eight bits.
+        return format == 7 ? src[off * 2 + 1] : src[off];
+    };
+    if (format == 5 || format == 7) {
+        for (size_t i = 0; i < pixels; ++i) dst[i] = read8(i);
+        for (size_t i = 0; i < cw * ch; ++i) {
+            dst[pixels + i] = read8(pixels + 2 * i);
+            dst[pixels + cw * ch + i] = read8(pixels + 2 * i + 1);
+        }
+    } else {
+        const int yo = format == 2 ? 0 : 1, uo = format == 2 ? 1 : 0, vo = format == 2 ? 3 : 2;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; x += 2) {
+                size_t off = (static_cast<size_t>(y) * width + x) * 2;
+                dst[static_cast<size_t>(y) * width + x] = src[off + yo];
+                dst[static_cast<size_t>(y) * width + x + 1] = src[off + yo + 2];
+                if (!(y & 1)) {
+                    size_t ci = static_cast<size_t>(y / 2) * cw + x / 2;
+                    dst[pixels + ci] = (src[off + uo] + src[off + width * 2 + uo] + 1) / 2;
+                    dst[pixels + cw * ch + ci] = (src[off + vo] + src[off + width * 2 + vo] + 1) / 2;
+                }
+            }
+        }
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeConvertRawToGpuBuffer(
+    JNIEnv *env, jobject, jbyteArray encoded, jint format, jint width, jint height, jobject destination) {
+    if (!encoded || width <= 0 || height <= 0 || width > 3840 || height > 2160) return JNI_FALSE;
+    const bool rgb = format == 4 || format == 9;
+    if (!rgb && format != 2 && format != 3 && format != 5 && format != 6 && format != 7) return JNI_FALSE;
+    if (!rgb && format != 6 && ((width & 1) || (height & 1))) return JNI_FALSE;
+    const size_t pixels = static_cast<size_t>(width) * height;
+    const size_t size = rgb ? pixels * 3 : pixels + 2 * static_cast<size_t>((width + 1) / 2) * ((height + 1) / 2);
+    const size_t required = format == 2 || format == 3 ? pixels * 2 : format == 7 ? pixels * 3 : size;
+    if (static_cast<size_t>(env->GetArrayLength(encoded)) < required) return JNI_FALSE;
+    auto *dst = static_cast<uint8_t *>(writable_direct_output(env, destination, size));
+    if (!dst) return JNI_FALSE;
+    if (rgb || format == 6) {
+        // No intermediate native copy or input array pin is needed for layouts already usable by GL.
+        env->GetByteArrayRegion(encoded, 0, static_cast<jsize>(size), reinterpret_cast<jbyte *>(dst));
+        return env->ExceptionCheck() ? JNI_FALSE : JNI_TRUE;
+    }
+    auto elements = env->GetByteArrayElements(encoded, nullptr);
+    if (!elements) return JNI_FALSE;
+    repack_raw_i420(reinterpret_cast<const uint8_t *>(elements), format, width, height, dst);
+    env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
+    return JNI_TRUE;
+}
+
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
     JNIEnv *env, jobject, jbyteArray encoded, jint format, jint width, jint height) {
@@ -599,7 +748,6 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
     if (format != 1 && length < required) return nullptr;
     struct YuvScratch {
         uvc_frame_t *frame = uvc_allocate_frame(0);
-        std::vector<uint8_t> normalized;
         std::vector<jbyte> raw;
         ~YuvScratch() { if (frame) uvc_free_frame(frame); }
     };
@@ -610,84 +758,11 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeToI420(
     const auto *src = reinterpret_cast<const uint8_t *>(elements);
     const jbyte *output = nullptr;
     if (format == 1) {
-        size_t soi = length;
-        for (size_t i = 0; i + 1 < length; ++i) {
-            if (src[i] == 0xff && src[i + 1] == 0xd8) { soi = i; break; }
-        }
-        const bool missing_soi = soi == length;
-        if (missing_soi) {
-            soi = mjpeg_missing_soi_header(src, length, width, height);
-            if (soi == SIZE_MAX) {
-                char detail[192] = "SOI absent; no complete baseline header; first=";
-                size_t used = std::strlen(detail);
-                for (size_t i = 0; i < std::min(length, size_t{16}); ++i)
-                    used += std::snprintf(detail + used, sizeof(detail) - used, "%02X", src[i]);
-                record_mjpeg_decode(true, false, false, false, true, 0, detail, length, width, height);
-                env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
-                return nullptr;
-            }
-        }
-        size_t end = length;
-        bool eoi = false;
-        for (size_t i = length; i >= soi + 2; --i) {
-            if (src[i - 2] == 0xff && src[i - 1] == 0xd9) { end = i; eoi = true; break; }
-        }
-        const uint8_t *payload = src + soi;
-        size_t payload_size = end - soi;
-        if (missing_soi || !eoi) {
-            scratch.normalized.clear();
-            if (missing_soi) {
-                scratch.normalized.push_back(0xff);
-                scratch.normalized.push_back(0xd8);
-            }
-            scratch.normalized.insert(scratch.normalized.end(), payload, payload + payload_size);
-            if (!eoi) {
-                scratch.normalized.push_back(0xff);
-                scratch.normalized.push_back(0xd9);
-            }
-            payload = scratch.normalized.data();
-            payload_size = scratch.normalized.size();
-        }
-        uvc_frame_t in{};
-        in.data = const_cast<uint8_t *>(payload);
-        in.data_bytes = payload_size;
-        in.width = width; in.height = height; in.frame_format = UVC_FRAME_FORMAT_MJPEG;
-        long warnings = 0;
-        char detail[256]{};
-        const auto decoded = uvc_mjpeg2i420_diagnostic(&in, scratch.frame, &warnings, detail, sizeof(detail));
-        record_mjpeg_decode(missing_soi, !eoi, soi != 0, missing_soi, decoded != UVC_SUCCESS,
-            warnings, detail, length, width, height);
-        if (decoded == UVC_SUCCESS)
+        if (decode_mjpeg_i420(src, length, width, height, scratch.frame))
             output = static_cast<const jbyte *>(scratch.frame->data);
     } else {
         scratch.raw.resize(size);
-        auto *dst = reinterpret_cast<uint8_t *>(scratch.raw.data());
-        auto read8 = [&](size_t off) -> uint8_t {
-            // P010 stores 10 significant bits in the MSBs. This app's current
-            // SDR encoder path uses 8-bit output; retain the high eight bits.
-            return format == 7 ? src[off * 2 + 1] : src[off];
-        };
-        if (format == 5 || format == 7) {
-            for (size_t i = 0; i < pixels; ++i) dst[i] = read8(i);
-            for (size_t i = 0; i < cw * ch; ++i) {
-                dst[pixels + i] = read8(pixels + 2 * i);
-                dst[pixels + cw * ch + i] = read8(pixels + 2 * i + 1);
-            }
-        } else {
-            const int yo = format == 2 ? 0 : 1, uo = format == 2 ? 1 : 0, vo = format == 2 ? 3 : 2;
-            for (int y = 0; y < height; ++y) {
-                for (int x = 0; x < width; x += 2) {
-                    size_t off = (static_cast<size_t>(y) * width + x) * 2;
-                    dst[static_cast<size_t>(y) * width + x] = src[off + yo];
-                    dst[static_cast<size_t>(y) * width + x + 1] = src[off + yo + 2];
-                    if (!(y & 1)) {
-                        size_t ci = static_cast<size_t>(y / 2) * cw + x / 2;
-                        dst[pixels + ci] = (src[off + uo] + src[off + width * 2 + uo] + 1) / 2;
-                        dst[pixels + cw * ch + ci] = (src[off + vo] + src[off + width * 2 + vo] + 1) / 2;
-                    }
-                }
-            }
-        }
+        repack_raw_i420(src, format, width, height, reinterpret_cast<uint8_t *>(scratch.raw.data()));
         output = scratch.raw.data();
     }
     jbyteArray result = output ? env->NewByteArray(static_cast<jsize>(size)) : nullptr;

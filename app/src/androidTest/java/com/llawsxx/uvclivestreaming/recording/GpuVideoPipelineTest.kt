@@ -13,10 +13,138 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 
 @RunWith(AndroidJUnit4::class)
 class GpuVideoPipelineTest {
     private fun bytes(vararg values: Int) = values.map { it.toByte() }.toByteArray()
+
+    @Test fun rawDirectOutputMatchesLegacyAndProtectsBufferBounds() {
+        for (format in listOf(2, 3, 5, 6, 7, 4, 9)) {
+            val dimensions = if (format in listOf(4, 6, 9)) listOf(2 to 2, 8 to 6, 33 to 31)
+                else listOf(2 to 2, 8 to 6)
+            for ((width, height) in dimensions) {
+                val pixels = width * height
+                val yuvSize = pixels + 2 * ((width + 1) / 2) * ((height + 1) / 2)
+                val inputSize = when (format) { 2, 3 -> pixels * 2; 4, 7, 9 -> pixels * 3; else -> yuvSize }
+                val size = if (format == 4 || format == 9) pixels * 3 else yuvSize
+                val input = ByteArray(inputSize + 3) { ((it * 73 + format * 19) and 255).toByte() }
+                val original = input.copyOf()
+                val reference = if (format == 4 || format == 9) input.copyOf(size)
+                    else NativeUsbCapture.nativeDecodeToI420(input, format, width, height)!!.copyOf(size)
+                val guarded = ByteBuffer.allocateDirect(size + 16)
+                repeat(3) {
+                    for (i in 0 until guarded.capacity()) guarded.put(i, 0x5a.toByte())
+                    val output = guarded.duplicate().apply { position(8); limit(8 + size) }.slice()
+                    output.position(1)
+                    assertTrue(NativeUsbCapture.nativeConvertRawToGpuBuffer(input, format, width, height, output))
+                    assertEquals(1, output.position())
+                    val actual = ByteArray(size).also { output.duplicate().apply { clear(); get(it) } }
+                    assertArrayEquals(reference, actual)
+                    assertArrayEquals(original, input)
+                    for (i in 0 until 8) assertEquals(0x5a.toByte(), guarded.get(i))
+                    for (i in size + 8 until guarded.capacity()) assertEquals(0x5a.toByte(), guarded.get(i))
+                }
+                assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(input, format, width, height, ByteBuffer.allocate(size)))
+                assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(input, format, width, height, ByteBuffer.allocateDirect(size - 1)))
+                assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(input, format, width, height, guarded.asReadOnlyBuffer()))
+                assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(input.copyOf(inputSize - 1), format, width, height, guarded))
+            }
+        }
+        val output = ByteBuffer.allocateDirect(64)
+        for (format in listOf(0, 1, 8, 10))
+            assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(ByteArray(64), format, 2, 2, output))
+        for (format in listOf(2, 3, 5, 7))
+            assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(ByteArray(64), format, 3, 2, output))
+        assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(ByteArray(64), 6, 0, 2, output))
+        assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(ByteArray(64), 6, 3841, 2, output))
+    }
+
+    @Test fun rawDirectPipelinePreservesGpuPixelsLayoutAndRange() {
+        ImageReader.newInstance(2, 2, PixelFormat.RGBA_8888, 2).use { reader ->
+            GpuVideoRenderer().use { gpu ->
+                RawVideoConverter().use { converter ->
+                    val target = GpuVideoRenderer.PreviewTarget(reader.surface, 0)
+                    for (format in listOf(2, 3, 5, 6, 7, 4, 9)) repeat(3) { round ->
+                        val inputSize = when (format) { 2, 3 -> 8; 4, 7, 9 -> 12; else -> 6 }
+                        val input = ByteArray(inputSize) { ((it * 73 + format * 19 + round * 11) and 255).toByte() }
+                        val reference = GpuVideoFrame.fromUsb(input, format, 2, 2, 1)!!
+                        assertTrue(gpu.render(reference, target))
+                        val expected = readPixels(reader)
+                        converter.convert(input, format, 2, 2, 2)!!.use { converted ->
+                            assertEquals(reference.layout, converted.frame.layout)
+                            assertEquals(reference.fullRange, converted.frame.fullRange)
+                            assertTrue(gpu.render(converted.frame, target))
+                            expected.zip(readPixels(reader)).forEach { (a, b) -> assertArrayEquals(a, b) }
+                        }
+                    }
+                    assertEquals(0, converter.diagnostics().inUse)
+                    assertTrue(converter.diagnostics().reuses > 0)
+                }
+            }
+        }
+    }
+
+    @Test fun directMjpegOutputMatchesLegacyIncludingMarkerRecoveryAndBounds() {
+        val bitmap = Bitmap.createBitmap(33, 31, Bitmap.Config.ARGB_8888)
+        val jpeg = try {
+            for (y in 0 until bitmap.height) for (x in 0 until bitmap.width)
+                bitmap.setPixel(x, y, Color.rgb(x * 7, y * 8, (x + y) * 3))
+            ByteArrayOutputStream().also { assertTrue(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) }.toByteArray()
+        } finally { bitmap.recycle() }
+        val size = 33 * 31 + 2 * 17 * 16
+        val output = ByteBuffer.allocateDirect(size + 16)
+        val variants = listOf(jpeg, bytes(0, 1, 2) + jpeg + bytes(0, 0),
+            jpeg.copyOf(jpeg.size - 2), jpeg.copyOfRange(2, jpeg.size))
+        repeat(3) {
+            for (input in variants) {
+                val reference = NativeUsbCapture.nativeDecodeToI420(input, 1, 33, 31)
+                assertNotNull(reference)
+                for (i in 0 until output.capacity()) output.put(i, 0x5a.toByte())
+                output.position(7)
+                assertTrue(NativeUsbCapture.nativeDecodeMjpegToI420(input, 33, 31, output))
+                assertEquals(7, output.position())
+                val actual = ByteArray(size)
+                output.duplicate().apply { clear(); get(actual) }
+                assertArrayEquals(reference, actual)
+                for (i in size until output.capacity()) assertEquals(0x5a.toByte(), output.get(i))
+            }
+        }
+        assertFalse(NativeUsbCapture.nativeDecodeMjpegToI420(jpeg, 33, 31, ByteBuffer.allocate(size)))
+        assertFalse(NativeUsbCapture.nativeDecodeMjpegToI420(jpeg, 33, 31, ByteBuffer.allocateDirect(size - 1)))
+        assertFalse(NativeUsbCapture.nativeDecodeMjpegToI420(jpeg, 33, 31, output.asReadOnlyBuffer()))
+        assertFalse(NativeUsbCapture.nativeDecodeMjpegToI420(jpeg, 32, 31, output))
+        assertFalse(NativeUsbCapture.nativeDecodeMjpegToI420(bytes(0, 1, 2), 33, 31, output))
+        assertTrue(NativeUsbCapture.nativeDecodeMjpegToI420(jpeg, 33, 31, output))
+    }
+
+    @Test fun directBufferUploadsTheSamePixelsAndCanBeReusedAfterRender() {
+        DirectVideoBufferPool(1).use { buffers ->
+            ImageReader.newInstance(2, 2, PixelFormat.RGBA_8888, 2).use { reader ->
+                GpuVideoRenderer().use { gpu ->
+                    val target = GpuVideoRenderer.PreviewTarget(reader.surface, 0)
+                    val original = bytes(235, 235, 16, 16, 128, 128)
+                    assertTrue(gpu.render(GpuVideoFrame(original, 2, 2, 1), target))
+                    val expected = readPixels(reader)
+                    val first = buffers.acquire(6)!!
+                    val memory = first.buffer
+                    try {
+                        memory.put(original)
+                        assertTrue(gpu.render(GpuVideoFrame(null, 2, 2, 2, directBuffer = memory), target))
+                    } finally { first.close() }
+                    expected.zip(readPixels(reader)).forEach { (a, b) -> assertArrayEquals(a, b) }
+                    buffers.acquire(6)!!.use { second ->
+                        assertSame(memory, second.buffer)
+                        second.buffer.put(bytes(16, 16, 235, 235, 128, 128))
+                        assertTrue(gpu.render(GpuVideoFrame(null, 2, 2, 3, directBuffer = second.buffer), target))
+                        val reversed = readPixels(reader)
+                        assertTrue(reversed[0].all { it < 10 })
+                        assertTrue(reversed[2].all { it > 245 })
+                    }
+                }
+            }
+        }
+    }
 
     @Test fun rawFormatsKeepLumaAndChromaWithoutRgbConversion() {
         val expected = bytes(16, 32, 64, 235, 90, 240)
@@ -49,7 +177,9 @@ class GpuVideoPipelineTest {
         assertArrayEquals(reference, NativeUsbCapture.nativeDecodeToI420(jpeg.copyOf(jpeg.size - 2), 1, 32, 32))
         assertNull(NativeUsbCapture.nativeDecodeToI420(jpeg, 1, 64, 32))
         assertNull(NativeUsbCapture.nativeDecodeToI420(bytes(0, 1, 2), 1, 32, 32))
-        // UVC cameras often omit DHT segments; use the same defaults as before.
+        // UVC cameras often omit standard DHT segments. Bitmap.compress may
+        // use custom tables, so stripping them cannot promise the original
+        // pixels; verify that both output paths use the same fallback instead.
         val withoutDht = ByteArrayOutputStream()
         var offset = 0
         while (offset < jpeg.size) {
@@ -58,7 +188,11 @@ class GpuVideoPipelineTest {
                 offset += length + 2
             } else { withoutDht.write(jpeg[offset].toInt()); offset++ }
         }
-        assertArrayEquals(reference, NativeUsbCapture.nativeDecodeToI420(withoutDht.toByteArray(), 1, 32, 32))
+        val fallback = NativeUsbCapture.nativeDecodeToI420(withoutDht.toByteArray(), 1, 32, 32)
+        assertNotNull(fallback)
+        val direct = ByteBuffer.allocateDirect(reference.size)
+        assertTrue(NativeUsbCapture.nativeDecodeMjpegToI420(withoutDht.toByteArray(), 32, 32, direct))
+        assertArrayEquals(fallback, ByteArray(reference.size).also { direct.get(it) })
     }
 
     private fun readPixels(reader: ImageReader): List<IntArray> {

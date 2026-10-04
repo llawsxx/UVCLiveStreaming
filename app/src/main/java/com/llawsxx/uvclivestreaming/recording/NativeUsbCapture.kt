@@ -1,5 +1,6 @@
 package com.llawsxx.uvclivestreaming.recording
 
+import java.nio.ByteBuffer
 import kotlin.math.log10
 import kotlin.math.sqrt
 
@@ -35,6 +36,10 @@ internal object NativeUsbCapture {
     external fun nativeListVideoModes(fd: Int): Array<String>
     /** Decode MJPEG or repack raw YUV into I420; never performs YUV-to-RGB conversion. */
     external fun nativeDecodeToI420(bytes: ByteArray, format: Int, width: Int, height: Int): ByteArray?
+    /** Writes MJPEG I420 directly into an exclusively leased direct buffer (offset zero). */
+    external fun nativeDecodeMjpegToI420(bytes: ByteArray, width: Int, height: Int, destination: ByteBuffer): Boolean
+    /** Repack raw YUV to I420 or copy RGB/BGR into caller-owned direct memory (offset zero). */
+    external fun nativeConvertRawToGpuBuffer(bytes: ByteArray, format: Int, width: Int, height: Int, destination: ByteBuffer): Boolean
     /** [video width, video height, audio sample rate, audio channels]. */
     external fun nativeFormat(handle: Long): IntArray
     external fun nativeStart(handle: Long, callback: UsbCaptureCallback)

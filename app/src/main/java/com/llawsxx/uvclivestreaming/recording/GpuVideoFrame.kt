@@ -1,18 +1,26 @@
 package com.llawsxx.uvclivestreaming.recording
 
+import java.nio.ByteBuffer
 /** Pixels remain YUV until the fragment shader; RGB cameras keep their native RGB. */
 internal data class GpuVideoFrame(
-    val bytes: ByteArray,
+    val bytes: ByteArray?,
     val width: Int,
     val height: Int,
     val timestampNs: Long,
     val layout: Int = I420,
     val fullRange: Boolean = false,
+    val directBuffer: ByteBuffer? = null,
 ) {
     companion object {
         const val I420 = 0
         const val RGB = 1
         const val BGR = 2
+
+        /** The caller must hold the decoded frame's lease throughout render(). */
+        fun fromDecoded(frame: MjpegDecodePool.DecodedFrame): GpuVideoFrame? = frame.yuv?.let {
+            GpuVideoFrame(null, frame.width, frame.height, frame.timestampNs,
+                fullRange = true, directBuffer = it.buffer)
+        }
 
         fun fromUsb(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long): GpuVideoFrame? {
             if (width !in 1..3840 || height !in 1..2160) return null

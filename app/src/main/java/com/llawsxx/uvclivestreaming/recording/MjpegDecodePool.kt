@@ -1,6 +1,7 @@
 package com.llawsxx.uvclivestreaming.recording
 
 import java.util.TreeMap
+import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -12,7 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * latency cannot grow without bound when the USB source outruns the device.
  */
 internal class MjpegDecodePool(
-    private val decoder: (ByteArray, Int, Int, Int) -> ByteArray?,
+    private val decoder: (ByteArray, Int, Int, Int, ByteBuffer) -> Boolean,
     workerCount: Int = 4,
     capacity: Int = 10,
 ) {
@@ -27,13 +28,16 @@ internal class MjpegDecodePool(
         val averageDecodeMs: Double,
         val inputQueued: Int,
         val outputQueued: Int,
+        val outputBuffers: DirectVideoBufferPool.Diagnostics,
     )
     data class DecodedFrame(
         val width: Int,
         val height: Int,
         val timestampNs: Long,
-        val yuv: ByteArray?,
-    )
+        val yuv: DirectVideoBufferPool.Lease?,
+    ) : AutoCloseable {
+        override fun close() { yuv?.close() }
+    }
 
     private data class InputFrame(
         val sequence: Long,
@@ -54,6 +58,7 @@ internal class MjpegDecodePool(
     // side strictly bounded even when the UI cache is configured larger.
     private val maxCompletedFrames = capacity.coerceIn(1, 8)
     private val maxCompletedBytes = 32L * 1024L * 1024L
+    private val buffers = DirectVideoBufferPool(count + maxCompletedFrames + 1, maxCompletedBytes)
     private var nextSequence = 0L
     private var nextOutput = 0L
     private var completedBytes = 0L
@@ -69,7 +74,7 @@ internal class MjpegDecodePool(
         Diagnostics(nextSequence, decodeAttempts, decodeFailures, inputDrops,
             outputSkippedSequences, lateCompletions, delivered,
             if (decodeAttempts > 0) decodeTotalNs / 1_000_000.0 / decodeAttempts else 0.0,
-            input.size, completed.size)
+            input.size, completed.size, buffers.diagnostics())
     }
 
     fun start() {
@@ -85,6 +90,7 @@ internal class MjpegDecodePool(
     fun offer(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) {
         if (!running.get()) return
         synchronized(monitor) {
+            if (!running.get()) return
             val frame = InputFrame(nextSequence++, bytes, format, width, height, timestampNs)
             if (!input.offer(frame)) {
                 // Drop the oldest queued frame, but publish a completion for
@@ -130,10 +136,12 @@ internal class MjpegDecodePool(
         if (!running.compareAndSet(true, false)) return
         input.clear()
         synchronized(monitor) {
+            completed.values.forEach { it.close() }
             completed.clear()
             completedBytes = 0L
             monitor.notifyAll()
         }
+        buffers.close()
         workers.forEach { it.interrupt() }
         workers.forEach { runCatching { it.join(1_000) } }
         workers.clear()
@@ -144,9 +152,20 @@ internal class MjpegDecodePool(
             val frame = try { input.poll(100, TimeUnit.MILLISECONDS) }
                 catch (_: InterruptedException) { break } ?: continue
             val decodeStartNs = System.nanoTime()
-            val yuv = runCatching {
-                decoder(frame.bytes, frame.format, frame.width, frame.height)
-            }.getOrNull()
+            var yuv: DirectVideoBufferPool.Lease? = null
+            try {
+                if (frame.width in 1..3840 && frame.height in 1..2160) {
+                    val size = frame.width * frame.height + 2 * ((frame.width + 1) / 2) * ((frame.height + 1) / 2)
+                    yuv = buffers.acquire(size)
+                    if (yuv != null && !decoder(frame.bytes, frame.format, frame.width, frame.height, yuv.buffer)) {
+                        yuv.close()
+                        yuv = null
+                    }
+                }
+            } catch (_: Throwable) {
+                yuv?.close()
+                yuv = null
+            }
             val decodeElapsedNs = System.nanoTime() - decodeStartNs
             synchronized(monitor) {
                 if (running.get()) {
@@ -157,7 +176,7 @@ internal class MjpegDecodePool(
                         frame.width, frame.height, frame.timestampNs, yuv,
                     ), frame.sequence)
                     monitor.notifyAll()
-                }
+                } else yuv?.close()
             }
         }
     }
@@ -165,15 +184,18 @@ internal class MjpegDecodePool(
     private fun addCompletedLocked(frame: DecodedFrame, sequence: Long) {
         if (sequence < nextOutput) {
             lateCompletions++
+            frame.close()
             return
         }
         val bounded = if (frame.yuv != null && frame.yuv.size.toLong() > maxCompletedBytes) {
+            frame.close()
             frame.copy(yuv = null)
         } else {
             frame
         }
         completed.remove(sequence)?.let { previous ->
             completedBytes -= previous.yuv?.size?.toLong() ?: 0L
+            previous.close()
         }
         completed[sequence] = bounded
         completedBytes += bounded.yuv?.size?.toLong() ?: 0L
@@ -187,6 +209,7 @@ internal class MjpegDecodePool(
             val sequence = completed.firstKey()
             val removed = completed.remove(sequence) ?: break
             completedBytes -= removed.yuv?.size?.toLong() ?: 0L
+            removed.close()
             if (sequence >= nextOutput) {
                 outputSkippedSequences += sequence + 1L - nextOutput
                 nextOutput = sequence + 1L
@@ -196,6 +219,7 @@ internal class MjpegDecodePool(
             val sequence = completed.firstKey()
             val removed = completed.remove(sequence) ?: break
             completedBytes -= removed.yuv?.size?.toLong() ?: 0L
+            removed.close()
         }
     }
 }

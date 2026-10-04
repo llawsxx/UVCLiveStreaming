@@ -68,6 +68,7 @@ import com.llawsxx.uvclivestreaming.recording.ConfigPreferences
 import com.llawsxx.uvclivestreaming.recording.ContainerFormat
 import com.llawsxx.uvclivestreaming.recording.NativeUsbCapture
 import com.llawsxx.uvclivestreaming.recording.MjpegDecodePool
+import com.llawsxx.uvclivestreaming.recording.RawVideoConverter
 import com.llawsxx.uvclivestreaming.recording.GpuVideoFrame
 import com.llawsxx.uvclivestreaming.recording.GpuVideoRenderer
 import com.llawsxx.uvclivestreaming.recording.RecorderController
@@ -928,6 +929,7 @@ private class UsbIdlePreview(
         val timestampNs: Long,
     )
     private val frameQueue = ArrayBlockingQueue<Frame>(bufferFrames.coerceIn(1, 30))
+    private val rawVideoConverter = RawVideoConverter()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
@@ -937,8 +939,8 @@ private class UsbIdlePreview(
     private var renderThread: Thread? = null
     private val previewRevision = AtomicLong()
     private val mjpegDecodePool = MjpegDecodePool(
-        decoder = { bytes, format, frameWidth, frameHeight ->
-            NativeUsbCapture.nativeDecodeToI420(bytes, format, frameWidth, frameHeight)
+        decoder = { bytes, format, frameWidth, frameHeight, destination ->
+            format == 1 && NativeUsbCapture.nativeDecodeMjpegToI420(bytes, frameWidth, frameHeight, destination)
         },
         capacity = bufferFrames.coerceIn(1, 30),
     )
@@ -970,6 +972,7 @@ private class UsbIdlePreview(
                 if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
                 stopped.set(true)
                 frameQueue.clear()
+                rawVideoConverter.close()
                 mjpegDecodePool.close()
                 surface = null
                 renderThread?.interrupt()
@@ -1024,44 +1027,49 @@ private class UsbIdlePreview(
                 var boundRevision = -1L
                 while (!stopped.get()) {
                     val decoded = mjpegDecodePool.poll(5)
-                    val frame = if (decoded != null) {
-                        decoded.yuv?.let {
-                            GpuVideoFrame(it, decoded.width, decoded.height, decoded.timestampNs, fullRange = true)
-                        } ?: continue
-                    } else {
-                        val raw = frameQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
-                        GpuVideoFrame.fromUsb(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs) ?: continue
-                    }
-                    val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate)
-                    val settings = colorSettings
-                    gpu.setColorSettings(settings.first, settings.second)
-                    if (target.surface?.isValid != true) continue
-                    val nowNs = System.nanoTime()
-                    if (timestampOriginNs == Long.MIN_VALUE || boundRevision != target.revision) {
-                        timestampOriginNs = frame.timestampNs
-                        wallOriginNs = nowNs
-                        boundRevision = target.revision
-                    }
-                    val targetNs = wallOriginNs + frame.timestampNs - timestampOriginNs
-                    if (nowNs - targetNs > 100_000_000L) {
-                        timestampOriginNs = frame.timestampNs
-                        wallOriginNs = nowNs
-                    } else if (targetNs > nowNs) {
-                        val waitNs = targetNs - nowNs
-                        Thread.sleep(waitNs / 1_000_000L, (waitNs % 1_000_000L).toInt())
-                    }
-                    if (stopped.get()) break
-                    if (gpu.render(frame, target)) renderedFrames++
-                    val reportNs = System.nanoTime()
-                    val elapsedNs = reportNs - reportStartedNs
-                    if (elapsedNs >= 1_000_000_000L) {
-                        val currentFps = renderedFrames * 1_000_000_000.0 / elapsedNs
-                        mainHandler.post {
-                            if (!stopped.get()) onMessage("USB 预览：${frame.width}×${frame.height} · " +
-                                String.format(Locale.US, "%.1f fps", currentFps))
+                    var converted: RawVideoConverter.ConvertedFrame? = null
+                    try {
+                        val frame = if (decoded != null) {
+                            GpuVideoFrame.fromDecoded(decoded) ?: continue
+                        } else {
+                            val raw = frameQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
+                            converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
+                            converted?.frame ?: continue
                         }
-                        renderedFrames = 0
-                        reportStartedNs = reportNs
+                        val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate)
+                        val settings = colorSettings
+                        gpu.setColorSettings(settings.first, settings.second)
+                        if (target.surface?.isValid != true) continue
+                        val nowNs = System.nanoTime()
+                        if (timestampOriginNs == Long.MIN_VALUE || boundRevision != target.revision) {
+                            timestampOriginNs = frame.timestampNs
+                            wallOriginNs = nowNs
+                            boundRevision = target.revision
+                        }
+                        val targetNs = wallOriginNs + frame.timestampNs - timestampOriginNs
+                        if (nowNs - targetNs > 100_000_000L) {
+                            timestampOriginNs = frame.timestampNs
+                            wallOriginNs = nowNs
+                        } else if (targetNs > nowNs) {
+                            val waitNs = targetNs - nowNs
+                            Thread.sleep(waitNs / 1_000_000L, (waitNs % 1_000_000L).toInt())
+                        }
+                        if (stopped.get()) break
+                        if (gpu.render(frame, target)) renderedFrames++
+                        val reportNs = System.nanoTime()
+                        val elapsedNs = reportNs - reportStartedNs
+                        if (elapsedNs >= 1_000_000_000L) {
+                            val currentFps = renderedFrames * 1_000_000_000.0 / elapsedNs
+                            mainHandler.post {
+                                if (!stopped.get()) onMessage("USB 预览：${frame.width}×${frame.height} · " +
+                                    String.format(Locale.US, "%.1f fps", currentFps))
+                            }
+                            renderedFrames = 0
+                            reportStartedNs = reportNs
+                        }
+                    } finally {
+                        converted?.close()
+                        decoded?.close()
                     }
                 }
             }
@@ -1072,6 +1080,8 @@ private class UsbIdlePreview(
                 mainHandler.post { onMessage("USB GPU 预览失败：${error.message}") }
                 stop()
             }
+        } finally {
+            rawVideoConverter.close()
         }
     }
 
