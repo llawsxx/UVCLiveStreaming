@@ -211,6 +211,7 @@ data class RecordingConfig(
     val mode: RecordingMode = RecordingMode.AUDIO_VIDEO,
     val cameraId: String = "",
     val usbVideoInputFormat: UsbVideoInputFormat = UsbVideoInputFormat.AUTO,
+    val usbCustomVideoMode: Boolean = false,
     /** Zero selects a supported USB microphone rate automatically. */
     val usbAudioSampleRate: Int = 0,
     /** Bounded queue of pending USB video frames, including MJPEG decode input. */

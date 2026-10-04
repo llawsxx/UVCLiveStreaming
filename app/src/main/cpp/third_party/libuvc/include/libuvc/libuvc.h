@@ -622,6 +622,10 @@ uvc_error_t uvc_probe_stream_ctrl(
     uvc_device_handle_t *devh,
     uvc_stream_ctrl_t *ctrl);
 
+/** Exact descriptor selected by both the interface and format/frame indices. */
+const uvc_frame_desc_t *uvc_get_frame_desc_for_ctrl(
+    uvc_device_handle_t *devh, const uvc_stream_ctrl_t *ctrl);
+
 uvc_error_t uvc_probe_still_ctrl(
     uvc_device_handle_t *devh,
     uvc_still_ctrl_t *still_ctrl);

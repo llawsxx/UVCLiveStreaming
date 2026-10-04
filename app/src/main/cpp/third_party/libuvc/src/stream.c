@@ -258,9 +258,12 @@ uvc_error_t uvc_query_stream_ctrl(
       buf, len, 0
   );
 
-  if (err <= 0) {
+  if (err < 0) {
     return err;
   }
+  /* Even the UVC 1.0 probe block needs 26 bytes. A zero/short response must
+   * not be mistaken for success with the previous control values. */
+  if (err < 26) return UVC_ERROR_IO;
 
   /* now decode following a GET transfer */
   if (req != UVC_SET_CUR) {
@@ -531,7 +534,7 @@ uvc_error_t uvc_get_stream_ctrl_format_size(
         if (frame->intervals) {
           for (interval = frame->intervals; *interval; ++interval) {
             // allow a fps rate of zero to mean "accept first rate available"
-            if (10000000 / *interval == (unsigned int) fps || fps == 0) {
+            if ((10000000ULL + *interval / 2) / *interval == (unsigned int) fps || fps == 0) {
 
               ctrl->bmHint = (1 << 0); /* don't negotiate interval */
               ctrl->bFormatIndex = format->bFormatIndex;
@@ -542,12 +545,14 @@ uvc_error_t uvc_get_stream_ctrl_format_size(
             }
           }
         } else {
-          uint32_t interval_100ns = 10000000 / fps;
+          uint32_t interval_100ns = fps > 0 ? (10000000U + fps / 2) / fps :
+              (frame->dwDefaultFrameInterval ? frame->dwDefaultFrameInterval : frame->dwMinFrameInterval);
           uint32_t interval_offset = interval_100ns - frame->dwMinFrameInterval;
 
-          if (interval_100ns >= frame->dwMinFrameInterval
+          if (interval_100ns && interval_100ns >= frame->dwMinFrameInterval
               && interval_100ns <= frame->dwMaxFrameInterval
               && !(interval_offset
+                   && frame->dwFrameIntervalStep
                    && (interval_offset % frame->dwFrameIntervalStep))) {
 
             ctrl->bmHint = (1 << 0);
@@ -566,6 +571,12 @@ uvc_error_t uvc_get_stream_ctrl_format_size(
 
 found:
   return uvc_probe_stream_ctrl(devh, ctrl);
+}
+
+const uvc_frame_desc_t *uvc_get_frame_desc_for_ctrl(
+    uvc_device_handle_t *devh, const uvc_stream_ctrl_t *ctrl) {
+  uvc_streaming_interface_t *stream_if = _uvc_get_stream_if(devh, ctrl->bInterfaceNumber);
+  return stream_if ? _uvc_find_frame_desc_stream_if(stream_if, ctrl->bFormatIndex, ctrl->bFrameIndex) : NULL;
 }
 
 /** Get a negotiated still control block for some common parameters.
@@ -641,8 +652,10 @@ uvc_error_t uvc_probe_stream_ctrl(
     uvc_stream_ctrl_t *ctrl) {
   uvc_stream_ctrl_t required_ctrl = *ctrl;
 
-  uvc_query_stream_ctrl( devh, ctrl, 1, UVC_SET_CUR );
-  uvc_query_stream_ctrl( devh, ctrl, 1, UVC_GET_CUR );
+  uvc_error_t result = uvc_query_stream_ctrl( devh, ctrl, 1, UVC_SET_CUR );
+  if (result != UVC_SUCCESS) return result;
+  result = uvc_query_stream_ctrl( devh, ctrl, 1, UVC_GET_CUR );
+  if (result != UVC_SUCCESS) return result;
 
   if(!_uvc_stream_params_negotiated(&required_ctrl, ctrl)) {
     UVC_DEBUG("Unable to negotiate streaming format");

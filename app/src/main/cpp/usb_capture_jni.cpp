@@ -5,6 +5,7 @@
 #include <libuac.h>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -18,6 +19,7 @@
 #include <linux/usbdevice_fs.h>
 #include <sys/ioctl.h>
 #include "mjpeg_repair.h"
+#include "usb_video_interval.h"
 
 extern "C" uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out);
 extern "C" uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
@@ -125,10 +127,34 @@ std::string format_label(const uvc_format_desc_t *format) {
     return guid;
 }
 
+uvc_error_t negotiate_custom_video_mode(uvc_device_handle_t *camera, uvc_stream_ctrl_t *ctrl,
+                                        uvc_frame_format wanted, int width, int height, double fps) {
+    // UVC addresses resolution/format by descriptor indices; never guess indices
+    // or decode a differently sized frame as the user's requested dimensions.
+    auto result = uvc_get_stream_ctrl_format_size(camera, ctrl, wanted, width, height, 0);
+    if (result != UVC_SUCCESS) return result;
+    const auto *frame = uvc_get_frame_desc_for_ctrl(camera, ctrl);
+    if (!frame || frame->wWidth != width || frame->wHeight != height) return UVC_ERROR_INVALID_MODE;
+    const uint32_t interval = usb_video_interval(fps, frame->intervals,
+        frame->dwMinFrameInterval, frame->dwMaxFrameInterval, frame->dwFrameIntervalStep, 1);
+    if (!interval) return UVC_ERROR_INVALID_MODE;
+    ctrl->bmHint |= 1;
+    ctrl->dwFrameInterval = interval;
+    result = uvc_probe_stream_ctrl(camera, ctrl);
+    if (result != UVC_SUCCESS) return result;
+    if (std::abs(static_cast<int64_t>(ctrl->dwFrameInterval) - interval) > 1) {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+            "Custom USB fps rejected: requested=%.6f interval=%u returned=%u",
+            fps, interval, ctrl->dwFrameInterval);
+        return UVC_ERROR_INVALID_MODE;
+    }
+    return UVC_SUCCESS;
+}
+
 class UsbCapture {
 public:
-    UsbCapture(JavaVM *vm, int fd, int width, int height, int fps,
-               int preferred_video_format, bool audio, int audio_rate)
+    UsbCapture(JavaVM *vm, int fd, int width, int height, double fps,
+               int preferred_video_format, bool audio, int audio_rate, bool custom_video_mode)
         : vm_(vm) {
         try {
         video_fd_ = dup(fd);
@@ -143,7 +169,10 @@ public:
         if (result != UVC_SUCCESS || !camera_)
             throw std::runtime_error("Cannot open USB camera: " + std::to_string(result));
 
-        const int requested_fps = fps > 0 ? fps : 30;
+        if (custom_video_mode && (!std::isfinite(fps) || fps < 1 || fps > 240 ||
+            width < 1 || width > 3840 || height < 1 || height > 2160 || preferred_video_format == 0))
+            throw std::runtime_error("自定义采集参数无效，请指定格式、分辨率和 1～240 fps 帧率");
+        const double requested_fps = std::isfinite(fps) && fps > 0 ? fps : 30;
         const int requested_width = width > 0 ? width : 1280;
         const int requested_height = height > 0 ? height : 720;
         for (const auto format : {UVC_FRAME_FORMAT_MJPEG, UVC_FRAME_FORMAT_YUYV,
@@ -152,14 +181,19 @@ public:
                                   UVC_FRAME_FORMAT_I420, UVC_FRAME_FORMAT_P010,
                                   UVC_FRAME_FORMAT_H264}) {
             if (preferred_video_format != 0 && preferred_video_format != supported_format(format)) continue;
-            if (uvc_get_stream_ctrl_format_size(camera_, &video_ctrl_, format,
-                    requested_width, requested_height, requested_fps) == UVC_SUCCESS) {
+            const auto mode_result = custom_video_mode
+                ? negotiate_custom_video_mode(camera_, &video_ctrl_, format, requested_width, requested_height, requested_fps)
+                : uvc_get_stream_ctrl_format_size(camera_, &video_ctrl_, format,
+                    requested_width, requested_height, static_cast<int>(std::llround(requested_fps)));
+            if (mode_result == UVC_SUCCESS) {
                 video_format_ = format;
                 width_ = requested_width;
                 height_ = requested_height;
                 break;
             }
         }
+        if (width_ == 0 && custom_video_mode)
+            throw std::runtime_error("设备不支持或未接受此自定义格式、分辨率、帧率组合");
         if (width_ == 0 && preferred_video_format != 0)
             throw std::runtime_error("Selected USB video format, resolution or frame rate is unavailable");
         if (width_ == 0) {
@@ -169,7 +203,7 @@ public:
                 if (preferred_video_format != 0 && preferred_video_format != supported_format(candidate_format)) continue;
                 for (const auto *frame = format->frame_descs; frame; frame = frame->next) {
                     const int candidate_fps = frame->dwDefaultFrameInterval > 0
-                        ? 10000000 / static_cast<int>(frame->dwDefaultFrameInterval) : 30;
+                        ? static_cast<int>(std::llround(10000000.0 / frame->dwDefaultFrameInterval)) : 30;
                     if (frame->wWidth > 1920 || frame->wHeight > 1080) continue;
                     if (uvc_get_stream_ctrl_format_size(camera_, &video_ctrl_, candidate_format,
                             frame->wWidth, frame->wHeight, candidate_fps) == UVC_SUCCESS) {
@@ -502,13 +536,13 @@ private:
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeOpen(
-    JNIEnv *env, jobject, jint fd, jint width, jint height, jint fps, jint video_format,
-    jboolean audio, jint audio_rate) {
+    JNIEnv *env, jobject, jint fd, jint width, jint height, jdouble fps, jint video_format,
+    jboolean audio, jint audio_rate, jboolean custom_video_mode) {
     try {
         JavaVM *vm = nullptr;
         env->GetJavaVM(&vm);
         return reinterpret_cast<jlong>(new UsbCapture(vm, fd, width, height, fps,
-            video_format, audio, audio_rate));
+            video_format, audio, audio_rate, custom_video_mode));
     } catch (const std::exception &error) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "open: %s", error.what());
         throw_java(env, error.what());

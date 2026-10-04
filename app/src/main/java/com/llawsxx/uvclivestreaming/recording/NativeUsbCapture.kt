@@ -30,7 +30,8 @@ internal object NativeUsbCapture {
     init { System.loadLibrary("uvclivestreaming_usb") }
 
     external fun nativeOpen(
-        fd: Int, width: Int, height: Int, fps: Int, videoFormat: Int, audio: Boolean, audioRate: Int,
+        fd: Int, width: Int, height: Int, fps: Double, videoFormat: Int, audio: Boolean, audioRate: Int,
+        customVideoMode: Boolean = false,
     ): Long
     /** Format label, width, height, fps, input format value, and interval description. */
     external fun nativeListVideoModes(fd: Int): Array<String>

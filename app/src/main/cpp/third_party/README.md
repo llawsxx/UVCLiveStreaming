@@ -12,3 +12,14 @@ The original license files are included with each library. `libjpeg-turbo`
 decodes MJPEG frames, including devices that omit Huffman tables. The USB
 capture bridge opens a `UsbDeviceConnection` file descriptor and uses libusb
 through libuvc and libuac; it does not scan device nodes directly.
+
+The local libuvc streaming control code matches nominal integer fps using the
+same nearest-integer rule as the mode list (e.g. 59.94 advertises 60). Continuous
+intervals support selecting the default with fps=0 and a zero step without a
+division/modulo by zero. Probe SET/GET failures are propagated to the caller.
+Control transfers shorter than the minimum 26-byte probe block are rejected.
+The local `uvc_get_frame_desc_for_ctrl` API resolves a frame using the selected
+VideoStreaming interface as well as its format/frame indices.
+The USB bridge can explicitly probe a custom interval after identifying a real
+format/frame descriptor; it rejects a device response that changes the requested
+interval, apart from one 100 ns tick of quantization.

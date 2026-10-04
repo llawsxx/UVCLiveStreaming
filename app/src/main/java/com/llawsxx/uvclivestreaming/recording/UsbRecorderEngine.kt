@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 /** Captures video and PCM directly from the USB Host fd, without Camera2 or AudioRecord. */
 @RequiresApi(Build.VERSION_CODES.O)
@@ -127,8 +128,8 @@ class UsbRecorderEngine(
         usbConnection = requireNotNull(manager.openDevice(device)) { "无法打开 USB 摄像头" }
         nativeHandle = NativeUsbCapture.nativeOpen(
             checkNotNull(usbConnection).fileDescriptor,
-            config.width, config.height, config.fps.toInt(), config.usbVideoInputFormat.nativeValue,
-            config.hasAudio, config.usbAudioSampleRate,
+            config.width, config.height, config.fps, config.usbVideoInputFormat.nativeValue,
+            config.hasAudio, config.usbAudioSampleRate, config.usbCustomVideoMode,
         )
         check(nativeHandle != 0L) { "无法初始化 USB 摄像头" }
         val format = NativeUsbCapture.nativeFormat(nativeHandle)
@@ -164,7 +165,8 @@ class UsbRecorderEngine(
         val videoFormat = MediaFormat.createVideoFormat(videoMime, videoWidth, videoHeight).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, config.videoBitrate.coerceAtLeast(100_000))
-            setInteger(MediaFormat.KEY_FRAME_RATE, config.fps.toInt().coerceIn(1, 240))
+            // A nominal encoder rate hint; capture/PTS calculations retain fractional fps.
+            setInteger(MediaFormat.KEY_FRAME_RATE, config.fps.roundToInt().coerceIn(1, 240))
             applyEncoderGopSettings(config)
             config.videoBitrateMode.mediaFormatValue?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
             applyEncoderColorSettings(config)

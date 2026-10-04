@@ -17,6 +17,7 @@ object ConfigPreferences {
             mode = enumValue(p.getString("mode", null), RecordingMode.AUDIO_VIDEO),
             cameraId = p.getString("cameraId", "").orEmpty(),
             usbVideoInputFormat = enumValue(p.getString("usbVideoInputFormat", null), UsbVideoInputFormat.AUTO),
+            usbCustomVideoMode = p.getBoolean("usbCustomVideoMode", false),
             usbAudioSampleRate = p.getInt("usbAudioSampleRate", 0).coerceAtLeast(0),
             usbVideoBufferFrames = p.getInt("usbVideoBufferFrames", 2).coerceIn(1, 30),
             usbYuvMatrix = enumValue(p.getString("usbYuvMatrix", null), UsbYuvMatrix.BT601),
@@ -240,6 +241,7 @@ object ConfigPreferences {
             .putString("mode", c.mode.name)
             .putString("cameraId", c.cameraId)
             .putString("usbVideoInputFormat", c.usbVideoInputFormat.name)
+            .putBoolean("usbCustomVideoMode", c.usbCustomVideoMode)
             .putInt("usbAudioSampleRate", c.usbAudioSampleRate.coerceAtLeast(0))
             .putInt("usbVideoBufferFrames", c.usbVideoBufferFrames.coerceIn(1, 30))
             .putString("usbYuvMatrix", c.usbYuvMatrix.name)

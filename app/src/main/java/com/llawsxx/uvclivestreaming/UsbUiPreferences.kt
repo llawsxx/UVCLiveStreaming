@@ -19,6 +19,8 @@ import com.llawsxx.uvclivestreaming.recording.VideoColorTransfer
 internal data class UsbUiSettings(
     val selectedDeviceName: String? = null,
     val selectedModeDisplay: String? = null,
+    val customVideoMode: UsbCustomVideoMode = UsbCustomVideoMode(),
+    val customVideoModeSelected: Boolean = false,
     val includeAudio: Boolean = true,
     val audioPreviewEnabled: Boolean = false,
     val audioDsp: AudioDspSettings = AudioDspSettings(),
@@ -59,6 +61,12 @@ internal object UsbUiPreferences {
         return UsbUiSettings(
             selectedDeviceName = p.getString("selectedDeviceName", null),
             selectedModeDisplay = p.getString("selectedModeDisplay", null),
+            customVideoMode = UsbCustomVideoMode(
+                p.getInt("customVideoWidth", 1280), p.getInt("customVideoHeight", 720),
+                p.getString("customVideoFps", "60")?.toDoubleOrNull() ?: 60.0,
+                enumValue(p.getString("customVideoFormat", null), com.llawsxx.uvclivestreaming.recording.UsbVideoInputFormat.MJPG),
+            ).takeIf { it.valid } ?: UsbCustomVideoMode(),
+            customVideoModeSelected = p.getBoolean("customVideoModeSelected", false),
             includeAudio = p.getBoolean("includeAudio", true),
             audioPreviewEnabled = p.getBoolean("audioPreviewEnabled", false),
             videoColorGrade = VideoColorGradeSettings(
@@ -124,6 +132,11 @@ internal object UsbUiPreferences {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
             .putString("selectedDeviceName", settings.selectedDeviceName)
             .putString("selectedModeDisplay", settings.selectedModeDisplay)
+            .putInt("customVideoWidth", settings.customVideoMode.width)
+            .putInt("customVideoHeight", settings.customVideoMode.height)
+            .putString("customVideoFps", settings.customVideoMode.fps.toString())
+            .putString("customVideoFormat", settings.customVideoMode.format.name)
+            .putBoolean("customVideoModeSelected", settings.customVideoModeSelected)
             .putBoolean("includeAudio", settings.includeAudio)
             .putBoolean("audioPreviewEnabled", settings.audioPreviewEnabled)
             .putBoolean("videoColorGradeEnabled", settings.videoColorGrade.enabled)

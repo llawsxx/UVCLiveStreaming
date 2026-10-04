@@ -137,12 +137,13 @@ private enum class UsbAction { NONE, PREVIEW, RECORD, STREAM, RTMP }
 private val usbPreviewGate = Semaphore(1)
 
 private data class UsbVideoMode(
-    val label: String, val width: Int, val height: Int, val fps: Int,
+    val label: String, val width: Int, val height: Int, val fps: Double,
     val inputFormat: UsbVideoInputFormat?, val detail: String,
+    val custom: Boolean = false,
 ) : Serializable {
     val canRecord: Boolean get() = inputFormat != null && width in 1..3840 &&
-        height in 1..2160 && fps in 1..240
-    val display: String get() = "$label · ${width}×$height · $fps fps" +
+        height in 1..2160 && fps.isFinite() && fps in 1.0..240.0
+    val display: String get() = "$label · ${width}×$height · ${fps.toString().removeSuffix(".0")} fps" +
         (if (detail.isBlank()) "" else " ($detail)") +
         (if (canRecord) "" else " · 暂不可录制")
 }
@@ -152,9 +153,12 @@ private fun parseUsbVideoMode(raw: String): UsbVideoMode? {
     if (parts.size != 6) return null
     val value = parts[4].toIntOrNull()
     return UsbVideoMode(parts[0], parts[1].toIntOrNull() ?: return null,
-        parts[2].toIntOrNull() ?: return null, parts[3].toIntOrNull() ?: return null,
+        parts[2].toIntOrNull() ?: return null, parts[3].toDoubleOrNull() ?: return null,
         UsbVideoInputFormat.entries.firstOrNull { it.nativeValue == value }, parts[5])
 }
+
+private fun UsbCustomVideoMode.asVideoMode() =
+    UsbVideoMode(format.label, width, height, fps, format, "自定义", custom = true)
 
 @Composable
 private fun UsbCameraScreen() {
@@ -211,7 +215,11 @@ private fun UsbCameraScreen() {
     var rewriteColorMatrix by rememberSaveable { mutableStateOf(uiSettings.rewriteColorMatrix) }
     var rewriteColorTransfer by rememberSaveable { mutableStateOf(uiSettings.rewriteColorTransfer) }
     var modes by remember { mutableStateOf<List<UsbVideoMode>>(emptyList()) }
-    var selectedMode by rememberSaveable { mutableStateOf<UsbVideoMode?>(null) }
+    var customVideoMode by rememberSaveable { mutableStateOf(uiSettings.customVideoMode) }
+    var customModeDialog by remember { mutableStateOf(false) }
+    var selectedMode by rememberSaveable {
+        mutableStateOf<UsbVideoMode?>(uiSettings.customVideoMode.takeIf { uiSettings.customVideoModeSelected && it.valid }?.asVideoMode())
+    }
     var audioRate by rememberSaveable { mutableStateOf(uiSettings.audioRate) }
     var bufferFrames by rememberSaveable { mutableStateOf(uiSettings.bufferFrames) }
     var previewRequestRevision by remember { mutableStateOf(0L) }
@@ -256,7 +264,7 @@ private fun UsbCameraScreen() {
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(
-        selectedName, selectedMode?.display, includeAudio, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
+        selectedName, selectedMode?.display, customVideoMode, includeAudio, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -266,6 +274,8 @@ private fun UsbCameraScreen() {
         UsbUiPreferences.save(context, UsbUiSettings(
             selectedDeviceName = selectedName,
             selectedModeDisplay = selectedMode?.display,
+            customVideoMode = customVideoMode,
+            customVideoModeSelected = selectedMode?.custom == true,
             includeAudio = includeAudio,
             audioPreviewEnabled = audioPreviewEnabled,
             audioDsp = audioDsp,
@@ -389,7 +399,7 @@ private fun UsbCameraScreen() {
             if (selectedMode == null && uiSettings.selectedModeDisplay != null) {
                 selectedMode = found.firstOrNull { it.display == uiSettings.selectedModeDisplay }
             }
-            if (selectedMode != null && selectedMode !in found) selectedMode = null
+            if (selectedMode != null && selectedMode?.custom != true && selectedMode !in found) selectedMode = null
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -509,7 +519,7 @@ private fun UsbCameraScreen() {
                 idlePreview = null
                 val width = selectedMode?.width ?: 1280
                 val height = selectedMode?.height ?: 720
-                val fps = selectedMode?.fps ?: 30
+                val fps = selectedMode?.fps ?: 30.0
                 val videoFormat = selectedMode?.inputFormat ?: UsbVideoInputFormat.AUTO
                 val beginPreview: () -> Unit = {
                     if (previewRequested && requestRevision == previewRequestRevision &&
@@ -518,6 +528,7 @@ private fun UsbCameraScreen() {
                             bufferFrames, includeAudio, audioRate, yuvMatrix, sourceRange, lowFrameRatePreview,
                             initialAudioDsp = audioDsp,
                             initialColorGrade = videoColorGrade,
+                            customVideoMode = selectedMode?.custom == true,
                             onMessage = { if (previewRequested) message = it },
                             onAudioLevel = { if (previewRequested) idleAudioLevelDb = it }).also {
                             idlePreview = it
@@ -565,6 +576,14 @@ private fun UsbCameraScreen() {
         }
     }
 
+    if (customModeDialog) UsbCustomVideoModeDialog(customVideoMode,
+        onDismiss = { customModeDialog = false },
+        onApply = {
+            customVideoMode = it
+            selectedMode = it.asVideoMode()
+            customModeDialog = false
+            if (previewRequested && !recording) pendingAction = UsbAction.PREVIEW
+        })
     BackHandler(enabled = fullscreen) { fullscreen = false; activity?.exitUsbFullscreen() }
     UsbCameraWorkspace(
         aspectRatio = (selectedMode?.width ?: 1280).toFloat() / (selectedMode?.height ?: 720),
@@ -701,6 +720,14 @@ private fun UsbCameraScreen() {
                     DropdownMenu(expanded = modesExpanded, onDismissRequest = { modesExpanded = false }) {
                         DropdownMenuItem(text = { Text("自动 · 1280×720 · 30 fps") }, onClick = {
                             selectedMode = null; modesExpanded = false
+                        })
+                        DropdownMenuItem(text = { Text("自定义分辨率／帧率／格式…") }, onClick = {
+                            selectedMode?.let { mode ->
+                                mode.inputFormat?.takeIf { it in UsbCustomVideoMode.formats }?.let { format ->
+                                    customVideoMode = UsbCustomVideoMode(mode.width, mode.height, mode.fps, format)
+                                }
+                            }
+                            customModeDialog = true; modesExpanded = false
                         })
                         modes.forEach { mode ->
                             DropdownMenuItem(text = { Text(mode.display) }, enabled = mode.canRecord,
@@ -929,8 +956,9 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
         cameraId = UsbRecorderEngine.USB_CAMERA_PREFIX + device.deviceName,
         width = mode?.width ?: 1280,
         height = mode?.height ?: 720,
-        fps = (mode?.fps ?: 30).toDouble(),
+        fps = mode?.fps ?: 30.0,
         usbVideoInputFormat = mode?.inputFormat ?: UsbVideoInputFormat.AUTO,
+        usbCustomVideoMode = mode?.custom == true,
         usbAudioSampleRate = audioRate,
         usbVideoBufferFrames = bufferFrames,
         usbYuvMatrix = yuvMatrix,
@@ -970,7 +998,7 @@ private class UsbIdlePreview(
     initialSurface: Surface,
     private val width: Int,
     private val height: Int,
-    private val fps: Int,
+    private val fps: Double,
     private val videoFormat: UsbVideoInputFormat,
     bufferFrames: Int,
     private val audioEnabled: Boolean,
@@ -980,6 +1008,7 @@ private class UsbIdlePreview(
     initialLowFrameRate: Boolean,
     initialAudioDsp: AudioDspSettings,
     initialColorGrade: VideoColorGradeSettings,
+    private val customVideoMode: Boolean,
     private val onMessage: (String) -> Unit,
     private val onAudioLevel: (Float) -> Unit,
 ) : UsbCaptureCallback {
@@ -1033,7 +1062,7 @@ private class UsbIdlePreview(
                 connection = manager.openDevice(device)
                 checkNotNull(connection) { "无法打开 USB 摄像头" }
                 handle = NativeUsbCapture.nativeOpen(checkNotNull(connection).fileDescriptor, width, height, fps,
-                    videoFormat.nativeValue, audioEnabled, audioRate)
+                    videoFormat.nativeValue, audioEnabled, audioRate, customVideoMode)
                 if (stopped.get()) return@Thread
                 val format = NativeUsbCapture.nativeFormat(handle)
                 if (audioEnabled && format[2] > 0 && format[3] in 1..2) {
