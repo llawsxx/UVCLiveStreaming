@@ -33,6 +33,8 @@ object RecorderController {
     @Volatile internal var previewUpdater: ((Surface?, Boolean, Int) -> Unit)? = null
     @Volatile internal var usbAudioPreviewEnabled = false
     @Volatile internal var audioPreviewUpdater: ((Boolean) -> Unit)? = null
+    @Volatile internal var audioDspUpdater: ((AudioDspSettings) -> Unit)? = null
+    @Volatile internal var audioPeakReader: (() -> Float)? = null
 
     fun start(context: Context, config: RecordingConfig) {
         mutableState.value = RecorderState.Starting()
@@ -86,6 +88,10 @@ object RecorderController {
         usbAudioPreviewEnabled = enabled
         audioPreviewUpdater?.invoke(enabled)
     }
+    internal fun updateUsbAudioDsp(settings: AudioDspSettings) {
+        audioDspUpdater?.invoke(settings)
+    }
+    internal fun usbAudioRecentPeakDb(): Float = audioPeakReader?.invoke() ?: -60f
     internal fun notice(message: String) { mutableMessages.tryEmit(RecorderMessage.Notice(message)) }
     internal fun updateUsbAudioLevel(levelDb: Float) { mutableUsbAudioLevelDb.value = levelDb.coerceIn(-60f, 0f) }
 }

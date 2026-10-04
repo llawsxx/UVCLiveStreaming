@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import com.llawsxx.uvclivestreaming.UsbUiPreferences
 import androidx.annotation.RequiresApi
 import java.nio.ByteBuffer
 import java.util.Locale
@@ -88,6 +89,9 @@ class UsbRecorderEngine(
     private var videoHeight = 0
     private var audioCaptureEnabled = false
     @Volatile private var audioMonitor: UsbAudioMonitor? = null
+    @Volatile private var audioPipeline: UsbAudioPipeline? = null
+    private val audioPipelineDone = AtomicBoolean(true)
+    @Volatile private var audioDspSettings = UsbUiPreferences.load(context).audioDsp
     private val audioMonitorLock = Any()
     @Volatile private var audioPreviewEnabled = RecorderController.usbAudioPreviewEnabled
     private val videoTimestampSmoother = if (config.usbTimestampSmoothingEnabled)
@@ -146,6 +150,11 @@ class UsbRecorderEngine(
             synchronized(audioMonitorLock) {
                 audioMonitor = monitor
                 monitor.setEnabled(audioPreviewEnabled)
+                audioPipelineDone.set(false)
+                audioPipeline = UsbAudioPipeline(audioRate, audioChannels, audioDspSettings,
+                    onPcm = ::onProcessedAudioPcm,
+                    onError = { onError("USB 音频 DSP 失败：$it") },
+                    onStopped = { audioPipelineDone.set(true) })
             }
         }
 
@@ -313,6 +322,10 @@ class UsbRecorderEngine(
 
     override fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long) {
         if (!running.get() || !audioCaptureEnabled) return
+        audioPipeline?.offer(bytes, timestampNs)
+    }
+
+    private fun onProcessedAudioPcm(bytes: ByteArray, timestampNs: Long) {
         val sampleFrames = bytes.size / (audioChannels * 2)
         if (sampleFrames == 0) return
         audioMonitor?.offer(bytes)
@@ -380,7 +393,8 @@ class UsbRecorderEngine(
             var endedOutput = false
             try {
                 while (!endedOutput) {
-                    val packet = if (running.get()) audioQueue.poll(10, TimeUnit.MILLISECONDS) else audioQueue.poll()
+                    val acceptingAudio = running.get() || !audioPipelineDone.get()
+                    val packet = if (acceptingAudio) audioQueue.poll(10, TimeUnit.MILLISECONDS) else audioQueue.poll()
                     if (packet != null) {
                         var offset = 0
                         val bytes = packet.first
@@ -397,7 +411,7 @@ class UsbRecorderEngine(
                             codec.queueInputBuffer(index, 0, length, ptsUs, 0)
                             offset += length
                         }
-                    } else if (!running.get() && !endedInput) {
+                    } else if (!running.get() && audioPipelineDone.get() && audioQueue.isEmpty() && !endedInput) {
                         val index = codec.dequeueInputBuffer(10_000)
                         if (index >= 0) {
                             codec.queueInputBuffer(index, 0, 0,
@@ -549,14 +563,16 @@ class UsbRecorderEngine(
             return
         }
         try {
-        val monitor = synchronized(audioMonitorLock) { audioMonitor.also { audioMonitor = null } }
-        monitor?.let { it.close(); runCatching { it.awaitStopped(500) } }
         mjpegDecodePool.close()
         synchronized(nativeMetricsLock) {
             val handle = nativeHandle
             nativeHandle = 0L
             if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
         }
+        val pipeline = audioPipeline.also { audioPipeline = null }
+        pipeline?.let { it.close(); it.awaitStopped() }
+        val monitor = synchronized(audioMonitorLock) { audioMonitor.also { audioMonitor = null } }
+        monitor?.let { it.close(); runCatching { it.awaitStopped(500) } }
         videoQueue.clear()
         rawVideoConverter.close()
         videoRenderThread?.interrupt()
@@ -595,6 +611,13 @@ class UsbRecorderEngine(
         }
     }
     override fun updateCameraControls(updated: RecordingConfig) = Unit
+    fun updateAudioDsp(settings: AudioDspSettings) {
+        synchronized(audioMonitorLock) {
+            audioDspSettings = settings
+            audioPipeline?.updateSettings(settings)
+        }
+    }
+    fun recentAudioPeakDb(): Float = audioPipeline?.recentPeakDb() ?: -60f
 
     companion object {
         const val USB_CAMERA_PREFIX = "usb-host:"

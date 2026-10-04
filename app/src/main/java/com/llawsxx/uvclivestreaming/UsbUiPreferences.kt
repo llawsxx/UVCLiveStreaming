@@ -1,6 +1,7 @@
 package com.llawsxx.uvclivestreaming
 
 import android.content.Context
+import com.llawsxx.uvclivestreaming.recording.AudioDspSettings
 import com.llawsxx.uvclivestreaming.recording.ConfigPreferences
 import com.llawsxx.uvclivestreaming.recording.ContainerFormat
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
@@ -17,6 +18,7 @@ internal data class UsbUiSettings(
     val selectedModeDisplay: String? = null,
     val includeAudio: Boolean = true,
     val audioPreviewEnabled: Boolean = false,
+    val audioDsp: AudioDspSettings = AudioDspSettings(),
     val previewEnabled: Boolean = true,
     val lowFrameRatePreview: Boolean = false,
     val container: ContainerFormat = ContainerFormat.MP4,
@@ -56,6 +58,23 @@ internal object UsbUiPreferences {
             selectedModeDisplay = p.getString("selectedModeDisplay", null),
             includeAudio = p.getBoolean("includeAudio", true),
             audioPreviewEnabled = p.getBoolean("audioPreviewEnabled", false),
+            audioDsp = AudioDspSettings(
+                enabled = p.getBoolean("audioDspEnabled", false),
+                loudnessEnabled = p.getBoolean("audioLoudnessEnabled", true),
+                limiterEnabled = p.getBoolean("audioLimiterEnabled", true),
+                targetLufs = p.getFloat("audioTargetLufs", -16f),
+                loudnessRangeLu = p.getFloat("audioLoudnessRangeLu", 7f),
+                loudnessPeakDb = p.getFloat("audioLoudnessPeakDb", -1f),
+                loudnessLookaheadMs = p.getFloat("audioLoudnessLookaheadMs", 5f),
+                loudnessUpdateMs = p.getFloat("audioLoudnessUpdateMs", 1000f),
+                boostOnly = p.getBoolean("audioBoostOnly", false),
+                limiterInputDb = p.getFloat("audioLimiterInputDb", 0f),
+                limiterThresholdDb = p.getFloat("audioLimiterThresholdDb", -0.5f),
+                limiterCeilingDb = p.getFloat("audioLimiterCeilingDb", -0.5f),
+                limiterReleaseMs = p.getFloat("audioLimiterReleaseMs", 80f),
+                limiterLookaheadMs = p.getFloat("audioLimiterLookaheadMs", 1f),
+                adaptiveRelease = p.getBoolean("audioAdaptiveRelease", false),
+            ).sanitized(),
             previewEnabled = p.getBoolean("previewEnabled", true),
             lowFrameRatePreview = p.getBoolean("lowFrameRatePreview", false),
             container = enumValue(p.getString("container", null), ContainerFormat.MP4),
@@ -94,6 +113,21 @@ internal object UsbUiPreferences {
             .putString("selectedModeDisplay", settings.selectedModeDisplay)
             .putBoolean("includeAudio", settings.includeAudio)
             .putBoolean("audioPreviewEnabled", settings.audioPreviewEnabled)
+            .putBoolean("audioDspEnabled", settings.audioDsp.enabled)
+            .putBoolean("audioLoudnessEnabled", settings.audioDsp.loudnessEnabled)
+            .putBoolean("audioLimiterEnabled", settings.audioDsp.limiterEnabled)
+            .putFloat("audioTargetLufs", settings.audioDsp.targetLufs)
+            .putFloat("audioLoudnessRangeLu", settings.audioDsp.loudnessRangeLu)
+            .putFloat("audioLoudnessPeakDb", settings.audioDsp.loudnessPeakDb)
+            .putFloat("audioLoudnessLookaheadMs", settings.audioDsp.loudnessLookaheadMs)
+            .putFloat("audioLoudnessUpdateMs", settings.audioDsp.loudnessUpdateMs)
+            .putBoolean("audioBoostOnly", settings.audioDsp.boostOnly)
+            .putFloat("audioLimiterInputDb", settings.audioDsp.limiterInputDb)
+            .putFloat("audioLimiterThresholdDb", settings.audioDsp.limiterThresholdDb)
+            .putFloat("audioLimiterCeilingDb", settings.audioDsp.limiterCeilingDb)
+            .putFloat("audioLimiterReleaseMs", settings.audioDsp.limiterReleaseMs)
+            .putFloat("audioLimiterLookaheadMs", settings.audioDsp.limiterLookaheadMs)
+            .putBoolean("audioAdaptiveRelease", settings.audioDsp.adaptiveRelease)
             .putBoolean("previewEnabled", settings.previewEnabled)
             .putBoolean("lowFrameRatePreview", settings.lowFrameRatePreview)
             .putString("container", settings.container.name)
