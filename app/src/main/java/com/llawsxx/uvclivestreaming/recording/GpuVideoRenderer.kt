@@ -17,6 +17,7 @@ internal class GpuVideoRenderer(
     initialMatrix: UsbYuvMatrix = UsbYuvMatrix.BT601,
     initialSourceRange: UsbSourceRange = UsbSourceRange.AUTO,
     private val previewClockNs: () -> Long = System::nanoTime,
+    initialColorGrade: VideoColorGradeSettings = VideoColorGradeSettings(),
 ) : AutoCloseable {
     data class PreviewTarget(val surface: Surface?, val revision: Long, val lowFrameRate: Boolean = false)
 
@@ -30,7 +31,18 @@ internal class GpuVideoRenderer(
     private var boundPreview: PreviewTarget? = null
     private val previewFrameLimiter = PreviewFrameLimiter()
     private var program = 0
-    private val textures = IntArray(3)
+    private val textures = IntArray(4)
+    private val lutWorker = VideoColorLutWorker(initialColorGrade, onError = {
+        Log.e("UsbGpuRenderer", "Color LUT bake failed", it)
+    })
+    private var uploadedLut: BakedVideoColorLut? = null
+    private var lutEnabled = false
+    private var halfFloatLut = false
+    private var lutWidth = 0
+    private var lutHeight = 0
+    private var lutEnabledLocation = -1
+    private var lutInfoLocation = -1
+    private var lutTextureLocation = -1
     private var uploadBuffer: ByteBuffer? = null
     private var textureWidth = 0
     private var textureHeight = 0
@@ -59,6 +71,12 @@ internal class GpuVideoRenderer(
         }
         sourceRange = range
     }
+
+    fun setColorGrade(settings: VideoColorGradeSettings) {
+        check(Thread.currentThread() === ownerThread && !closed)
+        lutWorker.update(settings)
+    }
+    val colorGradeReady: Boolean get() = lutWorker.ready
     private val vertices = ByteBuffer.allocateDirect(16 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
         // Uploaded rows start at the top; GL window coordinates start at the bottom.
         put(floatArrayOf(-1f, -1f, 0f, 1f, 1f, -1f, 1f, 1f,
@@ -88,7 +106,12 @@ internal class GpuVideoRenderer(
             check(parkingSurface != EGL14.EGL_NO_SURFACE)
             makeCurrent(parkingSurface)
             program = createProgram()
-            GLES20.glGenTextures(3, textures, 0)
+            lutEnabledLocation = GLES20.glGetUniformLocation(program, "uGradeEnabled")
+            lutInfoLocation = GLES20.glGetUniformLocation(program, "uLutInfo")
+            lutTextureLocation = GLES20.glGetUniformLocation(program, "uColorLut")
+            val extensions = GLES20.glGetString(GLES20.GL_EXTENSIONS).orEmpty().split(' ').toSet()
+            halfFloatLut = "GL_OES_texture_half_float" in extensions && "GL_OES_texture_half_float_linear" in extensions
+            GLES20.glGenTextures(4, textures, 0)
             GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
             for (texture in textures) {
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
@@ -115,6 +138,7 @@ internal class GpuVideoRenderer(
             previewFrameLimiter.shouldRender(previewClockNs(), target?.lowFrameRate == true)
         if (encoderWindow == EGL14.EGL_NO_SURFACE && !showPreview) return false
         makeCurrent(parkingSurface)
+        updateLut()
         upload(frame)
         if (encoderWindow != EGL14.EGL_NO_SURFACE && frame.timestampNs > lastEncodedTimestamp) {
             makeCurrent(encoderWindow)
@@ -139,6 +163,32 @@ internal class GpuVideoRenderer(
             destroyPreview()
             false
         }
+    }
+
+    private fun updateLut() {
+        lutWorker.failure?.let { throw IllegalStateException("视频调色 LUT 生成失败", it) }
+        val lut = lutWorker.current
+        lutEnabled = lut != null
+        if (lut == null) { uploadedLut = null; return }
+        if (lut === uploadedLut) return
+        val maxSize = IntArray(1)
+        GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxSize, 0)
+        check(lut.width <= maxSize[0] && lut.height <= maxSize[0]) { "GPU 不支持所选 LUT 尺寸" }
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE3)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3])
+        val type = if (halfFloatLut) 0x8D61 else GLES20.GL_UNSIGNED_BYTE // GL_HALF_FLOAT_OES
+        val pixels = (if (halfFloatLut) lut.halfPixels else lut.bytePixels).duplicate().apply { clear() }
+        if (lutWidth != lut.width || lutHeight != lut.height) {
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, lut.width, lut.height,
+                0, GLES20.GL_RGBA, type, pixels)
+        } else {
+            GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, lut.width, lut.height,
+                GLES20.GL_RGBA, type, pixels)
+        }
+        check(GLES20.glGetError() == GLES20.GL_NO_ERROR) { "GPU 调色 LUT 上传失败" }
+        lutWidth = lut.width; lutHeight = lut.height
+        uploadedLut = lut
+        Log.i("UsbGpuRenderer", "Color LUT uploaded: ${lut.size}^3 ${if (halfFloatLut) "RGBA16F" else "RGBA8"}")
     }
 
     private fun upload(frame: GpuVideoFrame) {
@@ -216,6 +266,17 @@ internal class GpuVideoRenderer(
             -128f * sampleScale / maxSample, -128f * sampleScale / maxSample)
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uRgbRange"),
             if (fullRange) 0f else -16f / 255f, if (fullRange) 1f else 255f / 219f)
+        GLES20.glUniform1i(lutEnabledLocation, if (lutEnabled) 1 else 0)
+        if (lutEnabled) {
+            val lut = checkNotNull(uploadedLut)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE3)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3])
+            GLES20.glUniform1i(lutTextureLocation, 3)
+            GLES20.glUniform4f(lutInfoLocation, lut.size.toFloat(), lut.columns.toFloat(), lut.width.toFloat(), lut.height.toFloat())
+        } else {
+            // Keep sampler types/units unambiguous even before the first LUT upload.
+            GLES20.glUniform1i(lutTextureLocation, 3)
+        }
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
     }
 
@@ -249,10 +310,11 @@ internal class GpuVideoRenderer(
     override fun close() {
         if (closed) return
         closed = true
+        lutWorker.close()
         check(Thread.currentThread() === ownerThread)
         if (context != EGL14.EGL_NO_CONTEXT && parkingSurface != EGL14.EGL_NO_SURFACE) {
             EGL14.eglMakeCurrent(display, parkingSurface, parkingSurface, context)
-            GLES20.glDeleteTextures(3, textures, 0)
+            GLES20.glDeleteTextures(4, textures, 0)
             if (program != 0) GLES20.glDeleteProgram(program)
         }
         EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
@@ -262,6 +324,7 @@ internal class GpuVideoRenderer(
         EGL14.eglReleaseThread()
         EGL14.eglTerminate(display)
         uploadBuffer = null
+        uploadedLut = null
     }
 
     private fun createProgram(): Int {
@@ -319,11 +382,27 @@ internal class GpuVideoRenderer(
             uniform mat3 uYuvToRgb;
             uniform vec3 uYuvOffset;
             uniform vec2 uRgbRange;
+            uniform bool uGradeEnabled;
+            uniform sampler2D uColorLut;
+            // size, tile columns, atlas width, atlas height
+            uniform vec4 uLutInfo;
+            vec3 grade(vec3 rgb) {
+                vec3 p = clamp(rgb, 0.0, 1.0) * (uLutInfo.x - 1.0);
+                float lower = floor(p.b);
+                float upper = min(lower + 1.0, uLutInfo.x - 1.0);
+                vec2 tile0 = vec2(mod(lower, uLutInfo.y), floor(lower / uLutInfo.y));
+                vec2 tile1 = vec2(mod(upper, uLutInfo.y), floor(upper / uLutInfo.y));
+                // Half-texel centers keep bilinear filtering inside each R/G tile.
+                vec2 uv0 = (tile0 * uLutInfo.x + p.rg + 0.5) / uLutInfo.zw;
+                vec2 uv1 = (tile1 * uLutInfo.x + p.rg + 0.5) / uLutInfo.zw;
+                return mix(texture2D(uColorLut, uv0).rgb, texture2D(uColorLut, uv1).rgb, fract(p.b));
+            }
             void main() {
+                vec3 rgb;
                 if (uLayout == 1 || uLayout == 2) {
-                    vec3 rgb = texture2D(uPlane0, vUv).rgb;
+                    rgb = texture2D(uPlane0, vUv).rgb;
                     rgb = uLayout == 2 ? rgb.bgr : rgb;
-                    gl_FragColor = vec4(clamp((rgb + uRgbRange.x) * uRgbRange.y, 0.0, 1.0), 1.0);
+                    rgb = (rgb + uRgbRange.x) * uRgbRange.y;
                 } else {
                     vec4 py = texture2D(uPlane0, vUv);
                     vec4 pu = texture2D(uPlane1, vUv);
@@ -334,9 +413,11 @@ internal class GpuVideoRenderer(
                     float y = uLayout == 3 ? dot(py.ra, weights) : py.r;
                     float u = uLayout == 3 ? dot(pu.ra, weights) : pu.r;
                     float v = uLayout == 3 ? dot(pv.ra, weights) : pv.r;
-                    vec3 rgb = uYuvToRgb * (vec3(y, u, v) + uYuvOffset);
-                    gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+                    rgb = uYuvToRgb * (vec3(y, u, v) + uYuvOffset);
                 }
+                rgb = clamp(rgb, 0.0, 1.0);
+                if (uGradeEnabled) rgb = grade(rgb);
+                gl_FragColor = vec4(rgb, 1.0);
             }
         """
     }

@@ -82,6 +82,7 @@ class RecordingService : Service() {
         RecorderController.previewUpdater = newEngine::updatePreview
         RecorderController.audioPreviewUpdater = newEngine::updateAudioPreview
         RecorderController.audioDspUpdater = newEngine::updateAudioDsp
+        RecorderController.colorGradeUpdater = newEngine::updateColorGrade
         RecorderController.audioPeakReader = newEngine::recentAudioPeakDb
         newEngine.start(RecorderController.previewSurface, RecorderController.previewEnabled,
             RecorderController.previewRotationDegrees)
@@ -108,6 +109,7 @@ class RecordingService : Service() {
         RecorderController.previewUpdater = null
         RecorderController.audioPreviewUpdater = null
         RecorderController.audioDspUpdater = null
+        RecorderController.colorGradeUpdater = null
         RecorderController.audioPeakReader = null
         RecorderController.update(RecorderState.Stopping())
         old.stop { mainHandler.post { finish(error) } }
@@ -156,6 +158,7 @@ class RecordingService : Service() {
         captureGeneration++
         RecorderController.audioPreviewUpdater = null
         RecorderController.audioDspUpdater = null
+        RecorderController.colorGradeUpdater = null
         RecorderController.audioPeakReader = null
         engine?.forceRelease(); engine = null
         wakeLock?.takeIf { it.isHeld }?.release(); wakeLock = null

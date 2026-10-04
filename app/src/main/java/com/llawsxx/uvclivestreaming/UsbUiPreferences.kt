@@ -2,6 +2,9 @@ package com.llawsxx.uvclivestreaming
 
 import android.content.Context
 import com.llawsxx.uvclivestreaming.recording.AudioDspSettings
+import com.llawsxx.uvclivestreaming.recording.VideoColorGradeSettings
+import com.llawsxx.uvclivestreaming.recording.GradeTransfer
+import com.llawsxx.uvclivestreaming.recording.GradePrimaries
 import com.llawsxx.uvclivestreaming.recording.ConfigPreferences
 import com.llawsxx.uvclivestreaming.recording.ContainerFormat
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
@@ -19,6 +22,7 @@ internal data class UsbUiSettings(
     val includeAudio: Boolean = true,
     val audioPreviewEnabled: Boolean = false,
     val audioDsp: AudioDspSettings = AudioDspSettings(),
+    val videoColorGrade: VideoColorGradeSettings = VideoColorGradeSettings(),
     val previewEnabled: Boolean = true,
     val lowFrameRatePreview: Boolean = false,
     val container: ContainerFormat = ContainerFormat.MP4,
@@ -58,6 +62,17 @@ internal object UsbUiPreferences {
             selectedModeDisplay = p.getString("selectedModeDisplay", null),
             includeAudio = p.getBoolean("includeAudio", true),
             audioPreviewEnabled = p.getBoolean("audioPreviewEnabled", false),
+            videoColorGrade = VideoColorGradeSettings(
+                enabled = p.getBoolean("videoColorGradeEnabled", false),
+                exposureEv = p.getFloat("videoGradeExposureEv", 0f),
+                contrast = p.getFloat("videoGradeContrast", 1f),
+                temperatureKelvin = p.getInt("videoGradeTemperature", 6500),
+                tint = p.getFloat("videoGradeTint", 0f),
+                saturation = p.getFloat("videoGradeSaturation", 1f),
+                transfer = enumValue(p.getString("videoGradeTransfer", null), GradeTransfer.BT709),
+                primaries = enumValue(p.getString("videoGradePrimaries", null), GradePrimaries.BT709),
+                lutSize = p.getInt("videoGradeLutSize", 33),
+            ).sanitized(),
             audioDsp = AudioDspSettings(
                 enabled = p.getBoolean("audioDspEnabled", false),
                 loudnessEnabled = p.getBoolean("audioLoudnessEnabled", true),
@@ -113,6 +128,16 @@ internal object UsbUiPreferences {
             .putString("selectedModeDisplay", settings.selectedModeDisplay)
             .putBoolean("includeAudio", settings.includeAudio)
             .putBoolean("audioPreviewEnabled", settings.audioPreviewEnabled)
+            .putBoolean("videoColorGradeEnabled", settings.videoColorGrade.enabled)
+            .remove("videoGradeBrightness")
+            .putFloat("videoGradeExposureEv", settings.videoColorGrade.exposureEv)
+            .putFloat("videoGradeContrast", settings.videoColorGrade.contrast)
+            .putInt("videoGradeTemperature", settings.videoColorGrade.temperatureKelvin)
+            .putFloat("videoGradeTint", settings.videoColorGrade.tint)
+            .putFloat("videoGradeSaturation", settings.videoColorGrade.saturation)
+            .putString("videoGradeTransfer", settings.videoColorGrade.transfer.name)
+            .putString("videoGradePrimaries", settings.videoColorGrade.primaries.name)
+            .putInt("videoGradeLutSize", settings.videoColorGrade.lutSize)
             .putBoolean("audioDspEnabled", settings.audioDsp.enabled)
             .putBoolean("audioLoudnessEnabled", settings.audioDsp.loudnessEnabled)
             .putBoolean("audioLimiterEnabled", settings.audioDsp.limiterEnabled)

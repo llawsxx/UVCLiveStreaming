@@ -78,6 +78,7 @@ import com.llawsxx.uvclivestreaming.recording.RecorderController
 import com.llawsxx.uvclivestreaming.recording.RecorderState
 import com.llawsxx.uvclivestreaming.recording.RecordingConfig
 import com.llawsxx.uvclivestreaming.recording.AudioDspSettings
+import com.llawsxx.uvclivestreaming.recording.VideoColorGradeSettings
 import com.llawsxx.uvclivestreaming.recording.UsbAudioPipeline
 import com.llawsxx.uvclivestreaming.recording.RecordingMode
 import com.llawsxx.uvclivestreaming.recording.UsbCaptureCallback
@@ -191,6 +192,7 @@ private fun UsbCameraScreen() {
     var includeAudio by rememberSaveable { mutableStateOf(uiSettings.includeAudio) }
     var audioPreviewEnabled by rememberSaveable { mutableStateOf(uiSettings.audioPreviewEnabled) }
     var audioDsp by remember { mutableStateOf(uiSettings.audioDsp) }
+    var videoColorGrade by remember { mutableStateOf(uiSettings.videoColorGrade) }
     var previewEnabled by rememberSaveable { mutableStateOf(uiSettings.previewEnabled) }
     var lowFrameRatePreview by rememberSaveable { mutableStateOf(uiSettings.lowFrameRatePreview) }
     var keepScreenOn by rememberSaveable { mutableStateOf(uiSettings.keepScreenOn) }
@@ -271,7 +273,7 @@ private fun UsbCameraScreen() {
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(
-        selectedName, selectedMode?.display, includeAudio, audioPreviewEnabled, audioDsp, previewEnabled, lowFrameRatePreview, keepScreenOn,
+        selectedName, selectedMode?.display, includeAudio, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -284,6 +286,7 @@ private fun UsbCameraScreen() {
             includeAudio = includeAudio,
             audioPreviewEnabled = audioPreviewEnabled,
             audioDsp = audioDsp,
+            videoColorGrade = videoColorGrade,
             previewEnabled = previewEnabled,
             lowFrameRatePreview = lowFrameRatePreview,
             container = container,
@@ -438,6 +441,10 @@ private fun UsbCameraScreen() {
         RecorderController.updateUsbAudioDsp(audioDsp)
         idlePreview?.updateAudioDsp(audioDsp)
     }
+    LaunchedEffect(videoColorGrade, idlePreview) {
+        RecorderController.updateUsbColorGrade(videoColorGrade)
+        idlePreview?.updateColorGrade(videoColorGrade)
+    }
 
     LaunchedEffect(idlePreview, recording, includeAudio) {
         recentAudioPeakDb = -60f
@@ -528,6 +535,7 @@ private fun UsbCameraScreen() {
                         UsbIdlePreview(manager, device, target, width, height, fps, videoFormat,
                             bufferFrames, includeAudio, audioRate, yuvMatrix, sourceRange, lowFrameRatePreview,
                             initialAudioDsp = audioDsp,
+                            initialColorGrade = videoColorGrade,
                             onMessage = { if (previewRequested) message = it },
                             onAudioLevel = { if (previewRequested) idleAudioLevelDb = it }).also {
                             idlePreview = it
@@ -677,6 +685,7 @@ private fun UsbCameraScreen() {
                 })
             }
         }
+        VideoColorGradePanel(videoColorGrade) { videoColorGrade = it }
         Text("编码目标颜色", style = MaterialTheme.typography.titleMedium)
         UsbColorRewriteChoice("颜色标准（Primaries / RGB → YUV 矩阵）",
             VideoColorStandard.entries, encoderColorStandard, !recording,
@@ -1018,6 +1027,7 @@ private class UsbIdlePreview(
     initialSourceRange: UsbSourceRange,
     initialLowFrameRate: Boolean,
     initialAudioDsp: AudioDspSettings,
+    initialColorGrade: VideoColorGradeSettings,
     private val onMessage: (String) -> Unit,
     private val onAudioLevel: (Float) -> Unit,
 ) : UsbCaptureCallback {
@@ -1030,6 +1040,7 @@ private class UsbIdlePreview(
     @Volatile private var audioMonitor: UsbAudioMonitor? = null
     @Volatile private var audioPipeline: UsbAudioPipeline? = null
     @Volatile private var audioDspSettings = initialAudioDsp
+    @Volatile private var colorGradeSettings = initialColorGrade
     private val audioMonitorLock = Any()
     private data class Frame(
         val bytes: ByteArray,
@@ -1126,6 +1137,7 @@ private class UsbIdlePreview(
     fun updateColorSettings(matrix: UsbYuvMatrix, range: UsbSourceRange) {
         colorSettings = matrix to range
     }
+    fun updateColorGrade(settings: VideoColorGradeSettings) { colorGradeSettings = settings.sanitized() }
 
     fun updateLowFrameRate(enabled: Boolean) { lowFrameRate = enabled }
     fun recentAudioPeakDb(): Float = if (stopped.get()) -60f else audioPipeline?.recentPeakDb() ?: -60f
@@ -1166,7 +1178,7 @@ private class UsbIdlePreview(
 
     private fun renderFrames() {
         try {
-            GpuVideoRenderer().use { gpu ->
+            GpuVideoRenderer(initialColorGrade = colorGradeSettings).use { gpu ->
                 var reportStartedNs = System.nanoTime()
                 var renderedFrames = 0
                 var timestampOriginNs = Long.MIN_VALUE
@@ -1186,6 +1198,7 @@ private class UsbIdlePreview(
                         val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate)
                         val settings = colorSettings
                         gpu.setColorSettings(settings.first, settings.second)
+                        gpu.setColorGrade(colorGradeSettings)
                         if (target.surface?.isValid != true) continue
                         val nowNs = System.nanoTime()
                         if (timestampOriginNs == Long.MIN_VALUE || boundRevision != target.revision) {

@@ -92,6 +92,7 @@ class UsbRecorderEngine(
     @Volatile private var audioPipeline: UsbAudioPipeline? = null
     private val audioPipelineDone = AtomicBoolean(true)
     @Volatile private var audioDspSettings = UsbUiPreferences.load(context).audioDsp
+    @Volatile private var colorGradeSettings = UsbUiPreferences.load(context).videoColorGrade
     private val audioMonitorLock = Any()
     @Volatile private var audioPreviewEnabled = RecorderController.usbAudioPreviewEnabled
     private val videoTimestampSmoother = if (config.usbTimestampSmoothingEnabled)
@@ -276,7 +277,8 @@ class UsbRecorderEngine(
     private fun startVideoRender() {
         videoRenderThread = Thread({
             try {
-                GpuVideoRenderer(checkNotNull(encoderInputSurface), config.usbYuvMatrix, config.usbSourceRange).use { gpu ->
+                GpuVideoRenderer(checkNotNull(encoderInputSurface), config.usbYuvMatrix, config.usbSourceRange,
+                    initialColorGrade = colorGradeSettings).use { gpu ->
                     while (running.get()) {
                         val decoded = mjpegDecodePool.poll(5)
                         var converted: RawVideoConverter.ConvertedFrame? = null
@@ -297,6 +299,7 @@ class UsbRecorderEngine(
                                 preview.takeIf { previewEnabled }, previewRevision.get(),
                                 RecorderController.previewLowFrameRate,
                             )
+                            gpu.setColorGrade(colorGradeSettings)
                             val encodedBefore = gpu.encodedFrameCount
                             gpu.render(frame, target)
                             if (gpu.encodedFrameCount == encodedBefore) videoTimestampSkips.incrementAndGet()
@@ -621,6 +624,7 @@ class UsbRecorderEngine(
         }
     }
     fun recentAudioPeakDb(): Float = audioPipeline?.recentPeakDb() ?: -60f
+    fun updateColorGrade(settings: VideoColorGradeSettings) { colorGradeSettings = settings.sanitized() }
 
     companion object {
         const val USB_CAMERA_PREFIX = "usb-host:"
