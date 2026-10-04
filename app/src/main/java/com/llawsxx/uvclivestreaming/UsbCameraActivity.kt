@@ -19,26 +19,22 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -52,9 +48,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
@@ -217,10 +210,6 @@ private fun UsbCameraScreen() {
     var rewriteColorStandard by rememberSaveable { mutableStateOf(uiSettings.rewriteColorStandard) }
     var rewriteColorMatrix by rememberSaveable { mutableStateOf(uiSettings.rewriteColorMatrix) }
     var rewriteColorTransfer by rememberSaveable { mutableStateOf(uiSettings.rewriteColorTransfer) }
-    var matrixExpanded by remember { mutableStateOf(false) }
-    var sourceRangeExpanded by remember { mutableStateOf(false) }
-    var codecExpanded by remember { mutableStateOf(false) }
-    var bitrateModeExpanded by remember { mutableStateOf(false) }
     var modes by remember { mutableStateOf<List<UsbVideoMode>>(emptyList()) }
     var selectedMode by rememberSaveable { mutableStateOf<UsbVideoMode?>(null) }
     var audioRate by rememberSaveable { mutableStateOf(uiSettings.audioRate) }
@@ -241,20 +230,14 @@ private fun UsbCameraScreen() {
     var message by remember { mutableStateOf("选择 USB 摄像头并授权后即可预览或录像") }
     var devicesExpanded by remember { mutableStateOf(false) }
     var modesExpanded by remember { mutableStateOf(false) }
-    var ratesExpanded by remember { mutableStateOf(false) }
-    var bufferExpanded by remember { mutableStateOf(false) }
     val audioRates = listOf(0, 16_000, 32_000, 44_100, 48_000, 96_000)
     val bufferOptions = (1..30).toList()
-    val scrollState = rememberScrollState(uiSettings.scrollOffset)
 
     LaunchedEffect(keepScreenOn) {
         activity?.window?.let { window ->
             if (keepScreenOn) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
-    }
-    LaunchedEffect(scrollState.value) {
-        UsbUiPreferences.saveScrollOffset(context, scrollState.value)
     }
     DisposableEffect(activity) {
         val owner = activity ?: return@DisposableEffect onDispose { }
@@ -313,7 +296,6 @@ private fun UsbCameraScreen() {
             timestampSmoothingNtscEnabled = timestampSmoothingNtscEnabled,
             timestampSmoothingMaxDeltaSeconds = timestampSmoothingMaxDeltaSeconds,
             keepScreenOn = keepScreenOn,
-            scrollOffset = scrollState.value,
         ))
     }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -583,361 +565,331 @@ private fun UsbCameraScreen() {
         }
     }
 
-    if (fullscreen) {
-        Box(Modifier.fillMaxSize()) {
+    BackHandler(enabled = fullscreen) { fullscreen = false; activity?.exitUsbFullscreen() }
+    UsbCameraWorkspace(
+        aspectRatio = (selectedMode?.width ?: 1280).toFloat() / (selectedMode?.height ?: 720),
+        includeAudio = includeAudio,
+        fullscreen = fullscreen,
+        onExitFullscreen = { fullscreen = false; activity?.exitUsbFullscreen() },
+        preview = { modifier, onTap ->
             AndroidView(
                 factory = { viewContext -> SurfaceView(viewContext).apply {
+                    setOnClickListener { onTap() }
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface; surfaceRevision++ }
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) { surface = holder.surface; surfaceRevision++ }
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            surface = holder.surface; surfaceRevision++
+                        }
                         override fun surfaceDestroyed(holder: SurfaceHolder) { if (surface === holder.surface) surface = null }
                     })
                 } },
-                modifier = Modifier.fillMaxSize(),
+                modifier = modifier,
             )
-            OutlinedButton(
-                onClick = { fullscreen = false; activity?.exitUsbFullscreen() },
-                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
-            ) { Text("退出全屏") }
-        }
-        return
-    }
-
-    Column(
-        Modifier.fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .verticalScroll(scrollState)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("USB 摄像头串流", style = MaterialTheme.typography.headlineSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { devicesExpanded = true }, enabled = !recording) {
-                Text(selected?.productName?.takeIf { it.isNotBlank() } ?: selected?.deviceName ?: "选择摄像头")
-            }
-            DropdownMenu(expanded = devicesExpanded, onDismissRequest = { devicesExpanded = false }) {
-                devices.forEach { device ->
-                    DropdownMenuItem(text = { Text("${device.productName ?: "USB 摄像头"} · ${device.deviceName}") },
-                        onClick = {
-                            idlePreview?.stop()
-                            idlePreview = null
-                            previewRequested = false
-                            selectedMode = null
-                            selectedName = device.deviceName
-                            devicesExpanded = false
-                        })
-                }
-            }
-            OutlinedButton(onClick = {
-                devices = usbVideoDevices(manager)
-                if (devices.none { it.deviceName == selectedName }) selectedName = devices.firstOrNull()?.deviceName
-            }) { Text("刷新") }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = { codecExpanded = true }, enabled = !recording) { Text(videoCodec.label) }
-            DropdownMenu(expanded = codecExpanded, onDismissRequest = { codecExpanded = false }) {
-                VideoCodec.entries.forEach { codec -> DropdownMenuItem(text = { Text(codec.label) }, onClick = {
-                    videoCodec = codec; codecExpanded = false
-                }) }
-            }
-            OutlinedButton(onClick = { bitrateModeExpanded = true }, enabled = !recording) { Text(bitrateMode.label) }
-            DropdownMenu(expanded = bitrateModeExpanded, onDismissRequest = { bitrateModeExpanded = false }) {
-                VideoBitrateMode.entries.forEach { mode -> DropdownMenuItem(text = { Text(mode.label) }, onClick = {
-                    bitrateMode = mode; bitrateModeExpanded = false
-                }) }
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedTextField(videoBitrateKbps, { videoBitrateKbps = it.filter(Char::isDigit) }, enabled = !recording,
-                singleLine = true, modifier = Modifier.weight(1f), label = { Text("视频码率 kbps") })
-            OutlinedTextField(gopSeconds, { gopSeconds = it.filter { char -> char.isDigit() || char == '.' } }, enabled = !recording,
-                singleLine = true, modifier = Modifier.weight(1f), label = { Text("GOP 秒") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                isError = gopSecondsValue == null)
-            OutlinedTextField(if (gopSecondsValue == 0f) "0" else bFrames, { bFrames = it.filter(Char::isDigit) }, enabled = !recording && gopSecondsValue != 0f,
-                singleLine = true, modifier = Modifier.weight(1f), label = { Text("B 帧") })
-        }
-        Text(if (gopSecondsValue == null) "GOP 请输入 0～30 秒，可使用小数。"
-            else if (gopSecondsValue == 0f) "GOP 0：每帧关键帧，自动禁用 B 帧；同码率下画质可能降低。"
-            else "GOP 支持小数（如 0.5 秒）；设为 0 表示每帧关键帧。",
-            style = MaterialTheme.typography.bodySmall)
-        if (devices.isEmpty()) Text("没有检测到 UVC 视频接口；请连接 USB 摄像头。")
-        OutlinedButton(onClick = { matrixExpanded = true }, enabled = !recording,
-            modifier = Modifier.fillMaxWidth()) {
-            Text("YUV → RGB 矩阵：${yuvMatrix.label}")
-        }
-        DropdownMenu(expanded = matrixExpanded, onDismissRequest = { matrixExpanded = false }) {
-            UsbYuvMatrix.entries.forEach { matrix ->
-                DropdownMenuItem(text = { Text(matrix.label) }, onClick = {
-                    yuvMatrix = matrix; matrixExpanded = false
-                })
-            }
-        }
-        OutlinedButton(onClick = { sourceRangeExpanded = true }, enabled = !recording,
-            modifier = Modifier.fillMaxWidth()) {
-            Text("源范围：${sourceRange.label}")
-        }
-        DropdownMenu(expanded = sourceRangeExpanded, onDismissRequest = { sourceRangeExpanded = false }) {
-            UsbSourceRange.entries.forEach { range ->
-                DropdownMenuItem(text = { Text(range.label) }, onClick = {
-                    sourceRange = range; sourceRangeExpanded = false
-                })
-            }
-        }
-        VideoColorGradePanel(videoColorGrade) { videoColorGrade = it }
-        Text("编码目标颜色", style = MaterialTheme.typography.titleMedium)
-        UsbColorRewriteChoice("颜色标准（Primaries / RGB → YUV 矩阵）",
-            VideoColorStandard.entries, encoderColorStandard, !recording,
-            { if (it == VideoColorStandard.BT2020) "BT.2020 / NCL 矩阵" else it.label }) { encoderColorStandard = it }
-        UsbColorRewriteChoice("编码 Transfer（传递函数）",
-            encoderTransferOptions, encoderColorTransfer, !recording,
-            { it.encoderLabel() }) { encoderColorTransfer = it }
-        UsbColorRewriteChoice("编码 Range（范围）",
-            VideoColorRange.entries, encoderColorRange, !recording,
-            { it.label }) { encoderColorRange = it }
-        Text("颜色标准同时选择色域和 RGB → YUV 矩阵；下次启动录像或串流生效。",
-            style = MaterialTheme.typography.bodySmall)
-        Text("Transfer 设置不自动转换输入画面为 HDR；设备可能调整所请求的颜色参数。",
-            style = MaterialTheme.typography.bodySmall)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = forceSpsVui, onCheckedChange = { forceSpsVui = it }, enabled = !recording)
-            Text("重写编码后 H.26x 颜色元数据")
-        }
-        if (forceSpsVui) {
-            Text("以下设置重写输出颜色标记，不转换像素；请与编码目标匹配。",
-                style = MaterialTheme.typography.bodySmall)
-            UsbColorRewriteChoice("Range（范围）", VideoColorRange.entries, rewriteColorRange, !recording,
-                { if (it == VideoColorRange.DEFAULT) "保持原值" else it.label }) { rewriteColorRange = it }
-            UsbColorRewriteChoice("Primaries（色域）", VideoColorStandard.entries, rewriteColorStandard, !recording,
-                { if (it == VideoColorStandard.DEFAULT) "保持原值" else it.label }) { rewriteColorStandard = it }
-            UsbColorRewriteChoice("Transfer（传递函数）", VideoColorTransfer.entries, rewriteColorTransfer, !recording,
-                { if (it == VideoColorTransfer.DEFAULT) "保持原值" else it.label }) { rewriteColorTransfer = it }
-            UsbColorRewriteChoice("Matrix（矩阵系数）", VideoColorMatrix.entries, rewriteColorMatrix, !recording,
-                { if (it == VideoColorMatrix.DEFAULT) "保持原值" else it.label }) { rewriteColorMatrix = it }
-        }
-        OutlinedButton(onClick = { modesExpanded = true }, enabled = !recording,
-            modifier = Modifier.fillMaxWidth()) {
-            Text(selectedMode?.display ?: "自动 · 1280×720 · 30 fps")
-        }
-            DropdownMenu(expanded = modesExpanded, onDismissRequest = { modesExpanded = false }) {
-                DropdownMenuItem(text = { Text("自动 · 1280×720 · 30 fps") }, onClick = {
-                    selectedMode = null; modesExpanded = false
-                })
-                modes.forEach { mode ->
-                    DropdownMenuItem(text = { Text(mode.display) }, enabled = mode.canRecord,
-                        onClick = { selectedMode = mode; modesExpanded = false })
-                }
-            }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Checkbox(checked = includeAudio, onCheckedChange = { includeAudio = it }, enabled = !recording)
-            Text("USB 麦克风", modifier = Modifier.padding(top = 12.dp))
-            Checkbox(checked = previewEnabled, onCheckedChange = { previewEnabled = it })
-            Text("录制时预览", modifier = Modifier.padding(top = 12.dp))
-        }
-        OutlinedTextField(
-            value = audioBitrateKbps,
-            onValueChange = { audioBitrateKbps = it.filter(Char::isDigit) },
-            enabled = !recording && includeAudio,
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            isError = includeAudio && audioBitrateValue == null,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("音频码率 kbps") },
-            supportingText = { Text(if (audioBitrateValue == null) "请输入 16～512 kbps 的整数"
-                else "AAC 编码码率；录像与串流共用，默认 192 kbps。") },
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Checkbox(checked = audioPreviewEnabled, onCheckedChange = { audioPreviewEnabled = it },
-                enabled = includeAudio)
-            Text("音频预览（监听）", modifier = Modifier.padding(top = 12.dp))
-        }
-        AudioDspPanel(audioDsp, enabled = includeAudio, onChange = { audioDsp = it })
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Checkbox(checked = lowFrameRatePreview, onCheckedChange = { lowFrameRatePreview = it })
-            Text("低帧率预览（5 fps）", modifier = Modifier.padding(top = 12.dp))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Checkbox(checked = keepScreenOn, onCheckedChange = { keepScreenOn = it })
-            Text("屏幕常亮", modifier = Modifier.padding(top = 12.dp))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { ratesExpanded = true }, enabled = !recording && includeAudio) {
-                Text(if (audioRate == 0) "源采样率：自动" else "源采样率：$audioRate Hz")
-            }
-            DropdownMenu(expanded = ratesExpanded, onDismissRequest = { ratesExpanded = false }) {
-                audioRates.forEach { rate ->
-                    DropdownMenuItem(text = { Text(if (rate == 0) "自动" else "$rate Hz") }, onClick = {
-                        audioRate = rate; ratesExpanded = false
-                    })
-                }
-            }
-            OutlinedButton(onClick = { bufferExpanded = true }, enabled = !recording) {
-                Text("视频缓存：$bufferFrames 帧")
-            }
-            DropdownMenu(expanded = bufferExpanded, onDismissRequest = { bufferExpanded = false }) {
-                bufferOptions.forEach { count ->
-                    DropdownMenuItem(text = { Text("$count 帧") }, onClick = {
-                        bufferFrames = count; bufferExpanded = false
-                    })
-                }
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("录像格式")
-            ContainerFormat.entries.forEach { format ->
-                OutlinedButton(onClick = { container = format }, enabled = !fileRecording && outputControlsEnabled) {
-                    Text(if (container == format) "✓ ${format.label}" else format.label)
-                }
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Checkbox(checked = timestampSmoothingEnabled,
-                onCheckedChange = { timestampSmoothingEnabled = it }, enabled = !recording)
-            Text("音视频时间戳平滑", modifier = Modifier.padding(top = 12.dp))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Checkbox(checked = timestampSmoothingNtscEnabled,
-                onCheckedChange = { timestampSmoothingNtscEnabled = it },
-                enabled = !recording && timestampSmoothingEnabled)
-            Text("按 NTSC 帧率平滑视频时间戳", modifier = Modifier.padding(top = 12.dp))
-        }
-        Text("开启后：60 → 59.94 fps，30 → 29.97 fps；音频仍按源采样率计算。",
-            style = MaterialTheme.typography.bodySmall)
-        OutlinedTextField(
-            value = timestampSmoothingMaxDeltaSeconds,
-            onValueChange = { timestampSmoothingMaxDeltaSeconds = it.filter { char -> char.isDigit() || char == '.' } },
-            enabled = !recording && timestampSmoothingEnabled,
-            singleLine = true,
-            isError = timestampSmoothingEnabled && timestampSmoothingDelta == null,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("时间戳最大偏差（秒）") },
-            supportingText = { Text(if (timestampSmoothingDelta == null) "请输入大于或等于 0 的秒数"
-                else "偏差不超过此值时使用计算时间戳；超过时跟随实际时间戳。") },
-        )
-        OutlinedTextField(
-            value = rtmpUrl,
-            onValueChange = { rtmpUrl = it },
-            enabled = !rtmpStreaming && outputControlsEnabled,
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("RTMP 地址（可选）") },
-            placeholder = { Text("rtmp://服务器/app/串流密钥") },
-        )
-        AndroidView(
-            factory = { viewContext -> SurfaceView(viewContext).apply {
-                holder.addCallback(object : SurfaceHolder.Callback {
-                    override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface; surfaceRevision++ }
-                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                        surface = holder.surface; surfaceRevision++
-                    }
-                    override fun surfaceDestroyed(holder: SurfaceHolder) { if (surface === holder.surface) surface = null }
-                })
-            } },
-            modifier = Modifier.fillMaxWidth().height(if (fullscreen) 420.dp else 240.dp),
-        )
-        if (includeAudio) {
-            val levelDb = (if (recording) recordingAudioLevelDb else idleAudioLevelDb).coerceIn(-60f, 0f)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("USB 麦克风电平", style = MaterialTheme.typography.labelMedium)
-                Text("${String.format(Locale.US, "%.1f", levelDb)} dBFS",
-                    style = MaterialTheme.typography.labelMedium)
-            }
-            LinearProgressIndicator(progress = { (levelDb + 60f) / 60f },
-                modifier = Modifier.fillMaxWidth().height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("近 1 秒峰值", style = MaterialTheme.typography.labelMedium)
-                Text("${String.format(Locale.US, "%.1f", recentAudioPeakDb)} dBFS",
-                    style = MaterialTheme.typography.labelMedium)
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = {
-                fullscreen = true; activity?.setUsbFullscreen(false)
-            }) { Text("竖屏全屏") }
-            OutlinedButton(onClick = {
-                fullscreen = true; activity?.setUsbFullscreen(true)
-            }) { Text("横屏全屏") }
-            if (fullscreen) OutlinedButton(onClick = {
-                fullscreen = false; activity?.exitUsbFullscreen()
-            }) { Text("退出全屏") }
-        }
-        val usbReceiveRate = if (recording)
-            (state as? RecorderState.Recording)?.stats?.usbVideoReceiveBitsPerSecond else idleUsbReceiveRate
-        if (recording || idlePreview != null) {
-            Text("USB 视频接收：" + (usbReceiveRate?.let {
-                String.format(Locale.US, "%.1f Mbps · %.2f MB/s", it / 1_000_000.0, it / 8_000_000.0)
-            } ?: "统计中"), style = MaterialTheme.typography.bodySmall)
-        }
-        Text(message, style = MaterialTheme.typography.bodySmall)
-        if (state is RecorderState.Error) Text((state as RecorderState.Error).message, color = MaterialTheme.colorScheme.error)
-        if (state is RecorderState.Recording) {
-            val stats = (state as RecorderState.Recording).stats
-            val streamRate = stats.streamBitrateBitsPerSecond / 1000.0
-            val modes = buildList {
+        },
+        fullscreenControls = {
+            Button(onClick = { fullscreen = true; activity?.setUsbFullscreen(false) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = .65f),
+                    contentColor = androidx.compose.ui.graphics.Color.White)) { Text("竖屏全屏", style = MaterialTheme.typography.labelMedium) }
+            Button(onClick = { fullscreen = true; activity?.setUsbFullscreen(true) },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = .65f),
+                    contentColor = androidx.compose.ui.graphics.Color.White)) { Text("横屏全屏", style = MaterialTheme.typography.labelMedium) }
+        },
+        audioMeter = {
+            UsbCompactAudioMeter(if (recording) recordingAudioLevelDb else idleAudioLevelDb, recentAudioPeakDb)
+        },
+        actions = {
+            val stats = (state as? RecorderState.Recording)?.stats
+            val statusText = if (stats != null) buildList {
                 if (stats.fileRecording) add("录像中")
-                if (stats.httpStreaming) add("HTTP 串流中")
-                if (stats.rtmpStreaming) add("RTMP 推流中")
-            }.joinToString(" + ")
-            val recentFpsText = stats.recentFps?.let { String.format(Locale.US, "%.1f fps", it) } ?: "统计中"
-            Text("$modes · 近期（5秒）$recentFpsText · 平均 ${String.format(Locale.US, "%.1f", stats.averageFps)} fps" +
-                if (streaming) " · 串流 ${String.format(Locale.US, "%.0f", streamRate)} kbps" else "")
-            stats.outputPath?.let { Text("文件：$it", style = MaterialTheme.typography.bodySmall) }
-            if (stats.outputChangePending) Text("正在切换输出…", style = MaterialTheme.typography.bodySmall)
+                if (stats.httpStreaming) add("HTTP")
+                if (stats.rtmpStreaming) add("RTMP")
+                add(stats.recentFps?.let { String.format(Locale.US, "%.1f fps", it) } ?: "统计中")
+                if (streaming) add(String.format(Locale.US, "%.0f kbps", stats.streamBitrateBitsPerSecond / 1000.0))
+                if (stats.outputChangePending) add("切换中…")
+            }.joinToString(" · ") else when (state) {
+                is RecorderState.Starting -> "正在启动…"
+                is RecorderState.Stopping -> "正在停止…"
+                is RecorderState.Error -> (state as RecorderState.Error).message
+                else -> message
+            }
+            Text(statusText, style = MaterialTheme.typography.labelSmall, maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                color = if (state is RecorderState.Error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+            val hasPreview = previewRequested || idlePreview != null || pendingAction == UsbAction.PREVIEW
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    if (hasPreview) {
+                        previewRequestRevision++
+                        previewRequested = false
+                        if (pendingAction == UsbAction.PREVIEW) pendingAction = UsbAction.NONE
+                        idlePreview?.stop()
+                        idlePreview = null
+                        idleAudioLevelDb = -60f
+                        recentAudioPeakDb = -60f
+                        message = "预览已停止"
+                    } else { previewRequested = true; pendingAction = UsbAction.PREVIEW }
+                }, enabled = !recording && (hasPreview || selected != null), modifier = Modifier.weight(1f)) {
+                    Text(if (hasPreview) "停止预览" else "预览")
+                }
+                Button(onClick = {
+                    if (fileRecording) RecorderController.stopRecording(context)
+                    else if (recording) RecorderController.startRecording(context, container)
+                    else { previewRequested = false; pendingAction = UsbAction.RECORD }
+                }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                    outputControlsEnabled, modifier = Modifier.weight(1f)) {
+                    Text(if (fileRecording) "停止录制" else "开始录制")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    if (httpStreaming) RecorderController.stopHttpOutput(context)
+                    else if (recording) RecorderController.startHttpOutput(context)
+                    else { previewRequested = false; pendingAction = UsbAction.STREAM }
+                }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                    outputControlsEnabled, modifier = Modifier.weight(1f)) {
+                    Text(if (httpStreaming) "停止 HTTP" else "HTTP 串流")
+                }
+                OutlinedButton(onClick = {
+                    if (rtmpStreaming) RecorderController.stopRtmpOutput(context)
+                    else if (recording) RecorderController.startRtmpOutput(context, rtmpUrl)
+                    else { previewRequested = false; pendingAction = UsbAction.RTMP }
+                }, enabled = selected != null && rtmpUrl.startsWith("rtmp://") &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && outputControlsEnabled,
+                    modifier = Modifier.weight(1f)) {
+                    Text(if (rtmpStreaming) "停止 RTMP" else "RTMP 推流")
+                }
+            }
+        },
+    ) { tab ->
+        when (tab) {
+            UsbSettingsTab.DEVICE -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(Modifier.weight(1f)) {
+                        OutlinedButton(onClick = { devicesExpanded = true }, enabled = !recording,
+                            modifier = Modifier.fillMaxWidth()) {
+                            Text(selected?.productName?.takeIf { it.isNotBlank() } ?: selected?.deviceName ?: "选择摄像头",
+                                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        }
+                        DropdownMenu(expanded = devicesExpanded, onDismissRequest = { devicesExpanded = false }) {
+                            devices.forEach { device ->
+                                DropdownMenuItem(text = { Text("${device.productName ?: "USB 摄像头"} · ${device.deviceName}") },
+                                    onClick = {
+                                        idlePreview?.stop()
+                                        idlePreview = null
+                                        previewRequested = false
+                                        selectedMode = null
+                                        selectedName = device.deviceName
+                                        devicesExpanded = false
+                                    })
+                            }
+                        }
+                    }
+                    OutlinedButton(onClick = {
+                        devices = usbVideoDevices(manager)
+                        if (devices.none { it.deviceName == selectedName }) selectedName = devices.firstOrNull()?.deviceName
+                    }) { Text("刷新") }
+                }
+                Box {
+                    OutlinedButton(onClick = { modesExpanded = true }, enabled = !recording,
+                        modifier = Modifier.fillMaxWidth()) {
+                        Text(selectedMode?.display ?: "自动 · 1280×720 · 30 fps")
+                    }
+                    DropdownMenu(expanded = modesExpanded, onDismissRequest = { modesExpanded = false }) {
+                        DropdownMenuItem(text = { Text("自动 · 1280×720 · 30 fps") }, onClick = {
+                            selectedMode = null; modesExpanded = false
+                        })
+                        modes.forEach { mode ->
+                            DropdownMenuItem(text = { Text(mode.display) }, enabled = mode.canRecord,
+                                onClick = { selectedMode = mode; modesExpanded = false })
+                        }
+                    }
+                }
+                if (devices.isEmpty()) Text("没有检测到 UVC 视频接口；请连接 USB 摄像头。")
+                UsbSettingChoice("YUV → RGB 矩阵", UsbYuvMatrix.entries, yuvMatrix, !recording,
+                    { it.label }) { yuvMatrix = it }
+                UsbSettingChoice("源范围", UsbSourceRange.entries, sourceRange, !recording,
+                    { it.label }) { sourceRange = it }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = includeAudio, onCheckedChange = { includeAudio = it }, enabled = !recording)
+                    Text("USB 麦克风")
+                }
+                UsbSettingChoice("源采样率", audioRates, audioRate, !recording && includeAudio,
+                    { if (it == 0) "自动" else "$it Hz" }) { audioRate = it }
+            }
+            UsbSettingsTab.COLOR -> {
+                VideoColorGradePanel(videoColorGrade) { videoColorGrade = it }
+            }
+            UsbSettingsTab.DSP -> {
+                AudioDspPanel(audioDsp, enabled = includeAudio, onChange = { audioDsp = it })
+            }
+            UsbSettingsTab.ENCODING -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f)) {
+                        UsbSettingChoice("编码", VideoCodec.entries, videoCodec, !recording,
+                            { it.label }) { videoCodec = it }
+                    }
+                    Box(Modifier.weight(1f)) {
+                        UsbSettingChoice("码率模式", VideoBitrateMode.entries, bitrateMode, !recording,
+                            { it.label }) { bitrateMode = it }
+                    }
+                }
+                OutlinedTextField(videoBitrateKbps, { videoBitrateKbps = it.filter(Char::isDigit) }, enabled = !recording,
+                    singleLine = true, modifier = Modifier.fillMaxWidth(), label = { Text("视频码率 kbps") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(gopSeconds, { gopSeconds = it.filter { char -> char.isDigit() || char == '.' } }, enabled = !recording,
+                        singleLine = true, modifier = Modifier.weight(1f), label = { Text("GOP 秒") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        isError = gopSecondsValue == null)
+                    OutlinedTextField(if (gopSecondsValue == 0f) "0" else bFrames, { bFrames = it.filter(Char::isDigit) }, enabled = !recording && gopSecondsValue != 0f,
+                        singleLine = true, modifier = Modifier.weight(1f), label = { Text("B 帧") })
+                }
+                Text(if (gopSecondsValue == null) "GOP 请输入 0～30 秒，可使用小数。"
+                    else if (gopSecondsValue == 0f) "GOP 0：每帧关键帧，自动禁用 B 帧；同码率下画质可能降低。"
+                    else "GOP 支持小数（如 0.5 秒）；设为 0 表示每帧关键帧。",
+                    style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = audioBitrateKbps,
+                    onValueChange = { audioBitrateKbps = it.filter(Char::isDigit) },
+                    enabled = !recording && includeAudio,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = includeAudio && audioBitrateValue == null,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("音频码率 kbps") },
+                    supportingText = { Text(if (audioBitrateValue == null) "请输入 16～512 kbps 的整数"
+                        else "AAC 编码码率；录像与串流共用，默认 192 kbps。") },
+                )
+                Text("编码目标颜色", style = MaterialTheme.typography.titleMedium)
+                UsbSettingChoice("颜色标准（Primaries / RGB → YUV 矩阵）",
+                    VideoColorStandard.entries, encoderColorStandard, !recording,
+                    { if (it == VideoColorStandard.BT2020) "BT.2020 / NCL 矩阵" else it.label }) { encoderColorStandard = it }
+                UsbSettingChoice("编码 Transfer（传递函数）",
+                    encoderTransferOptions, encoderColorTransfer, !recording,
+                    { it.encoderLabel() }) { encoderColorTransfer = it }
+                UsbSettingChoice("编码 Range（范围）",
+                    VideoColorRange.entries, encoderColorRange, !recording,
+                    { it.label }) { encoderColorRange = it }
+                Text("颜色标准同时选择色域和 RGB → YUV 矩阵；下次启动录像或串流生效。",
+                    style = MaterialTheme.typography.bodySmall)
+                Text("Transfer 设置不自动转换输入画面为 HDR；设备可能调整所请求的颜色参数。",
+                    style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = forceSpsVui, onCheckedChange = { forceSpsVui = it }, enabled = !recording)
+                    Text("重写编码后 H.26x 颜色元数据")
+                }
+                if (forceSpsVui) {
+                    Text("以下设置重写输出颜色标记，不转换像素；请与编码目标匹配。",
+                        style = MaterialTheme.typography.bodySmall)
+                    UsbSettingChoice("Range（范围）", VideoColorRange.entries, rewriteColorRange, !recording,
+                        { if (it == VideoColorRange.DEFAULT) "保持原值" else it.label }) { rewriteColorRange = it }
+                    UsbSettingChoice("Primaries（色域）", VideoColorStandard.entries, rewriteColorStandard, !recording,
+                        { if (it == VideoColorStandard.DEFAULT) "保持原值" else it.label }) { rewriteColorStandard = it }
+                    UsbSettingChoice("Transfer（传递函数）", VideoColorTransfer.entries, rewriteColorTransfer, !recording,
+                        { if (it == VideoColorTransfer.DEFAULT) "保持原值" else it.label }) { rewriteColorTransfer = it }
+                    UsbSettingChoice("Matrix（矩阵系数）", VideoColorMatrix.entries, rewriteColorMatrix, !recording,
+                        { if (it == VideoColorMatrix.DEFAULT) "保持原值" else it.label }) { rewriteColorMatrix = it }
+                }
+            }
+            UsbSettingsTab.OUTPUT -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("录像格式")
+                    ContainerFormat.entries.forEach { format ->
+                        OutlinedButton(onClick = { container = format }, enabled = !fileRecording && outputControlsEnabled) {
+                            Text(if (container == format) "✓ ${format.label}" else format.label)
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = rtmpUrl,
+                    onValueChange = { rtmpUrl = it },
+                    enabled = !rtmpStreaming && outputControlsEnabled,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("RTMP 地址（可选）") },
+                    placeholder = { Text("rtmp://服务器/app/串流密钥") },
+                )
+                val usbReceiveRate = if (recording)
+                    (state as? RecorderState.Recording)?.stats?.usbVideoReceiveBitsPerSecond else idleUsbReceiveRate
+                if (recording || idlePreview != null) {
+                    Text("USB 视频接收：" + (usbReceiveRate?.let {
+                        String.format(Locale.US, "%.1f Mbps · %.2f MB/s", it / 1_000_000.0, it / 8_000_000.0)
+                    } ?: "统计中"), style = MaterialTheme.typography.bodySmall)
+                }
+                Text(message, style = MaterialTheme.typography.bodySmall)
+                if (state is RecorderState.Error) Text((state as RecorderState.Error).message, color = MaterialTheme.colorScheme.error)
+                if (state is RecorderState.Recording) {
+                    val stats = (state as RecorderState.Recording).stats
+                    val streamRate = stats.streamBitrateBitsPerSecond / 1000.0
+                    val modes = buildList {
+                        if (stats.fileRecording) add("录像中")
+                        if (stats.httpStreaming) add("HTTP 串流中")
+                        if (stats.rtmpStreaming) add("RTMP 推流中")
+                    }.joinToString(" + ")
+                    val recentFpsText = stats.recentFps?.let { String.format(Locale.US, "%.1f fps", it) } ?: "统计中"
+                    Text("$modes · 近期（5秒）$recentFpsText · 平均 ${String.format(Locale.US, "%.1f", stats.averageFps)} fps" +
+                        if (streaming) " · 串流 ${String.format(Locale.US, "%.0f", streamRate)} kbps" else "")
+                    stats.outputPath?.let { Text("文件：$it", style = MaterialTheme.typography.bodySmall) }
+                    if (stats.outputChangePending) Text("正在切换输出…", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            UsbSettingsTab.TIMING -> {
+                UsbSettingChoice("视频缓存", bufferOptions, bufferFrames, !recording,
+                    { "$it 帧" }) { bufferFrames = it }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = timestampSmoothingEnabled,
+                        onCheckedChange = { timestampSmoothingEnabled = it }, enabled = !recording)
+                    Text("音视频时间戳平滑", modifier = Modifier.padding(top = 12.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = timestampSmoothingNtscEnabled,
+                        onCheckedChange = { timestampSmoothingNtscEnabled = it },
+                        enabled = !recording && timestampSmoothingEnabled)
+                    Text("按 NTSC 帧率平滑视频时间戳", modifier = Modifier.padding(top = 12.dp))
+                }
+                Text("开启后：60 → 59.94 fps，30 → 29.97 fps；音频仍按源采样率计算。",
+                    style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = timestampSmoothingMaxDeltaSeconds,
+                    onValueChange = { timestampSmoothingMaxDeltaSeconds = it.filter { char -> char.isDigit() || char == '.' } },
+                    enabled = !recording && timestampSmoothingEnabled,
+                    singleLine = true,
+                    isError = timestampSmoothingEnabled && timestampSmoothingDelta == null,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("时间戳最大偏差（秒）") },
+                    supportingText = { Text(if (timestampSmoothingDelta == null) "请输入大于或等于 0 的秒数"
+                        else "偏差不超过此值时使用计算时间戳；超过时跟随实际时间戳。") },
+                )
+            }
+            UsbSettingsTab.DISPLAY -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = previewEnabled, onCheckedChange = { previewEnabled = it })
+                    Text("录制时预览")
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = audioPreviewEnabled, onCheckedChange = { audioPreviewEnabled = it },
+                        enabled = includeAudio)
+                    Text("音频预览（监听）", modifier = Modifier.padding(top = 12.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = lowFrameRatePreview, onCheckedChange = { lowFrameRatePreview = it })
+                    Text("低帧率预览（5 fps）", modifier = Modifier.padding(top = 12.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = keepScreenOn, onCheckedChange = { keepScreenOn = it })
+                    Text("屏幕常亮", modifier = Modifier.padding(top = 12.dp))
+                }
+            }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { previewRequested = true; pendingAction = UsbAction.PREVIEW },
-                enabled = !recording && selected != null) {
-                Text("预览")
-            }
-            OutlinedButton(onClick = {
-                previewRequestRevision++
-                previewRequested = false
-                if (pendingAction == UsbAction.PREVIEW) pendingAction = UsbAction.NONE
-                idlePreview?.stop()
-                idlePreview = null
-                idleAudioLevelDb = -60f
-                recentAudioPeakDb = -60f
-                message = "预览已停止"
-            }, enabled = !recording && (previewRequested || idlePreview != null || pendingAction == UsbAction.PREVIEW)) {
-                Text("停止预览")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                if (fileRecording) RecorderController.stopRecording(context)
-                else if (recording) RecorderController.startRecording(context, container)
-                else { previewRequested = false; pendingAction = UsbAction.RECORD }
-            }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                outputControlsEnabled) {
-                Text(if (fileRecording) "停止录制" else "开始录制")
-            }
-            OutlinedButton(onClick = {
-                if (httpStreaming) RecorderController.stopHttpOutput(context)
-                else if (recording) RecorderController.startHttpOutput(context)
-                else { previewRequested = false; pendingAction = UsbAction.STREAM }
-            }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                outputControlsEnabled) {
-                Text(if (httpStreaming) "停止 HTTP" else "HTTP 串流")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = {
-                if (rtmpStreaming) RecorderController.stopRtmpOutput(context)
-                else if (recording) RecorderController.startRtmpOutput(context, rtmpUrl)
-                else { previewRequested = false; pendingAction = UsbAction.RTMP }
-            }, enabled = selected != null && rtmpUrl.startsWith("rtmp://") &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && outputControlsEnabled,
-                modifier = Modifier.fillMaxWidth()) {
-                Text(if (rtmpStreaming) "停止 RTMP" else "RTMP 推流")
-            }
-        }
-        Spacer(Modifier.height(4.dp))
     }
 }
 
 @Composable
-private fun <T> UsbColorRewriteChoice(label: String, values: List<T>, selected: T, enabled: Boolean,
+private fun <T> UsbSettingChoice(label: String, values: List<T>, selected: T, enabled: Boolean,
                                      valueLabel: (T) -> String, onSelect: (T) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {

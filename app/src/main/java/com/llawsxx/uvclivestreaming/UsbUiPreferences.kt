@@ -49,7 +49,6 @@ internal data class UsbUiSettings(
     val timestampSmoothingNtscEnabled: Boolean = false,
     val timestampSmoothingMaxDeltaSeconds: String = "0.1",
     val keepScreenOn: Boolean = true,
-    val scrollOffset: Int = 0,
 )
 
 internal object UsbUiPreferences {
@@ -118,7 +117,6 @@ internal object UsbUiPreferences {
             timestampSmoothingNtscEnabled = p.getBoolean("timestampSmoothingNtscEnabled", false),
             timestampSmoothingMaxDeltaSeconds = p.getString("timestampSmoothingMaxDeltaSeconds", "0.1").orEmpty(),
             keepScreenOn = p.getBoolean("keepScreenOn", true),
-            scrollOffset = p.getInt("scrollOffset", 0).coerceAtLeast(0),
         )
     }
 
@@ -180,13 +178,7 @@ internal object UsbUiPreferences {
             .putBoolean("timestampSmoothingNtscEnabled", settings.timestampSmoothingNtscEnabled)
             .putString("timestampSmoothingMaxDeltaSeconds", settings.timestampSmoothingMaxDeltaSeconds)
             .putBoolean("keepScreenOn", settings.keepScreenOn)
-            .putInt("scrollOffset", settings.scrollOffset.coerceAtLeast(0))
-            .apply()
-    }
-
-    fun saveScrollOffset(context: Context, offset: Int) {
-        context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
-            .putInt("scrollOffset", offset.coerceAtLeast(0))
+            .remove("scrollOffset")
             .apply()
     }
 
