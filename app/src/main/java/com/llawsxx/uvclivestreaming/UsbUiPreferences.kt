@@ -16,6 +16,7 @@ internal data class UsbUiSettings(
     val selectedDeviceName: String? = null,
     val selectedModeDisplay: String? = null,
     val includeAudio: Boolean = true,
+    val audioPreviewEnabled: Boolean = false,
     val previewEnabled: Boolean = true,
     val lowFrameRatePreview: Boolean = false,
     val container: ContainerFormat = ContainerFormat.MP4,
@@ -54,6 +55,7 @@ internal object UsbUiPreferences {
             selectedDeviceName = p.getString("selectedDeviceName", null),
             selectedModeDisplay = p.getString("selectedModeDisplay", null),
             includeAudio = p.getBoolean("includeAudio", true),
+            audioPreviewEnabled = p.getBoolean("audioPreviewEnabled", false),
             previewEnabled = p.getBoolean("previewEnabled", true),
             lowFrameRatePreview = p.getBoolean("lowFrameRatePreview", false),
             container = enumValue(p.getString("container", null), ContainerFormat.MP4),
@@ -91,6 +93,7 @@ internal object UsbUiPreferences {
             .putString("selectedDeviceName", settings.selectedDeviceName)
             .putString("selectedModeDisplay", settings.selectedModeDisplay)
             .putBoolean("includeAudio", settings.includeAudio)
+            .putBoolean("audioPreviewEnabled", settings.audioPreviewEnabled)
             .putBoolean("previewEnabled", settings.previewEnabled)
             .putBoolean("lowFrameRatePreview", settings.lowFrameRatePreview)
             .putString("container", settings.container.name)

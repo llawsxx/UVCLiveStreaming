@@ -80,6 +80,7 @@ class RecordingService : Service() {
         )
         engine = newEngine
         RecorderController.previewUpdater = newEngine::updatePreview
+        RecorderController.audioPreviewUpdater = newEngine::updateAudioPreview
         newEngine.start(RecorderController.previewSurface, RecorderController.previewEnabled,
             RecorderController.previewRotationDegrees)
     }
@@ -103,6 +104,7 @@ class RecordingService : Service() {
         captureGeneration++
         engine = null
         RecorderController.previewUpdater = null
+        RecorderController.audioPreviewUpdater = null
         RecorderController.update(RecorderState.Stopping())
         old.stop { mainHandler.post { finish(error) } }
     }
@@ -148,6 +150,7 @@ class RecordingService : Service() {
 
     override fun onDestroy() {
         captureGeneration++
+        RecorderController.audioPreviewUpdater = null
         engine?.forceRelease(); engine = null
         wakeLock?.takeIf { it.isHeld }?.release(); wakeLock = null
         super.onDestroy()

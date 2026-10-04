@@ -83,6 +83,7 @@ import com.llawsxx.uvclivestreaming.recording.UsbYuvMatrix
 import com.llawsxx.uvclivestreaming.recording.UsbSourceRange
 import com.llawsxx.uvclivestreaming.recording.UsbRecorderEngine
 import com.llawsxx.uvclivestreaming.recording.UsbReceiveRate
+import com.llawsxx.uvclivestreaming.recording.UsbAudioMonitor
 import com.llawsxx.uvclivestreaming.recording.UsbVideoInputFormat
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
 import com.llawsxx.uvclivestreaming.recording.VideoCodec
@@ -186,6 +187,7 @@ private fun UsbCameraScreen() {
     var usbPermissionEpoch by remember { mutableStateOf(0) }
     var runtimePermissionEpoch by remember { mutableStateOf(0) }
     var includeAudio by rememberSaveable { mutableStateOf(uiSettings.includeAudio) }
+    var audioPreviewEnabled by rememberSaveable { mutableStateOf(uiSettings.audioPreviewEnabled) }
     var previewEnabled by rememberSaveable { mutableStateOf(uiSettings.previewEnabled) }
     var lowFrameRatePreview by rememberSaveable { mutableStateOf(uiSettings.lowFrameRatePreview) }
     var keepScreenOn by rememberSaveable { mutableStateOf(uiSettings.keepScreenOn) }
@@ -264,7 +266,7 @@ private fun UsbCameraScreen() {
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(
-        selectedName, selectedMode?.display, includeAudio, previewEnabled, lowFrameRatePreview, keepScreenOn,
+        selectedName, selectedMode?.display, includeAudio, audioPreviewEnabled, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -275,6 +277,7 @@ private fun UsbCameraScreen() {
             selectedDeviceName = selectedName,
             selectedModeDisplay = selectedMode?.display,
             includeAudio = includeAudio,
+            audioPreviewEnabled = audioPreviewEnabled,
             previewEnabled = previewEnabled,
             lowFrameRatePreview = lowFrameRatePreview,
             container = container,
@@ -417,6 +420,12 @@ private fun UsbCameraScreen() {
 
     LaunchedEffect(idlePreview, lowFrameRatePreview) {
         idlePreview?.updateLowFrameRate(lowFrameRatePreview)
+    }
+
+    LaunchedEffect(audioPreviewEnabled, includeAudio, idlePreview) {
+        val enabled = audioPreviewEnabled && includeAudio
+        RecorderController.updateUsbAudioPreview(enabled)
+        idlePreview?.updateAudioPreview(enabled)
     }
 
     LaunchedEffect(idlePreview, recording) {
@@ -698,6 +707,11 @@ private fun UsbCameraScreen() {
                 else "AAC 编码码率；录像与串流共用，默认 192 kbps。") },
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Checkbox(checked = audioPreviewEnabled, onCheckedChange = { audioPreviewEnabled = it },
+                enabled = includeAudio)
+            Text("音频预览（监听）", modifier = Modifier.padding(top = 12.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Checkbox(checked = lowFrameRatePreview, onCheckedChange = { lowFrameRatePreview = it })
             Text("低帧率预览（5 fps）", modifier = Modifier.padding(top = 12.dp))
         }
@@ -972,6 +986,9 @@ private class UsbIdlePreview(
     @Volatile private var surface: Surface? = initialSurface
     @Volatile private var colorSettings = initialMatrix to initialSourceRange
     @Volatile private var lowFrameRate = initialLowFrameRate
+    @Volatile private var audioPreviewEnabled = false
+    @Volatile private var audioMonitor: UsbAudioMonitor? = null
+    private val audioMonitorLock = Any()
     private data class Frame(
         val bytes: ByteArray,
         val format: Int,
@@ -1014,6 +1031,15 @@ private class UsbIdlePreview(
                     videoFormat.nativeValue, audioEnabled, audioRate)
                 if (stopped.get()) return@Thread
                 val format = NativeUsbCapture.nativeFormat(handle)
+                if (audioEnabled && format[2] > 0 && format[3] in 1..2) {
+                    val monitor = UsbAudioMonitor(format[2], format[3], onError = {
+                        mainHandler.post { if (!stopped.get()) onMessage("音频预览已停止：$it") }
+                    })
+                    synchronized(audioMonitorLock) {
+                        audioMonitor = monitor
+                        monitor.setEnabled(audioPreviewEnabled)
+                    }
+                }
                 mainHandler.post { onMessage("USB 预览：${format[0]}×${format[1]}") }
                 renderThread = Thread({ renderFrames() }, "usb-preview-render").apply { start() }
                 NativeUsbCapture.nativeStart(handle, this)
@@ -1026,6 +1052,8 @@ private class UsbIdlePreview(
                 if (!stopped.get()) mainHandler.post { onMessage("USB 预览失败：${error.message}") }
             } finally {
                 usbVideoReceiveBitsPerSecond = null
+                val monitor = synchronized(audioMonitorLock) { audioMonitor.also { audioMonitor = null } }
+                monitor?.let { it.close(); runCatching { it.awaitStopped(500) } }
                 if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
                 stopped.set(true)
                 frameQueue.clear()
@@ -1051,6 +1079,12 @@ private class UsbIdlePreview(
     }
 
     fun updateLowFrameRate(enabled: Boolean) { lowFrameRate = enabled }
+    fun updateAudioPreview(enabled: Boolean) {
+        synchronized(audioMonitorLock) {
+            audioPreviewEnabled = enabled
+            audioMonitor?.setEnabled(enabled)
+        }
+    }
 
     fun stop(onStopped: (() -> Unit)? = null) {
         stopped.set(true)
@@ -1143,7 +1177,9 @@ private class UsbIdlePreview(
     }
 
     override fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long) {
-        if (stopped.get() || timestampNs - lastAudioLevelNs < 100_000_000L) return
+        if (stopped.get()) return
+        audioMonitor?.offer(bytes)
+        if (timestampNs - lastAudioLevelNs < 100_000_000L) return
         lastAudioLevelNs = timestampNs
         val level = usbPcmLevelDb(bytes)
         mainHandler.post { if (!stopped.get()) onAudioLevel(level) }

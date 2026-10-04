@@ -87,6 +87,9 @@ class UsbRecorderEngine(
     private var videoWidth = 0
     private var videoHeight = 0
     private var audioCaptureEnabled = false
+    @Volatile private var audioMonitor: UsbAudioMonitor? = null
+    private val audioMonitorLock = Any()
+    @Volatile private var audioPreviewEnabled = RecorderController.usbAudioPreviewEnabled
     private val videoTimestampSmoother = if (config.usbTimestampSmoothingEnabled)
         TimestampSmoother(videoSmoothingFrameRate(config.fps, config.usbTimestampSmoothingNtscEnabled),
             config.usbTimestampSmoothingMaxDeltaSeconds) else null
@@ -137,6 +140,14 @@ class UsbRecorderEngine(
             onNotice("USB 摄像头使用 ${videoWidth}×${videoHeight}，所选分辨率不可用")
         }
         if (config.hasAudio && !audioCaptureEnabled) onNotice("USB 摄像头未提供可用 UAC 麦克风路由，已跳过音频，视频仍可录制")
+        if (audioCaptureEnabled) {
+            val monitor = UsbAudioMonitor(audioRate, audioChannels,
+                onError = { onNotice("音频预览已停止：$it") })
+            synchronized(audioMonitorLock) {
+                audioMonitor = monitor
+                monitor.setEnabled(audioPreviewEnabled)
+            }
+        }
 
         val videoMime = if (config.videoCodec == VideoCodec.H265) MediaFormat.MIMETYPE_VIDEO_HEVC
             else MediaFormat.MIMETYPE_VIDEO_AVC
@@ -304,6 +315,7 @@ class UsbRecorderEngine(
         if (!running.get() || !audioCaptureEnabled) return
         val sampleFrames = bytes.size / (audioChannels * 2)
         if (sampleFrames == 0) return
+        audioMonitor?.offer(bytes)
         val smoothedTimestampNs = audioTimestampSmoother?.smooth(timestampNs, sampleFrames.toLong()) ?: timestampNs
         if (timestampNs - lastAudioLevelNs.get() >= 100_000_000L) {
             lastAudioLevelNs.set(timestampNs)
@@ -537,6 +549,8 @@ class UsbRecorderEngine(
             return
         }
         try {
+        val monitor = synchronized(audioMonitorLock) { audioMonitor.also { audioMonitor = null } }
+        monitor?.let { it.close(); runCatching { it.awaitStopped(500) } }
         mjpegDecodePool.close()
         synchronized(nativeMetricsLock) {
             val handle = nativeHandle
@@ -574,6 +588,12 @@ class UsbRecorderEngine(
     }
 
     override fun switchCamera(cameraId: String) = Unit
+    fun updateAudioPreview(enabled: Boolean) {
+        synchronized(audioMonitorLock) {
+            audioPreviewEnabled = enabled
+            audioMonitor?.setEnabled(enabled)
+        }
+    }
     override fun updateCameraControls(updated: RecordingConfig) = Unit
 
     companion object {
