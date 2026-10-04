@@ -41,9 +41,10 @@ class UsbRecorderEngine(
     private val rawVideoConverter = RawVideoConverter()
     private val mjpegDecodePool = MjpegDecodePool(
         decoder = { bytes, format, width, height, destination ->
-            format == 1 && NativeUsbCapture.nativeDecodeMjpegToI420(bytes, width, height, destination)
+            format == 1 && NativeUsbCapture.decodeMjpegToGpuBuffer(bytes, width, height, destination)
         },
         capacity = config.usbVideoBufferFrames.coerceIn(1, 30),
+        chromaGeometry = MjpegChromaGeometry::read,
     )
     private val frameCount = AtomicLong()
     private val receivedVideoFrames = AtomicLong()

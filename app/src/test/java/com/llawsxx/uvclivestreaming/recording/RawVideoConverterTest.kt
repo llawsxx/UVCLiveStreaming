@@ -14,9 +14,13 @@ class RawVideoConverterTest {
                 converter.convert(ByteArray(inputSize), format, 2, 2, 123L)!!.use {
                     assertNull(it.frame.bytes)
                     assertTrue(it.frame.directBuffer!!.isDirect)
-                    assertEquals(if (format == 4 || format == 9) 12 else 6, it.frame.directBuffer.capacity())
+                    val expectedSize = when (format) { 2, 3 -> 8; 4, 7, 9 -> 12; else -> 6 }
+                    assertEquals(expectedSize, it.frame.directBuffer.capacity())
+                    assertEquals(expectedSize, it.frame.byteSize)
+                    assertEquals(1, it.frame.chromaWidth)
+                    assertEquals(if (format == 2 || format == 3) 2 else 1, it.frame.chromaHeight)
                     assertEquals(123L, it.frame.timestampNs)
-                    assertEquals(when (format) { 4 -> GpuVideoFrame.RGB; 9 -> GpuVideoFrame.BGR; else -> GpuVideoFrame.I420 }, it.frame.layout)
+                    assertEquals(when (format) { 4 -> GpuVideoFrame.RGB; 9 -> GpuVideoFrame.BGR; 7 -> GpuVideoFrame.YUV10; else -> GpuVideoFrame.I420 }, it.frame.layout)
                     assertEquals(format == 4 || format == 9, it.frame.fullRange)
                 }
                 assertEquals(0, converter.diagnostics().inUse)

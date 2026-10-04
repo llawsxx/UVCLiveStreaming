@@ -68,6 +68,7 @@ import com.llawsxx.uvclivestreaming.recording.ConfigPreferences
 import com.llawsxx.uvclivestreaming.recording.ContainerFormat
 import com.llawsxx.uvclivestreaming.recording.NativeUsbCapture
 import com.llawsxx.uvclivestreaming.recording.MjpegDecodePool
+import com.llawsxx.uvclivestreaming.recording.MjpegChromaGeometry
 import com.llawsxx.uvclivestreaming.recording.RawVideoConverter
 import com.llawsxx.uvclivestreaming.recording.encoderLabel
 import com.llawsxx.uvclivestreaming.recording.encoderTransferOptions
@@ -969,9 +970,10 @@ private class UsbIdlePreview(
     private val previewRevision = AtomicLong()
     private val mjpegDecodePool = MjpegDecodePool(
         decoder = { bytes, format, frameWidth, frameHeight, destination ->
-            format == 1 && NativeUsbCapture.nativeDecodeMjpegToI420(bytes, frameWidth, frameHeight, destination)
+            format == 1 && NativeUsbCapture.decodeMjpegToGpuBuffer(bytes, frameWidth, frameHeight, destination)
         },
         capacity = bufferFrames.coerceIn(1, 30),
+        chromaGeometry = MjpegChromaGeometry::read,
     )
 
     fun start() {

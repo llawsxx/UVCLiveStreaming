@@ -166,7 +166,7 @@ class GpuVideoPipelineTest {
         }
     }
 
-    @Test fun rawDirectOutputMatchesLegacyAndProtectsBufferBounds() {
+    @Test fun rawDirectOutputPreservesSamplesAndProtectsBufferBounds() {
         for (format in listOf(2, 3, 5, 6, 7, 4, 9)) {
             val dimensions = if (format in listOf(4, 6, 9)) listOf(2 to 2, 8 to 6, 33 to 31)
                 else listOf(2 to 2, 8 to 6)
@@ -174,11 +174,27 @@ class GpuVideoPipelineTest {
                 val pixels = width * height
                 val yuvSize = pixels + 2 * ((width + 1) / 2) * ((height + 1) / 2)
                 val inputSize = when (format) { 2, 3 -> pixels * 2; 4, 7, 9 -> pixels * 3; else -> yuvSize }
-                val size = if (format == 4 || format == 9) pixels * 3 else yuvSize
+                val size = when (format) { 2, 3 -> pixels * 2; 4, 7, 9 -> pixels * 3; else -> yuvSize }
                 val input = ByteArray(inputSize + 3) { ((it * 73 + format * 19) and 255).toByte() }
                 val original = input.copyOf()
-                val reference = if (format == 4 || format == 9) input.copyOf(size)
-                    else NativeUsbCapture.nativeDecodeToI420(input, format, width, height)!!.copyOf(size)
+                val reference = when (format) {
+                    4, 6, 9 -> input.copyOf(size)
+                    2, 3 -> ByteArray(size).also { result ->
+                        for (pixel in 0 until pixels) result[pixel] = input[4 * (pixel / 2) +
+                            (if (format == 2) 0 else 1) + 2 * (pixel % 2)]
+                        for (pair in 0 until pixels / 2) {
+                            result[pixels + pair] = input[4 * pair + if (format == 2) 1 else 0]
+                            result[pixels + pixels / 2 + pair] = input[4 * pair + if (format == 2) 3 else 2]
+                        }
+                    }
+                    else -> ByteArray(size).also { result ->
+                        val word = if (format == 7) 2 else 1
+                        input.copyInto(result, 0, 0, pixels * word)
+                        for (component in 0..1) for (i in 0 until pixels / 4) for (byte in 0 until word)
+                            result[(pixels + component * pixels / 4 + i) * word + byte] =
+                                input[(pixels + 2 * i + component) * word + byte]
+                    }
+                }
                 val guarded = ByteBuffer.allocateDirect(size + 16)
                 repeat(3) {
                     for (i in 0 until guarded.capacity()) guarded.put(i, 0x5a.toByte())
@@ -205,6 +221,76 @@ class GpuVideoPipelineTest {
             assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(ByteArray(64), format, 3, 2, output))
         assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(ByteArray(64), 6, 0, 2, output))
         assertFalse(NativeUsbCapture.nativeConvertRawToGpuBuffer(ByteArray(64), 6, 3841, 2, output))
+    }
+
+    @Test fun fullHeightChromaAndP010LowBitsAffectGpuRgb() {
+        ImageReader.newInstance(2, 2, PixelFormat.RGBA_8888, 2).use { reader ->
+            GpuVideoRenderer(initialMatrix = UsbYuvMatrix.BT709, initialSourceRange = UsbSourceRange.FULL).use { gpu ->
+                val target = GpuVideoRenderer.PreviewTarget(reader.surface, 0)
+                RawVideoConverter().use { converter ->
+                    // Each source row has distinct chroma. Averaging into I420 destroys this contrast.
+                    converter.convert(bytes(128, 32, 128, 128, 128, 224, 128, 128), 2, 2, 2, 1)!!.use {
+                        assertTrue(gpu.render(it.frame, target))
+                        val rgb = readPixels(reader)
+                        assertTrue("Top row's blue chroma was averaged", rgb[0][2] < 10)
+                        assertTrue("Bottom row's blue chroma was averaged", rgb[2][2] > 245)
+                    }
+                    fun p010(value: Int): ByteArray = ByteArray(12).also { data ->
+                        repeat(6) { i -> data[2 * i] = ((value shl 6) and 255).toByte(); data[2 * i + 1] = (value ushr 2).toByte() }
+                    }
+                    converter.convert(p010(512), 7, 2, 2, 2)!!.use {
+                        assertTrue(gpu.render(it.frame, target))
+                    }
+                    val low = readPixels(reader)[0]
+                    converter.convert(p010(515), 7, 2, 2, 3)!!.use {
+                        assertTrue(gpu.render(it.frame, target))
+                    }
+                    val high = readPixels(reader)[0]
+                    assertTrue("P010 low bits were discarded before RGB", high[0] > low[0] && high[2] > low[2])
+                    // Limited ten-bit black/white code values must still map to black/white.
+                    gpu.setColorSettings(UsbYuvMatrix.BT709, UsbSourceRange.TV)
+                    val codes = listOf(64, 64, 940, 940, 512, 512)
+                    val data = ByteArray(12).also { b -> codes.forEachIndexed { i, value ->
+                        b[2 * i] = (value shl 6).toByte(); b[2 * i + 1] = (value ushr 2).toByte()
+                    } }
+                    converter.convert(data, 7, 2, 2, 4)!!.use { assertTrue(gpu.render(it.frame, target)) }
+                    val limited = readPixels(reader)
+                    assertTrue(limited[0].all { it < 3 }); assertTrue(limited[2].all { it > 252 })
+                }
+            }
+        }
+    }
+
+    @Test fun jpegSourceChromaIsPreservedIncludingMarkerRecoveryAndBounds() {
+        for ((name, ch) in listOf("420" to 12, "422" to 24, "444" to 24)) {
+            val cw = if (name == "444") 32 else 16
+            val jpeg = checkNotNull(javaClass.getResourceAsStream("/mjpeg/yuv$name.jpg")).use { it.readBytes() }
+            val size = 32 * 24 + 2 * cw * ch
+            assertEquals(cw to ch, MjpegChromaGeometry.read(jpeg, 32, 24))
+            val original420 = NativeUsbCapture.nativeDecodeToI420(jpeg, 1, 32, 24)!!
+            val output = ByteBuffer.allocateDirect(size + 16)
+            for (input in listOf(jpeg, bytes(1, 2, 3) + jpeg, jpeg.copyOf(jpeg.size - 2), jpeg.copyOfRange(2, jpeg.size))) {
+                for (i in 0 until output.capacity()) output.put(i, 0x5a.toByte())
+                val target = output.duplicate().apply { position(8); limit(8 + size) }.slice()
+                assertTrue(NativeUsbCapture.nativeDecodeMjpegToYuv(input, 32, 24, cw, ch, target))
+                val actual = ByteArray(size).also { target.get(it) }
+                assertArrayEquals(original420.copyOf(32 * 24), actual.copyOf(32 * 24))
+                // Legacy downsample must equal averaging the preserved original component samples.
+                for (component in 0..1) for (y in 0 until 12) for (x in 0 until 16) {
+                    val xStep = cw / 16; val yStep = ch / 12
+                    var sum = 0
+                    for (yy in 0 until yStep) for (xx in 0 until xStep)
+                        sum += actual[768 + component * cw * ch + (y * yStep + yy) * cw + x * xStep + xx].toInt() and 255
+                    val expected = (sum + xStep * yStep / 2) / (xStep * yStep)
+                    assertEquals(original420[768 + component * 192 + y * 16 + x].toInt() and 255, expected)
+                }
+                for (i in 0 until 8) assertEquals(0x5a.toByte(), output.get(i))
+                for (i in size + 8 until output.capacity()) assertEquals(0x5a.toByte(), output.get(i))
+            }
+            assertFalse(NativeUsbCapture.nativeDecodeMjpegToYuv(jpeg, 32, 24, cw, ch, ByteBuffer.allocateDirect(size - 1)))
+            assertFalse(NativeUsbCapture.nativeDecodeMjpegToYuv(jpeg, 32, 24, cw, ch, output.asReadOnlyBuffer()))
+            assertFalse(NativeUsbCapture.nativeDecodeMjpegToYuv(jpeg, 32, 24, cw - 1, ch, output))
+        }
     }
 
     @Test fun rawDirectPipelinePreservesGpuPixelsLayoutAndRange() {

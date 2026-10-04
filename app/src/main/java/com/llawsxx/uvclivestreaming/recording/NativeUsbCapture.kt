@@ -38,7 +38,13 @@ internal object NativeUsbCapture {
     external fun nativeDecodeToI420(bytes: ByteArray, format: Int, width: Int, height: Int): ByteArray?
     /** Writes MJPEG I420 directly into an exclusively leased direct buffer (offset zero). */
     external fun nativeDecodeMjpegToI420(bytes: ByteArray, width: Int, height: Int, destination: ByteBuffer): Boolean
-    /** Repack raw YUV to I420 or copy RGB/BGR into caller-owned direct memory (offset zero). */
+    /** Writes original JPEG Y/U/V planes, without subsampling; verifies supplied chroma geometry. */
+    external fun nativeDecodeMjpegToYuv(bytes: ByteArray, width: Int, height: Int, chromaWidth: Int, chromaHeight: Int, destination: ByteBuffer): Boolean
+    fun decodeMjpegToGpuBuffer(bytes: ByteArray, width: Int, height: Int, destination: ByteBuffer): Boolean {
+        val geometry = MjpegChromaGeometry.read(bytes, width, height) ?: ((width + 1) / 2 to (height + 1) / 2)
+        return nativeDecodeMjpegToYuv(bytes, width, height, geometry.first, geometry.second, destination)
+    }
+    /** Repack raw YUV into planar samples, preserving 4:2:2 / 10-bit, or copy RGB/BGR. */
     external fun nativeConvertRawToGpuBuffer(bytes: ByteArray, format: Int, width: Int, height: Int, destination: ByteBuffer): Boolean
     /** [video width, video height, audio sample rate, audio channels]. */
     external fun nativeFormat(handle: Long): IntArray

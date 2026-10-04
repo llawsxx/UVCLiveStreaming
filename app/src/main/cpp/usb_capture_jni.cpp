@@ -20,6 +20,9 @@
 extern "C" uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out);
 extern "C" uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
     long *warnings, char *message, size_t message_size);
+extern "C" uvc_error_t uvc_mjpeg2yuv_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
+    unsigned int chroma_width, unsigned int chroma_height,
+    long *warnings, char *message, size_t message_size);
 
 namespace {
 constexpr const char *TAG = "UVCLiveStreamingUsb";
@@ -583,7 +586,7 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeFormat(JNIEnv
 }
 
 static bool decode_mjpeg_i420(const uint8_t *src, size_t length, int width, int height,
-                              uvc_frame_t *destination) {
+                              uvc_frame_t *destination, int chroma_width = 0, int chroma_height = 0) {
     thread_local std::vector<uint8_t> normalized;
     size_t soi = length;
     for (size_t i = 0; i + 1 < length; ++i) {
@@ -628,7 +631,9 @@ static bool decode_mjpeg_i420(const uint8_t *src, size_t length, int width, int 
     in.width = width; in.height = height; in.frame_format = UVC_FRAME_FORMAT_MJPEG;
     long warnings = 0;
     char detail[256]{};
-    const auto decoded = uvc_mjpeg2i420_diagnostic(&in, destination, &warnings, detail, sizeof(detail));
+    const auto decoded = chroma_width > 0
+        ? uvc_mjpeg2yuv_diagnostic(&in, destination, chroma_width, chroma_height, &warnings, detail, sizeof(detail))
+        : uvc_mjpeg2i420_diagnostic(&in, destination, &warnings, detail, sizeof(detail));
     record_mjpeg_decode(missing_soi, !eoi, soi != 0, missing_soi, decoded != UVC_SUCCESS,
         warnings, detail, length, width, height);
     return decoded == UVC_SUCCESS;
@@ -648,13 +653,14 @@ static void *writable_direct_output(JNIEnv *env, jobject destination, size_t siz
     return env->ExceptionCheck() || read_only ? nullptr : data;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegToI420(
-    JNIEnv *env, jobject, jbyteArray encoded, jint width, jint height, jobject destination) {
+static jboolean decode_mjpeg_direct(JNIEnv *env, jbyteArray encoded, jint width, jint height,
+                                   int chroma_width, int chroma_height, jobject destination) {
     if (!encoded || width <= 0 || height <= 0 || width > 3840 || height > 2160)
         return JNI_FALSE;
-    const size_t size = static_cast<size_t>(width) * height +
-        2 * static_cast<size_t>((width + 1) / 2) * ((height + 1) / 2);
+    const int cw = chroma_width > 0 ? chroma_width : (width + 1) / 2;
+    const int ch = chroma_height > 0 ? chroma_height : (height + 1) / 2;
+    if (cw <= 0 || ch <= 0 || cw > width || ch > height) return JNI_FALSE;
+    const size_t size = static_cast<size_t>(width) * height + 2 * static_cast<size_t>(cw) * ch;
     auto *data = writable_direct_output(env, destination, size);
     if (!data) return JNI_FALSE;
     const size_t length = env->GetArrayLength(encoded);
@@ -666,7 +672,8 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegTo
     output.data_bytes = size;
     bool success = false;
     try {
-        success = decode_mjpeg_i420(reinterpret_cast<const uint8_t *>(elements), length, width, height, &output);
+        success = decode_mjpeg_i420(reinterpret_cast<const uint8_t *>(elements), length, width, height,
+                                    &output, chroma_width, chroma_height);
     } catch (const std::exception &error) {
         env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
         throw_java(env, error.what());
@@ -674,6 +681,43 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegTo
     }
     env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
     return success ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegToI420(
+    JNIEnv *env, jobject, jbyteArray encoded, jint width, jint height, jobject destination) {
+    return decode_mjpeg_direct(env, encoded, width, height, 0, 0, destination);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegToYuv(
+    JNIEnv *env, jobject, jbyteArray encoded, jint width, jint height,
+    jint chroma_width, jint chroma_height, jobject destination) {
+    if (chroma_width <= 0 || chroma_height <= 0) return JNI_FALSE;
+    return decode_mjpeg_direct(env, encoded, width, height, chroma_width, chroma_height, destination);
+}
+
+// Source-preserving packing for GL. The legacy I420 helper below is only for explicit I420 callers.
+static void repack_raw_yuv(const uint8_t *src, int format, int width, int height, uint8_t *dst) {
+    const size_t pixels = static_cast<size_t>(width) * height;
+    if (format == 5 || format == 7) {
+        const size_t sample_bytes = format == 7 ? 2 : 1;
+        const size_t chroma = pixels / 4;
+        memcpy(dst, src, pixels * sample_bytes);
+        for (size_t i = 0; i < chroma; ++i) {
+            memcpy(dst + (pixels + i) * sample_bytes, src + (pixels + 2 * i) * sample_bytes, sample_bytes);
+            memcpy(dst + (pixels + chroma + i) * sample_bytes, src + (pixels + 2 * i + 1) * sample_bytes, sample_bytes);
+        }
+    } else {
+        const int yo = format == 2 ? 0 : 1, uo = format == 2 ? 1 : 0, vo = format == 2 ? 3 : 2;
+        const size_t chroma = pixels / 2;
+        for (size_t pair = 0; pair < chroma; ++pair) {
+            dst[2 * pair] = src[4 * pair + yo];
+            dst[2 * pair + 1] = src[4 * pair + yo + 2];
+            dst[pixels + pair] = src[4 * pair + uo];
+            dst[pixels + chroma + pair] = src[4 * pair + vo];
+        }
+    }
 }
 
 static void repack_raw_i420(const uint8_t *src, int format, int width, int height, uint8_t *dst) {
@@ -714,7 +758,8 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeConvertRawToG
     if (!rgb && format != 2 && format != 3 && format != 5 && format != 6 && format != 7) return JNI_FALSE;
     if (!rgb && format != 6 && ((width & 1) || (height & 1))) return JNI_FALSE;
     const size_t pixels = static_cast<size_t>(width) * height;
-    const size_t size = rgb ? pixels * 3 : pixels + 2 * static_cast<size_t>((width + 1) / 2) * ((height + 1) / 2);
+    const size_t size = rgb || format == 7 ? pixels * 3 :
+        format == 2 || format == 3 ? pixels * 2 : pixels + 2 * static_cast<size_t>((width + 1) / 2) * ((height + 1) / 2);
     const size_t required = format == 2 || format == 3 ? pixels * 2 : format == 7 ? pixels * 3 : size;
     if (static_cast<size_t>(env->GetArrayLength(encoded)) < required) return JNI_FALSE;
     auto *dst = static_cast<uint8_t *>(writable_direct_output(env, destination, size));
@@ -726,7 +771,7 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeConvertRawToG
     }
     auto elements = env->GetByteArrayElements(encoded, nullptr);
     if (!elements) return JNI_FALSE;
-    repack_raw_i420(reinterpret_cast<const uint8_t *>(elements), format, width, height, dst);
+    repack_raw_yuv(reinterpret_cast<const uint8_t *>(elements), format, width, height, dst);
     env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
     return JNI_TRUE;
 }

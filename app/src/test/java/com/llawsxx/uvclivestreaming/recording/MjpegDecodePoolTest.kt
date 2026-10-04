@@ -6,6 +6,26 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class MjpegDecodePoolTest {
+    @Test fun fullHeightChromaReachesRendererWithoutDownsampling() {
+        val pool = MjpegDecodePool(decoder = { _, _, _, _, destination ->
+            assertEquals(16, destination.capacity()) // 4x2 Y plus two 2x2 chroma planes.
+            destination.put(8, 11); destination.put(10, 222.toByte())
+            true
+        }, workerCount = 1, chromaGeometry = { _, _, _ -> 2 to 2 })
+        pool.start()
+        try {
+            pool.offer(byteArrayOf(0), 1, 4, 2, 123)
+            pool.poll(2_000)!!.use { output ->
+                assertEquals(2, output.chromaWidth); assertEquals(2, output.chromaHeight)
+                val gpu = GpuVideoFrame.fromDecoded(output)!!
+                assertEquals(16, gpu.byteSize)
+                assertEquals(11, gpu.directBuffer!!.get(8).toInt() and 255)
+                assertEquals(222, gpu.directBuffer.get(10).toInt() and 255)
+            }
+            assertEquals(0, pool.diagnostics().outputBuffers.inUse)
+        } finally { pool.close() }
+    }
+
     @Test fun outOfOrderWorkersRetainCaptureTimestampOrder() {
         val firstStarted = CountDownLatch(1)
         val releaseFirst = CountDownLatch(1)

@@ -7,11 +7,14 @@ enum class UsbYuvMatrix(val label: String, private val kr: Float, private val kb
     BT2020("BT.2020 NCL", 0.2627f, 0.0593f),
     SMPTE240M("SMPTE 240M", 0.212f, 0.087f);
 
-    /** Column-major matrix for normalized 8-bit samples, after subtracting source offsets. */
-    internal fun conversionMatrix(fullRange: Boolean): FloatArray {
+    /** Column-major matrix for normalized samples, after subtracting bit-depth-specific offsets. */
+    internal fun conversionMatrix(fullRange: Boolean, bitDepth: Int = 8): FloatArray {
+        require(bitDepth == 8 || bitDepth == 10)
         val kg = 1f - kr - kb
-        val yScale = if (fullRange) 1f else 255f / 219f
-        val cScale = if (fullRange) 1f else 255f / 224f
+        val maximum = ((1 shl bitDepth) - 1).toFloat()
+        val scale = (1 shl (bitDepth - 8)).toFloat()
+        val yScale = if (fullRange) 1f else maximum / (219f * scale)
+        val cScale = if (fullRange) 1f else maximum / (224f * scale)
         return floatArrayOf(
             yScale, yScale, yScale,
             0f, -2f * kb * (1f - kb) / kg * cScale, 2f * (1f - kb) * cScale,

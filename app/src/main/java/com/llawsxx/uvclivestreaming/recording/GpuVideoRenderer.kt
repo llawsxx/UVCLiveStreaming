@@ -34,6 +34,8 @@ internal class GpuVideoRenderer(
     private var uploadBuffer: ByteBuffer? = null
     private var textureWidth = 0
     private var textureHeight = 0
+    private var textureChromaWidth = 0
+    private var textureChromaHeight = 0
     private var textureLayout = -1
     private var lastEncodedTimestamp = Long.MIN_VALUE
     var encodedFrameCount = 0L
@@ -43,12 +45,16 @@ internal class GpuVideoRenderer(
     private var sourceRange = initialSourceRange
     private var fullRangeMatrix = initialMatrix.conversionMatrix(true)
     private var tvRangeMatrix = initialMatrix.conversionMatrix(false)
+    private var fullRangeMatrix10 = initialMatrix.conversionMatrix(true, 10)
+    private var tvRangeMatrix10 = initialMatrix.conversionMatrix(false, 10)
 
     fun setColorSettings(matrix: UsbYuvMatrix, range: UsbSourceRange) {
         check(Thread.currentThread() === ownerThread && !closed)
         if (matrix != colorMatrix) {
             fullRangeMatrix = matrix.conversionMatrix(true)
             tvRangeMatrix = matrix.conversionMatrix(false)
+            fullRangeMatrix10 = matrix.conversionMatrix(true, 10)
+            tvRangeMatrix10 = matrix.conversionMatrix(false, 10)
             colorMatrix = matrix
         }
         sourceRange = range
@@ -136,10 +142,11 @@ internal class GpuVideoRenderer(
     }
 
     private fun upload(frame: GpuVideoFrame) {
-        val cw = (frame.width + 1) / 2
-        val ch = (frame.height + 1) / 2
-        val ySize = frame.width * frame.height
-        val required = if (frame.layout == GpuVideoFrame.I420) ySize + 2 * cw * ch else ySize * 3
+        val cw = frame.chromaWidth
+        val ch = frame.chromaHeight
+        require(cw in 1..frame.width && ch in 1..frame.height)
+        require(frame.layout in GpuVideoFrame.I420..GpuVideoFrame.YUV10)
+        val required = frame.byteSize
         val buffer = frame.directBuffer?.let {
             require(it.isDirect && it.capacity() >= required)
             it.duplicate().apply { clear(); limit(required) }
@@ -149,14 +156,16 @@ internal class GpuVideoRenderer(
             if ((uploadBuffer?.capacity() ?: 0) < required) uploadBuffer = ByteBuffer.allocateDirect(required)
             checkNotNull(uploadBuffer).apply { clear(); put(bytes, 0, required); flip() }
         }
-        val changed = textureWidth != frame.width || textureHeight != frame.height || textureLayout != frame.layout
-        val planes = if (frame.layout == GpuVideoFrame.I420) 3 else 1
+        val changed = textureWidth != frame.width || textureHeight != frame.height || textureLayout != frame.layout ||
+            textureChromaWidth != cw || textureChromaHeight != ch
+        val planes = if (frame.isRgb) 1 else 3
         var offset = 0
         for (plane in 0 until planes) {
             val w = if (plane == 0) frame.width else cw
             val h = if (plane == 0) frame.height else ch
-            val pixelFormat = if (planes == 3) GLES20.GL_LUMINANCE else GLES20.GL_RGB
-            val size = w * h * if (planes == 3) 1 else 3
+            val pixelFormat = if (frame.isRgb) GLES20.GL_RGB else
+                if (frame.sampleBytes == 2) GLES20.GL_LUMINANCE_ALPHA else GLES20.GL_LUMINANCE
+            val size = w * h * if (frame.isRgb) 3 else frame.sampleBytes
             val pixels = buffer.duplicate().apply { position(offset); limit(offset + size) }.slice()
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + plane)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[plane])
@@ -168,6 +177,7 @@ internal class GpuVideoRenderer(
         }
         check(GLES20.glGetError() == GLES20.GL_NO_ERROR) { "GPU 视频纹理上传失败" }
         textureWidth = frame.width; textureHeight = frame.height; textureLayout = frame.layout
+        textureChromaWidth = cw; textureChromaHeight = ch
     }
 
     private fun draw(frame: GpuVideoFrame, width: Int, height: Int) {
@@ -195,10 +205,15 @@ internal class GpuVideoRenderer(
         }
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uLayout"), frame.layout)
         val fullRange = sourceRange.isFullRange(frame.fullRange)
+        val tenBit = frame.layout == GpuVideoFrame.YUV10
         GLES20.glUniformMatrix3fv(GLES20.glGetUniformLocation(program, "uYuvToRgb"), 1, false,
-            if (fullRange) fullRangeMatrix else tvRangeMatrix, 0)
+            if (tenBit) { if (fullRange) fullRangeMatrix10 else tvRangeMatrix10 }
+            else { if (fullRange) fullRangeMatrix else tvRangeMatrix }, 0)
+        val maxSample = if (tenBit) 1023f else 255f
+        val sampleScale = if (tenBit) 4f else 1f
         GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uYuvOffset"),
-            if (fullRange) 0f else -16f / 255f, -128f / 255f, -128f / 255f)
+            if (fullRange) 0f else -16f * sampleScale / maxSample,
+            -128f * sampleScale / maxSample, -128f * sampleScale / maxSample)
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uRgbRange"),
             if (fullRange) 0f else -16f / 255f, if (fullRange) 1f else 255f / 219f)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -289,7 +304,13 @@ internal class GpuVideoRenderer(
             void main() { gl_Position = vec4(aPosition, 0.0, 1.0); vUv = aUv; }
         """
         private const val FRAGMENT = """
+            #ifdef GL_FRAGMENT_PRECISION_HIGH
+            precision highp float;
+            precision highp sampler2D;
+            #else
             precision mediump float;
+            precision mediump sampler2D;
+            #endif
             varying vec2 vUv;
             uniform sampler2D uPlane0;
             uniform sampler2D uPlane1;
@@ -299,14 +320,20 @@ internal class GpuVideoRenderer(
             uniform vec3 uYuvOffset;
             uniform vec2 uRgbRange;
             void main() {
-                if (uLayout != 0) {
+                if (uLayout == 1 || uLayout == 2) {
                     vec3 rgb = texture2D(uPlane0, vUv).rgb;
                     rgb = uLayout == 2 ? rgb.bgr : rgb;
                     gl_FragColor = vec4(clamp((rgb + uRgbRange.x) * uRgbRange.y, 0.0, 1.0), 1.0);
                 } else {
-                    float y = texture2D(uPlane0, vUv).r;
-                    float u = texture2D(uPlane1, vUv).r;
-                    float v = texture2D(uPlane2, vUv).r;
+                    vec4 py = texture2D(uPlane0, vUv);
+                    vec4 pu = texture2D(uPlane1, vUv);
+                    vec4 pv = texture2D(uPlane2, vUv);
+                    // LUMINANCE_ALPHA carries both bytes of each P010 sample.
+                    // Reconstruction is linear, so filtering retains the low bits too.
+                    vec2 weights = vec2(255.0 / 65472.0, 65280.0 / 65472.0);
+                    float y = uLayout == 3 ? dot(py.ra, weights) : py.r;
+                    float u = uLayout == 3 ? dot(pu.ra, weights) : pu.r;
+                    float v = uLayout == 3 ? dot(pv.ra, weights) : pv.r;
                     vec3 rgb = uYuvToRgb * (vec3(y, u, v) + uYuvOffset);
                     gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
                 }

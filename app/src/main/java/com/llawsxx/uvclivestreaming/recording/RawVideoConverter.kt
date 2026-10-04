@@ -23,7 +23,9 @@ internal class RawVideoConverter(
         if (!rgb && format != 2 && format != 3 && format != 5 && format != 6 && format != 7) return null
         if (format != 6 && !rgb && ((width and 1) != 0 || (height and 1) != 0)) return null
         val pixels = width * height
-        val size = if (rgb) pixels * 3 else pixels + 2 * ((width + 1) / 2) * ((height + 1) / 2)
+        val cw = (width + 1) / 2
+        val ch = if (format == 2 || format == 3) height else (height + 1) / 2
+        val size = if (rgb) pixels * 3 else (pixels + 2 * cw * ch) * if (format == 7) 2 else 1
         val inputSize = when (format) {
             2, 3 -> pixels * 2
             4, 7, 9 -> pixels * 3
@@ -36,9 +38,9 @@ internal class RawVideoConverter(
                 lease.close()
                 return null
             }
-            val layout = when (format) { 4 -> GpuVideoFrame.RGB; 9 -> GpuVideoFrame.BGR; else -> GpuVideoFrame.I420 }
+            val layout = when (format) { 4 -> GpuVideoFrame.RGB; 9 -> GpuVideoFrame.BGR; 7 -> GpuVideoFrame.YUV10; else -> GpuVideoFrame.I420 }
             return ConvertedFrame(GpuVideoFrame(null, width, height, timestampNs,
-                layout = layout, fullRange = rgb, directBuffer = lease.buffer), lease)
+                layout = layout, fullRange = rgb, directBuffer = lease.buffer, chromaWidth = cw, chromaHeight = ch), lease)
         } catch (error: Throwable) {
             lease.close()
             throw error

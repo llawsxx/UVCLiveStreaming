@@ -130,7 +130,8 @@ static void insert_huff_tables(j_decompress_ptr dinfo) {
 
 /* Decode JPEG component planes without an intermediate RGB image. libjpeg's
    memory pool owns all scratch planes, including on longjmp/error cleanup. */
-uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
+static uvc_error_t decode_yuv_planes(uvc_frame_t *in, uvc_frame_t *out,
+    unsigned int source_cw, unsigned int source_ch,
     long *warnings, char *message, size_t message_size) {
   struct jpeg_decompress_struct dinfo = {0};
   struct error_mgr jerr = {0};
@@ -159,6 +160,20 @@ uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
   dinfo.raw_data_out = TRUE;
   dinfo.dct_method = JDCT_IFAST;
   jpeg_start_decompress(&dinfo);
+  if (source_cw || source_ch) {
+    if (!source_cw || !source_ch || source_cw > in->width || source_ch > in->height ||
+        dinfo.comp_info[0].downsampled_width != in->width ||
+        dinfo.comp_info[0].downsampled_height != in->height ||
+        (dinfo.num_components == 3 &&
+         (dinfo.comp_info[1].downsampled_width != source_cw ||
+          dinfo.comp_info[2].downsampled_width != source_cw ||
+          dinfo.comp_info[1].downsampled_height != source_ch ||
+          dinfo.comp_info[2].downsampled_height != source_ch))) {
+      snprintf(jerr.diagnostic, sizeof(jerr.diagnostic), "JPEG chroma geometry mismatch");
+      goto fail_yuv;
+    }
+    cw = source_cw; ch = source_ch;
+  }
   for (int c = 0; c < dinfo.num_components; ++c) {
     jpeg_component_info *comp = &dinfo.comp_info[c];
     JDIMENSION rows = ((comp->height_in_blocks + comp->v_samp_factor - 1) /
@@ -198,7 +213,8 @@ uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
   out->width = in->width;
   out->height = in->height;
   out->data_bytes = pixels + 2 * cw * ch;
-  out->frame_format = UVC_FRAME_FORMAT_I420;
+  out->frame_format = cw == (in->width + 1) / 2 && ch == (in->height + 1) / 2
+      ? UVC_FRAME_FORMAT_I420 : UVC_FRAME_FORMAT_UNKNOWN;
   out->step = in->width;
   jpeg_finish_decompress(&dinfo);
   if (warnings) *warnings = jerr.super.num_warnings;
@@ -211,6 +227,18 @@ fail_yuv:
       jerr.diagnostic[0] ? jerr.diagnostic : "JPEG decode/allocation failed");
   jpeg_destroy_decompress(&dinfo);
   return UVC_ERROR_OTHER;
+}
+
+uvc_error_t uvc_mjpeg2yuv_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
+    unsigned int chroma_width, unsigned int chroma_height,
+    long *warnings, char *message, size_t message_size) {
+  if (!chroma_width || !chroma_height) return UVC_ERROR_INVALID_PARAM;
+  return decode_yuv_planes(in, out, chroma_width, chroma_height, warnings, message, message_size);
+}
+
+uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
+    long *warnings, char *message, size_t message_size) {
+  return decode_yuv_planes(in, out, 0, 0, warnings, message, message_size);
 }
 
 uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out) {

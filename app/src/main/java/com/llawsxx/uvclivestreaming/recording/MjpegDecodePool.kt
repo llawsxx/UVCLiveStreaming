@@ -16,6 +16,7 @@ internal class MjpegDecodePool(
     private val decoder: (ByteArray, Int, Int, Int, ByteBuffer) -> Boolean,
     workerCount: Int = 4,
     capacity: Int = 10,
+    private val chromaGeometry: ((ByteArray, Int, Int) -> Pair<Int, Int>?)? = null,
 ) {
     data class Diagnostics(
         val offered: Long,
@@ -35,6 +36,8 @@ internal class MjpegDecodePool(
         val height: Int,
         val timestampNs: Long,
         val yuv: DirectVideoBufferPool.Lease?,
+        val chromaWidth: Int = (width + 1) / 2,
+        val chromaHeight: Int = (height + 1) / 2,
     ) : AutoCloseable {
         override fun close() { yuv?.close() }
     }
@@ -153,9 +156,15 @@ internal class MjpegDecodePool(
                 catch (_: InterruptedException) { break } ?: continue
             val decodeStartNs = System.nanoTime()
             var yuv: DirectVideoBufferPool.Lease? = null
+            var cw = (frame.width + 1) / 2
+            var ch = (frame.height + 1) / 2
             try {
                 if (frame.width in 1..3840 && frame.height in 1..2160) {
-                    val size = frame.width * frame.height + 2 * ((frame.width + 1) / 2) * ((frame.height + 1) / 2)
+                    chromaGeometry?.invoke(frame.bytes, frame.width, frame.height)?.let { (w, h) ->
+                        require(w in 1..frame.width && h in 1..frame.height)
+                        cw = w; ch = h
+                    }
+                    val size = frame.width * frame.height + 2 * cw * ch
                     yuv = buffers.acquire(size)
                     if (yuv != null && !decoder(frame.bytes, frame.format, frame.width, frame.height, yuv.buffer)) {
                         yuv.close()
@@ -173,7 +182,7 @@ internal class MjpegDecodePool(
                     decodeTotalNs += decodeElapsedNs
                     if (yuv == null) decodeFailures++
                     addCompletedLocked(DecodedFrame(
-                        frame.width, frame.height, frame.timestampNs, yuv,
+                        frame.width, frame.height, frame.timestampNs, yuv, cw, ch,
                     ), frame.sequence)
                     monitor.notifyAll()
                 } else yuv?.close()
