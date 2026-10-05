@@ -304,6 +304,7 @@ struct uvc_stream_handle {
   /* Event-thread-only receive diagnostics, cumulative for this stream. */
   uint64_t diagnostic_payloads, diagnostic_bad_headers, diagnostic_error_payloads;
   uint64_t diagnostic_fid_boundaries, diagnostic_size_boundaries, diagnostic_transfer_errors;
+  uint64_t diagnostic_transfer_callbacks;
   int64_t diagnostic_last_log_ns;
   uint64_t diagnostic_missing_eoh, diagnostic_reserved_flags, diagnostic_submit_errors;
   uint64_t diagnostic_empty_transfers, diagnostic_short_transfers, diagnostic_full_transfers;

@@ -162,6 +162,7 @@ public:
         option.option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY;
         if (libusb_init_context(&usb_ctx_, &option, 1) != LIBUSB_SUCCESS)
             throw std::runtime_error("Cannot initialize libusb");
+        libusb_set_option(usb_ctx_, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
         if (!audio_only) {
         video_fd_ = dup(fd);
         if (video_fd_ < 0) throw std::runtime_error("Cannot duplicate USB video descriptor");
@@ -596,6 +597,7 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeListVideoMode
         option.option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY;
         if (libusb_init_context(&usb, &option, 1) != LIBUSB_SUCCESS)
             throw std::runtime_error("Cannot initialize libusb");
+        libusb_set_option(usb, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
         if (uvc_init(&uvc, usb) != UVC_SUCCESS || !uvc)
             throw std::runtime_error("Cannot initialize libuvc");
         if (uvc_wrap(owned_fd, uvc, &camera) != UVC_SUCCESS || !camera)

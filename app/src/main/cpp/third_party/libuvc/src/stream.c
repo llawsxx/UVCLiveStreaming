@@ -1313,6 +1313,18 @@ static void _uvc_log_receive_diagnostics(uvc_stream_handle_t *strmh) {
 void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
   uvc_stream_handle_t *strmh = transfer->user_data;
   int64_t callback_start = _uvc_diagnostic_now();
+  strmh->diagnostic_transfer_callbacks++;
+#ifdef __ANDROID__
+  if (strmh->diagnostic_transfer_callbacks == 1 ||
+      (transfer->status != LIBUSB_TRANSFER_COMPLETED &&
+       transfer->status != LIBUSB_TRANSFER_CANCELLED &&
+       strmh->diagnostic_transfer_errors < 4)) {
+    __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+        "UVC transfer: interface=%u endpoint=0x%02x status=%d actual=%d requested=%d running=%u",
+        strmh->stream_if->bInterfaceNumber, transfer->endpoint, transfer->status,
+        transfer->actual_length, transfer->length, strmh->running);
+  }
+#endif
   /* Restrict gap measurements to an unfinished frame: time between frames
    * can simply be the source cadence. Gaps still include USB/device waits,
    * so a large gap alone must not be described as host queue starvation. */
@@ -1587,9 +1599,43 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh, uvc_stream_handle_t 
   if (ret != UVC_SUCCESS)
     goto fail;
 
+  /* Reinitialize the single Bulk alternate setting on each open, matching
+   * teardown's explicit SET_INTERFACE. Do this before COMMIT, since
+   * SET_INTERFACE may stop the device's current video stream. Isochronous
+   * settings are selected later.
+   */
+  const struct libusb_interface *stream_interface =
+      &devh->info->config->interface[stream_if->bInterfaceNumber];
+  if (stream_interface->num_altsetting == 1) {
+    ret = libusb_set_interface_alt_setting(devh->usb_devh,
+        stream_if->bInterfaceNumber,
+        stream_interface->altsetting[0].bAlternateSetting);
+#ifdef __ANDROID__
+    __android_log_print(ret == UVC_SUCCESS ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+        "UVCLiveStreamingUsb", "UVC bulk prepare: interface=%u alt=%u result=%d",
+        stream_if->bInterfaceNumber,
+        stream_interface->altsetting[0].bAlternateSetting, ret);
+#endif
+    if (ret != UVC_SUCCESS)
+      goto release_fail;
+    /* Clear both the device halt/toggle state and the host controller's
+     * Bulk endpoint state left by cancellation of the previous stream.
+     * Selecting the same alternate setting alone is insufficient on some
+     * SuperSpeed hosts. No transfers are submitted at this point.
+     */
+    ret = libusb_clear_halt(devh->usb_devh, stream_if->bEndpointAddress);
+#ifdef __ANDROID__
+    __android_log_print(ret == UVC_SUCCESS ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+        "UVCLiveStreamingUsb", "UVC bulk clear halt: endpoint=0x%02x result=%d",
+        stream_if->bEndpointAddress, ret);
+#endif
+    if (ret != UVC_SUCCESS)
+      goto release_fail;
+  }
+
   ret = uvc_stream_ctrl(strmh, ctrl);
   if (ret != UVC_SUCCESS)
-    goto fail;
+    goto release_fail;
 
   // Set up the streaming status and data space
   strmh->running = 0;
@@ -1610,6 +1656,8 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh, uvc_stream_handle_t 
   UVC_EXIT(0);
   return UVC_SUCCESS;
 
+release_fail:
+  uvc_release_if(devh, stream_if->bInterfaceNumber);
 fail:
   if(strmh)
     free(strmh);
@@ -2134,7 +2182,18 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
   if (strmh->running)
     uvc_stream_stop(strmh);
 
-  uvc_release_if(strmh->devh, strmh->stream_if->bInterfaceNumber);
+  int release_result = uvc_release_if(strmh->devh, strmh->stream_if->bInterfaceNumber);
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+      "UVC closed: interface=%u callbacks=%llu receivedBytes=%llu frames=%u transferErrors=%llu submitErrors=%llu releaseResult=%d",
+      strmh->stream_if->bInterfaceNumber,
+      (unsigned long long)strmh->diagnostic_transfer_callbacks,
+      (unsigned long long)strmh->received_video_bytes, strmh->seq ? strmh->seq - 1 : 0,
+      (unsigned long long)strmh->diagnostic_transfer_errors,
+      (unsigned long long)strmh->diagnostic_submit_errors, release_result);
+#else
+  (void)release_result;
+#endif
 
   if (strmh->frame.data)
     free(strmh->frame.data);

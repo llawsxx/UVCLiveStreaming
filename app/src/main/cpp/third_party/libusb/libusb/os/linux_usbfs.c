@@ -2663,7 +2663,9 @@ static int handle_bulk_completion(struct usbi_transfer *itransfer,
 	case -EILSEQ:
 	case -ECOMM:
 	case -ENOSR:
-		usbi_dbg(usbi_transfer_ctx(transfer), "low-level bus error %d", urb->status);
+		usbi_warn(usbi_transfer_ctx(transfer),
+			"bulk endpoint=0x%02x bus error status=%d actual=%d requested=%d",
+			transfer->endpoint, urb->status, urb->actual_length, urb->buffer_length);
 		tpriv->reap_action = ERROR;
 		goto cancel_remaining;
 	default:
