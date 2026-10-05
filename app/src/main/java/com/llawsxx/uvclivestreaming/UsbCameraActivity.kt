@@ -859,10 +859,10 @@ private fun UsbCameraScreen() {
                     { it.label }) { yuvMatrix = it }
                 UsbSettingChoice("源范围", UsbSourceRange.entries, sourceRange, !recording && !testCardSelected,
                     { it.label }) { sourceRange = it }
-                UsbSettingChoice("USB 接收队列", listOf(8, 16, 32, 64, 128, 256), bulkTransferCount,
+                UsbSettingChoice("USB 接收队列", listOf(8, 16, 32, 64, 128, 256, 512), bulkTransferCount,
                     !recording && !previewRequested && !testCardSelected,
                     { if (it == 64) "$it 个请求（默认）" else "$it 个请求" }) { bulkTransferCount = it }
-                Text("如有丢帧可增大该值。仅用于 USB Bulk 视频接收；停止采集后可修改，重新预览或录像／推流时生效。",
+                Text("如有丢帧可增大该值；仅用于 USB Bulk 视频接收；停止采集后可修改，重新预览或录像／推流时生效。",
                     style = MaterialTheme.typography.bodySmall)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = includeAudio, onCheckedChange = { includeAudio = it }, enabled = !recording)
@@ -1232,7 +1232,7 @@ private class UsbIdlePreview(
                     handle = NativeUsbCapture.nativeOpen(checkNotNull(connection).fileDescriptor, width, height, fps,
                         videoFormat.nativeValue, audioEnabled && audioInput == UsbAudioInput.USB &&
                             (uacDevice == null || uacDevice.deviceName == device?.deviceName), audioRate, customVideoMode,
-                        uacBitDepth.nativeValue, bulkTransferCount.coerceIn(8, 256))
+                        uacBitDepth.nativeValue, bulkTransferCount.coerceIn(8, 512))
                     check(handle != 0L) { "无法初始化 USB 摄像头" }
                 }
                 if (stopped.get()) return@Thread

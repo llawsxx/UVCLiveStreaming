@@ -95,7 +95,7 @@ int main(void) {
     assert(uvc_stream_set_bulk_transfer_count(NULL, 64) == UVC_ERROR_INVALID_PARAM);
     assert(uvc_stream_set_bulk_transfer_count(&stream, 7) == UVC_ERROR_INVALID_PARAM);
     assert(uvc_stream_set_bulk_transfer_count(&stream, LIBUVC_NUM_TRANSFER_BUFS + 1) == UVC_ERROR_INVALID_PARAM);
-    const int counts[] = {0, 8, 16, 32, 64, 128, 256};
+    const int counts[] = {0, 8, 16, 32, 64, 128, 256, 512};
     for (unsigned i = 0; i < sizeof(counts) / sizeof(counts[0]); ++i) {
         check_queue(counts[i], 0, -1, -1);
         check_queue(counts[i], 1, -1, -1);
@@ -106,6 +106,10 @@ int main(void) {
     check_queue(256, 0, -1, 127);
     check_queue(256, 1, 3, -1);
     check_queue(256, 1, -1, 3);
+    check_queue(512, 0, 0, -1);
+    check_queue(512, 0, 511, -1);
+    check_queue(512, 0, -1, 0);
+    check_queue(512, 0, -1, 511);
     puts("UVC receive queue tests passed (Bulk counts, ISO isolation, failure cleanup)");
     return 0;
 }

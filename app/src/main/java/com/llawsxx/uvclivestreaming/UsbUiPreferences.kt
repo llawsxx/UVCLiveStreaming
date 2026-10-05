@@ -130,7 +130,7 @@ internal object UsbUiPreferences {
             bitrateMode = enumValue(p.getString("bitrateMode", null), VideoBitrateMode.DEFAULT),
             audioRate = p.getInt("audioRate", 0),
             bufferFrames = p.getInt("bufferFrames", 2).coerceIn(1, 30),
-            bulkTransferCount = p.getInt("bulkTransferCount", 64).coerceIn(8, 256),
+            bulkTransferCount = p.getInt("bulkTransferCount", 64).coerceIn(8, 512),
             yuvMatrix = enumValue(p.getString("yuvMatrix", null), UsbYuvMatrix.BT601),
             sourceRange = enumValue(p.getString("sourceRange", null), UsbSourceRange.AUTO),
             encoderColorStandard = enumValue(p.getString("encoderColorStandard", null), VideoColorStandard.DEFAULT),
@@ -202,7 +202,7 @@ internal object UsbUiPreferences {
             .putString("bitrateMode", settings.bitrateMode.name)
             .putInt("audioRate", settings.audioRate)
             .putInt("bufferFrames", settings.bufferFrames.coerceIn(1, 30))
-            .putInt("bulkTransferCount", settings.bulkTransferCount.coerceIn(8, 256))
+            .putInt("bulkTransferCount", settings.bulkTransferCount.coerceIn(8, 512))
             .putString("yuvMatrix", settings.yuvMatrix.name)
             .putString("sourceRange", settings.sourceRange.name)
             .putString("encoderColorStandard", settings.encoderColorStandard.name)

@@ -142,7 +142,7 @@ class UsbRecorderEngine(
                 checkNotNull(usbConnection).fileDescriptor,
                 config.width, config.height, config.fps, config.usbVideoInputFormat.nativeValue,
                 bundledUsbAudio, config.usbAudioSampleRate, config.usbCustomVideoMode, config.usbAudioBitDepth.nativeValue,
-                config.usbBulkTransferCount.coerceIn(8, 256),
+                config.usbBulkTransferCount.coerceIn(8, 512),
             )
             check(nativeHandle != 0L) { "无法初始化 USB 摄像头" }
             val format = NativeUsbCapture.nativeFormat(nativeHandle)

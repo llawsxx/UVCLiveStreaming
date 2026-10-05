@@ -75,21 +75,21 @@ user; no stream was interrupted by ADB.
 
 ## Configurable receive queue
 
-The Device tab now offers `USB 接收队列`: 8, 16, 32, 64 (default), 128 or
-256 requests. Stop capture before changing it; the next preview, recording
+The Device tab now offers `USB 接收队列`: 8, 16, 32, 64 (default), 128,
+256 or 512 requests. Stop capture before changing it; the next preview, recording
 or streaming capture uses the saved setting. Both UI and recording preferences
 persist it. This is the USB request queue, independent of `视频缓存` (complete
 frames awaiting processing); ISO video still uses eight requests and UAC is
 unaffected.
 
-For this device's 15360-byte requests, 64/128/256 correspond to
-960 KiB / 1.875 MiB / 3.75 MiB, approximately 3.95/7.90/15.80 ms of raw
+For this device's 15360-byte requests, 64/128/256/512 correspond to
+960 KiB / 1.875 MiB / 3.75 MiB / 7.5 MiB, approximately 3.95/7.90/15.80/31.60 ms of raw
 1080p60 image traffic. Larger queues tolerate longer host processing pauses,
 but do not increase bus bandwidth or guarantee a constant source frame rate.
 Actual request size remains device-negotiated; no frame batching delay is
 introduced by changing the request count.
 
-The compiled slot limit is 256; actual allocation/submission uses the selected
+The compiled slot limit is 512; actual allocation/submission uses the selected
 count. A failed allocation, callback thread creation, or submission fails start
 and cleans up, rather than silently running with fewer requests. Cancelled
 requests clear both transfer and buffer pointers.
@@ -100,5 +100,12 @@ start/stop code. On the Xiaomi, it passed every selectable count and the
 out-of-range/live changes, and checked resource cleanup on first/mid-queue
 allocation and submission failures. The existing MJPEG/raw payload regression
 suite also passed with the 256-slot structure. These standalone tests do not
-claim the physical device; 128/256 performance still requires a user capture
-test with the new APK.
+claim the physical device. In a subsequent physical-device test, the user
+reported YUYV 1080p60 no longer dropped frames at 256, while 128 remained
+insufficient. The 512 option extends the maximum receive budget; its real-device
+performance has not yet been verified.
+
+After increasing the compiled limit to 512, both native suites passed again
+on the Xiaomi in independent processes. Queue tests additionally exercised
+512-request start/stop and first/last-request allocation/submission failures;
+ISO remained at eight requests. The ARM64 debug APK build passed.
