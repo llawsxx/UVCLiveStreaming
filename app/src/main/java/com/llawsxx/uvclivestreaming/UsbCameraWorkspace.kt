@@ -33,6 +33,8 @@ internal fun UsbCameraWorkspace(
     includeAudio: Boolean,
     fullscreen: Boolean,
     onExitFullscreen: () -> Unit,
+    lowFrameRatePreview: Boolean,
+    onLowFrameRatePreviewChange: (Boolean) -> Unit,
     preview: @Composable (Modifier, () -> Unit) -> Unit,
     fullscreenControls: @Composable () -> Unit,
     audioMeter: @Composable () -> Unit,
@@ -41,7 +43,7 @@ internal fun UsbCameraWorkspace(
 ) {
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var selectedTab by rememberSaveable { mutableStateOf(UsbSettingsTab.DEVICE) }
-    var showFullscreenControls by remember { mutableStateOf(false) }
+    var showPreviewControls by remember { mutableStateOf(false) }
     val scrollStates = UsbSettingsTab.entries.map { rememberScrollState() }
     Layout(
         modifier = if (fullscreen) Modifier.fillMaxSize() else
@@ -54,16 +56,27 @@ internal fun UsbCameraWorkspace(
                 ) {
                     val width = minOf(maxWidth, maxHeight * aspectRatio)
                     Box(Modifier.width(width).height(width / aspectRatio)) {
-                        preview(Modifier.fillMaxSize()) { showFullscreenControls = !showFullscreenControls }
-                        if (showFullscreenControls) {
-                            Row(Modifier.align(Alignment.TopEnd).padding(4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                fullscreenControls()
-                                if (fullscreen) Button(onClick = onExitFullscreen,
-                                    contentPadding = PaddingValues(horizontal = 10.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color.Black.copy(alpha = .65f), contentColor = Color.White)) {
-                                    Text("退出全屏", style = MaterialTheme.typography.labelMedium)
+                        preview(Modifier.fillMaxSize()) { showPreviewControls = !showPreviewControls }
+                        if (showPreviewControls) {
+                            Column(Modifier.align(Alignment.TopEnd).padding(4.dp),
+                                horizontalAlignment = Alignment.End,
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Button(onClick = { onLowFrameRatePreviewChange(!lowFrameRatePreview) },
+                                        contentPadding = PaddingValues(horizontal = 10.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color.Black.copy(alpha = .65f), contentColor = Color.White)) {
+                                        Text(if (lowFrameRatePreview) "关闭低帧率预览" else "开启低帧率预览",
+                                            style = MaterialTheme.typography.labelMedium)
+                                    }
+                                    fullscreenControls()
+                                    if (fullscreen) Button(onClick = onExitFullscreen,
+                                        contentPadding = PaddingValues(horizontal = 10.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color.Black.copy(alpha = .65f), contentColor = Color.White)) {
+                                        Text("退出全屏", style = MaterialTheme.typography.labelMedium)
+                                    }
                                 }
                             }
                         }

@@ -590,6 +590,8 @@ private fun UsbCameraScreen() {
         includeAudio = includeAudio,
         fullscreen = fullscreen,
         onExitFullscreen = { fullscreen = false; activity?.exitUsbFullscreen() },
+        lowFrameRatePreview = lowFrameRatePreview,
+        onLowFrameRatePreviewChange = { lowFrameRatePreview = it },
         preview = { modifier, onTap ->
             AndroidView(
                 factory = { viewContext -> SurfaceView(viewContext).apply {
@@ -893,18 +895,14 @@ private fun UsbCameraScreen() {
                 )
             }
             UsbSettingsTab.DISPLAY -> {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Checkbox(checked = previewEnabled, onCheckedChange = { previewEnabled = it })
-                    Text("录制时预览")
+                    Text("录制时预览", modifier = Modifier.padding(top = 12.dp))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Checkbox(checked = audioPreviewEnabled, onCheckedChange = { audioPreviewEnabled = it },
                         enabled = includeAudio)
                     Text("音频预览（监听）", modifier = Modifier.padding(top = 12.dp))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Checkbox(checked = lowFrameRatePreview, onCheckedChange = { lowFrameRatePreview = it })
-                    Text("低帧率预览（5 fps）", modifier = Modifier.padding(top = 12.dp))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Checkbox(checked = keepScreenOn, onCheckedChange = { keepScreenOn = it })
