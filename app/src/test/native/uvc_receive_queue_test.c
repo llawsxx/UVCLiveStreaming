@@ -70,8 +70,8 @@ static void check_queue(int count, int iso, int allocation_failure, int submit_f
     allocated = submitted = freed = cancel_count = 0;
     fail_alloc_at = allocation_failure;
     fail_submit_at = submit_failure;
-    if (count) assert(uvc_stream_set_bulk_transfer_count(&stream, count) == UVC_SUCCESS);
-    const int expected = iso ? 8 : count ? count : 64;
+    if (count) assert(uvc_stream_set_receive_transfer_count(&stream, count) == UVC_SUCCESS);
+    const int expected = count ? count : 64;
     uvc_error_t result = uvc_stream_start(&stream, NULL, NULL, 0);
     if (allocation_failure >= 0 || submit_failure >= 0) {
         assert(result == UVC_ERROR_NO_MEM);
@@ -79,7 +79,15 @@ static void check_queue(int count, int iso, int allocation_failure, int submit_f
     } else {
         assert(result == UVC_SUCCESS);
         assert(allocated == expected && submitted == expected);
-        assert(uvc_stream_set_bulk_transfer_count(&stream, 64) == UVC_ERROR_BUSY);
+        for (int i = 0; i < expected; ++i) {
+            assert(stream.transfers[i]->type ==
+                (iso ? LIBUSB_TRANSFER_TYPE_ISOCHRONOUS : LIBUSB_TRANSFER_TYPE_BULK));
+            if (iso) {
+                assert(stream.transfers[i]->num_iso_packets == 4);
+                assert(stream.transfers[i]->length == 4096);
+            }
+        }
+        assert(uvc_stream_set_receive_transfer_count(&stream, 64) == UVC_ERROR_BUSY);
         assert(uvc_stream_stop(&stream) == UVC_SUCCESS);
     }
     for (int i = 0; i < cancel_count; ++i) pthread_join(cancel_threads[i], NULL);
@@ -92,9 +100,9 @@ static void check_queue(int count, int iso, int allocation_failure, int submit_f
 
 int main(void) {
     struct uvc_stream_handle stream = {0};
-    assert(uvc_stream_set_bulk_transfer_count(NULL, 64) == UVC_ERROR_INVALID_PARAM);
-    assert(uvc_stream_set_bulk_transfer_count(&stream, 7) == UVC_ERROR_INVALID_PARAM);
-    assert(uvc_stream_set_bulk_transfer_count(&stream, LIBUVC_NUM_TRANSFER_BUFS + 1) == UVC_ERROR_INVALID_PARAM);
+    assert(uvc_stream_set_receive_transfer_count(NULL, 64) == UVC_ERROR_INVALID_PARAM);
+    assert(uvc_stream_set_receive_transfer_count(&stream, 7) == UVC_ERROR_INVALID_PARAM);
+    assert(uvc_stream_set_receive_transfer_count(&stream, LIBUVC_NUM_TRANSFER_BUFS + 1) == UVC_ERROR_INVALID_PARAM);
     const int counts[] = {0, 8, 16, 32, 64, 128, 256, 512};
     for (unsigned i = 0; i < sizeof(counts) / sizeof(counts[0]); ++i) {
         check_queue(counts[i], 0, -1, -1);
@@ -110,6 +118,10 @@ int main(void) {
     check_queue(512, 0, 511, -1);
     check_queue(512, 0, -1, 0);
     check_queue(512, 0, -1, 511);
-    puts("UVC receive queue tests passed (Bulk counts, ISO isolation, failure cleanup)");
+    check_queue(512, 1, 0, -1);
+    check_queue(512, 1, 511, -1);
+    check_queue(512, 1, -1, 0);
+    check_queue(512, 1, -1, 511);
+    puts("UVC receive queue tests passed (shared Bulk/ISO counts, failure cleanup)");
     return 0;
 }

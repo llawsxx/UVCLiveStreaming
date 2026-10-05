@@ -275,8 +275,8 @@ struct uvc_stream_handle {
 
   /** if true, stream is running (streaming video to host) */
   uint8_t running;
-  /** Bulk requests selected before start; zero uses the 64-request default. */
-  int bulk_transfer_count;
+  /** Bulk/ISO receive requests selected before start; zero defaults to 64. */
+  int receive_transfer_count;
   /** Current control block */
   struct uvc_stream_ctrl cur_ctrl;
 

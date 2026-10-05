@@ -79,8 +79,8 @@ The Device tab now offers `USB 接收队列`: 8, 16, 32, 64 (default), 128,
 256 or 512 requests. Stop capture before changing it; the next preview, recording
 or streaming capture uses the saved setting. Both UI and recording preferences
 persist it. This is the USB request queue, independent of `视频缓存` (complete
-frames awaiting processing); ISO video still uses eight requests and UAC is
-unaffected.
+frames awaiting processing). The selected count now applies to both Bulk and
+ISO video. UAC audio continues to use its independent queue.
 
 For this device's 15360-byte requests, 64/128/256/512 correspond to
 960 KiB / 1.875 MiB / 3.75 MiB / 7.5 MiB, approximately 3.95/7.90/15.80/31.60 ms of raw
@@ -109,3 +109,22 @@ After increasing the compiled limit to 512, both native suites passed again
 on the Xiaomi in independent processes. Queue tests additionally exercised
 512-request start/stop and first/last-request allocation/submission failures;
 ISO remained at eight requests. The ARM64 debug APK build passed.
+
+## Shared Bulk/ISO setting
+
+The separate `LIBUVC_NUM_ISO_TRANSFER_BUFS` override has been removed. Both
+video transfer types allocate and submit the selected 8–512 request count,
+defaulting to 64. ISO still uses at most 16 packets per request; that packet
+limit is independent of the request count. The receive-count API and config
+fields now use transport-neutral names. Old saved Bulk settings migrate to
+the shared setting, preserving the user's choice across an upgrade.
+
+The queue test now expects the selected count for both transfer types and
+checks that ISO requests retain their packet geometry. It also exercises
+first/last-request allocation and submission failures at 512 for both modes.
+Physical ISO capture behavior requires an ISO video device; the MS2130 video
+endpoint used for the frame-rate investigation is Bulk.
+
+Validation: ARM64 debug APK build and `git diff --check` passed. Both the
+shared receive queue suite and the MJPEG/raw payload assembly suite passed on
+the Xiaomi in independent native processes, without claiming the capture card.

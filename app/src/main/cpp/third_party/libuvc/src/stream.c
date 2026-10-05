@@ -1694,7 +1694,7 @@ uvc_error_t uvc_stream_start(
   size_t total_transfer_size = 0;
   struct libusb_transfer *transfer;
   int transfer_id;
-  int num_transfers = strmh->bulk_transfer_count ? strmh->bulk_transfer_count :
+  int num_transfers = strmh->receive_transfer_count ? strmh->receive_transfer_count :
       (LIBUVC_NUM_TRANSFER_BUFS < 64 ? LIBUVC_NUM_TRANSFER_BUFS : 64);
 
   ctrl = &strmh->cur_ctrl;
@@ -1739,10 +1739,6 @@ uvc_error_t uvc_stream_start(
   /* A VS interface uses isochronous transfers iff it has multiple altsettings.
    * (UVC 1.5: 2.4.3. VideoStreaming Interface) */
   isochronous = interface->num_altsetting > 1;
-#ifdef LIBUVC_NUM_ISO_TRANSFER_BUFS
-  if (isochronous)
-    num_transfers = LIBUVC_NUM_ISO_TRANSFER_BUFS;
-#endif
 
   if (isochronous) {
     UVC_DEBUG("isochronous transfer mode:  num_altsetting=%d", interface->num_altsetting);
@@ -1840,6 +1836,12 @@ uvc_error_t uvc_stream_start(
 
       libusb_set_iso_packet_lengths(transfer, endpoint_bytes_per_packet);
     }
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
+        "UVC iso receive setup: requests=%d packetsPerRequest=%zu packetBytes=%zu requestBytes=%zu queuedBytes=%llu",
+        num_transfers, packets_per_transfer, endpoint_bytes_per_packet, total_transfer_size,
+        (unsigned long long)num_transfers * total_transfer_size);
+#endif
   } else {
     const struct libusb_interface_descriptor *altsetting = interface->altsetting;
     for (int ep_idx = 0; ep_idx < altsetting->bNumEndpoints; ++ep_idx) {
@@ -1936,12 +1938,12 @@ fail:
   return ret;
 }
 
-uvc_error_t uvc_stream_set_bulk_transfer_count(uvc_stream_handle_t *strmh, int count) {
+uvc_error_t uvc_stream_set_receive_transfer_count(uvc_stream_handle_t *strmh, int count) {
   if (!strmh || count < 8 || count > LIBUVC_NUM_TRANSFER_BUFS)
     return UVC_ERROR_INVALID_PARAM;
   if (strmh->running)
     return UVC_ERROR_BUSY;
-  strmh->bulk_transfer_count = count;
+  strmh->receive_transfer_count = count;
   return UVC_SUCCESS;
 }
 

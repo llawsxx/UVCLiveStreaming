@@ -650,9 +650,9 @@ void uvc_stop_streaming(uvc_device_handle_t *devh);
 uint64_t uvc_get_received_video_bytes(uvc_device_handle_t *devh);
 
 uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh, uvc_stream_handle_t **strmh, uvc_stream_ctrl_t *ctrl);
-/** Select pending Bulk receive requests before start. ISO is unaffected.
+/** Select pending video receive requests before start, for both Bulk and ISO.
  * Valid range: 8 through the compiled slot limit (512 in this app). */
-uvc_error_t uvc_stream_set_bulk_transfer_count(uvc_stream_handle_t *strmh, int count);
+uvc_error_t uvc_stream_set_receive_transfer_count(uvc_stream_handle_t *strmh, int count);
 uvc_error_t uvc_stream_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_get_current_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_start(uvc_stream_handle_t *strmh,

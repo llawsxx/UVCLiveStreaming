@@ -257,7 +257,7 @@ private fun UsbCameraScreen() {
         testCardSettings.fps, UsbVideoInputFormat.RGB, "测试卡") else selectedMode
     var audioRate by rememberSaveable { mutableStateOf(uiSettings.audioRate) }
     var bufferFrames by rememberSaveable { mutableStateOf(uiSettings.bufferFrames) }
-    var bulkTransferCount by rememberSaveable { mutableStateOf(uiSettings.bulkTransferCount) }
+    var receiveTransferCount by rememberSaveable { mutableStateOf(uiSettings.receiveTransferCount) }
     var previewRequestRevision by remember { mutableStateOf(0L) }
     var timestampSmoothingEnabled by rememberSaveable { mutableStateOf(uiSettings.timestampSmoothingEnabled) }
     var timestampSmoothingNtscEnabled by rememberSaveable { mutableStateOf(uiSettings.timestampSmoothingNtscEnabled) }
@@ -302,7 +302,7 @@ private fun UsbCameraScreen() {
     LaunchedEffect(
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
-        bufferFrames, bulkTransferCount, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
+        bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
         forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
@@ -333,7 +333,7 @@ private fun UsbCameraScreen() {
             bitrateMode = bitrateMode,
             audioRate = audioRate,
             bufferFrames = bufferFrames,
-            bulkTransferCount = bulkTransferCount,
+            receiveTransferCount = receiveTransferCount,
             yuvMatrix = yuvMatrix,
             sourceRange = sourceRange,
             encoderColorStandard = encoderColorStandard,
@@ -626,7 +626,7 @@ private fun UsbCameraScreen() {
                                 fps = videoSmoothingFrameRate(fps, timestampSmoothingNtscEnabled)),
                             audioInput = audioInput, systemAudioInput = systemAudioInput,
                             uacDevice = captureUacDevice, uacBitDepth = uacBitDepth,
-                            bulkTransferCount = bulkTransferCount,
+                            receiveTransferCount = receiveTransferCount,
                             initialAudioDsp = audioDsp,
                             initialColorGrade = videoColorGrade,
                             customVideoMode = selectedMode?.custom == true,
@@ -656,7 +656,7 @@ private fun UsbCameraScreen() {
             val previous = idlePreview
             idlePreview = null
             val config = usbRecordingConfig(
-                context, device, effectiveMode, testCardSettings, captureAudioEnabled, audioInput, systemAudioInput, captureUacDevice, uacBitDepth, audioRate, bufferFrames, bulkTransferCount, container,
+                context, device, effectiveMode, testCardSettings, captureAudioEnabled, audioInput, systemAudioInput, captureUacDevice, uacBitDepth, audioRate, bufferFrames, receiveTransferCount, container,
                 requested == UsbAction.STREAM, requested == UsbAction.RTMP, rtmpUrl,
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
@@ -859,10 +859,10 @@ private fun UsbCameraScreen() {
                     { it.label }) { yuvMatrix = it }
                 UsbSettingChoice("源范围", UsbSourceRange.entries, sourceRange, !recording && !testCardSelected,
                     { it.label }) { sourceRange = it }
-                UsbSettingChoice("USB 接收队列", listOf(8, 16, 32, 64, 128, 256, 512), bulkTransferCount,
+                UsbSettingChoice("USB 接收队列", listOf(8, 16, 32, 64, 128, 256, 512), receiveTransferCount,
                     !recording && !previewRequested && !testCardSelected,
-                    { if (it == 64) "$it 个请求（默认）" else "$it 个请求" }) { bulkTransferCount = it }
-                Text("如有丢帧可增大该值；仅用于 USB Bulk 视频接收；停止采集后可修改，重新预览或录像／推流时生效。",
+                    { if (it == 64) "$it 个请求（默认）" else "$it 个请求" }) { receiveTransferCount = it }
+                Text("如有丢帧可增大该值；用于 USB 视频接收（Bulk／ISO 共用）；停止采集后可修改，重新预览或录像／推流时生效。",
                     style = MaterialTheme.typography.bodySmall)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = includeAudio, onCheckedChange = { includeAudio = it }, enabled = !recording)
@@ -1091,7 +1091,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                testCard: TestCardSettings, audio: Boolean,
                                audioInput: UsbAudioInput, systemAudioInput: SystemAudioInputSettings,
                                uacDevice: UsbAudioDevice?, uacBitDepth: UsbAudioBitDepth,
-                               audioRate: Int, bufferFrames: Int, bulkTransferCount: Int, container: ContainerFormat,
+                               audioRate: Int, bufferFrames: Int, receiveTransferCount: Int, container: ContainerFormat,
                                httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, videoCodec: VideoCodec,
                                bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
                                gopSeconds: Float, bFrames: Int,
@@ -1119,7 +1119,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         usbAudioBitDepth = uacBitDepth,
         systemAudioInput = systemAudioInput,
         usbVideoBufferFrames = bufferFrames,
-        usbBulkTransferCount = bulkTransferCount,
+        usbReceiveTransferCount = receiveTransferCount,
         usbYuvMatrix = yuvMatrix,
         usbSourceRange = sourceRange,
         colorStandard = encoderColorStandard,
@@ -1173,7 +1173,7 @@ private class UsbIdlePreview(
     private val audioInput: UsbAudioInput,
     private val uacDevice: UsbAudioDevice?,
     private val uacBitDepth: UsbAudioBitDepth,
-    private val bulkTransferCount: Int,
+    private val receiveTransferCount: Int,
     private val systemAudioInput: SystemAudioInputSettings,
     private val onMessage: (String) -> Unit,
     private val onAudioLevel: (Float) -> Unit,
@@ -1232,7 +1232,7 @@ private class UsbIdlePreview(
                     handle = NativeUsbCapture.nativeOpen(checkNotNull(connection).fileDescriptor, width, height, fps,
                         videoFormat.nativeValue, audioEnabled && audioInput == UsbAudioInput.USB &&
                             (uacDevice == null || uacDevice.deviceName == device?.deviceName), audioRate, customVideoMode,
-                        uacBitDepth.nativeValue, bulkTransferCount.coerceIn(8, 512))
+                        uacBitDepth.nativeValue, receiveTransferCount.coerceIn(8, 512))
                     check(handle != 0L) { "无法初始化 USB 摄像头" }
                 }
                 if (stopped.get()) return@Thread
