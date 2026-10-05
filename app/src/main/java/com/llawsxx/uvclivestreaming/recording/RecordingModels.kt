@@ -47,7 +47,10 @@ enum class AudioInputSource(val label: String, val mediaRecorderValue: Int) : Se
     DEFAULT("DEFAULT（系统默认）", MediaRecorder.AudioSource.DEFAULT),
     MIC("MIC（标准麦克风）", MediaRecorder.AudioSource.MIC),
     CAMCORDER("CAMCORDER（摄像机调优）", MediaRecorder.AudioSource.CAMCORDER),
+    VOICE_RECOGNITION("VOICE_RECOGNITION（语音识别）", MediaRecorder.AudioSource.VOICE_RECOGNITION),
+    VOICE_COMMUNICATION("VOICE_COMMUNICATION（语音通信）", MediaRecorder.AudioSource.VOICE_COMMUNICATION),
     UNPROCESSED("UNPROCESSED（未经处理）", MediaRecorder.AudioSource.UNPROCESSED),
+    VOICE_PERFORMANCE("VOICE_PERFORMANCE（实时演唱）", MediaRecorder.AudioSource.VOICE_PERFORMANCE),
 }
 
 enum class VideoDynamicRange(
@@ -214,6 +217,8 @@ data class RecordingConfig(
     val usbCustomVideoMode: Boolean = false,
     /** Zero selects a supported USB microphone rate automatically. */
     val usbAudioSampleRate: Int = 0,
+    val usbAudioInput: UsbAudioInput = UsbAudioInput.USB,
+    val systemAudioInput: SystemAudioInputSettings = SystemAudioInputSettings(),
     /** Bounded queue of pending USB video frames, including MJPEG decode input. */
     val usbVideoBufferFrames: Int = 2,
     val usbYuvMatrix: UsbYuvMatrix = UsbYuvMatrix.BT601,

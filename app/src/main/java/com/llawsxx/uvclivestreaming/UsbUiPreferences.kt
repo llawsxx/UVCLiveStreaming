@@ -15,6 +15,9 @@ import com.llawsxx.uvclivestreaming.recording.VideoColorRange
 import com.llawsxx.uvclivestreaming.recording.VideoColorStandard
 import com.llawsxx.uvclivestreaming.recording.VideoColorMatrix
 import com.llawsxx.uvclivestreaming.recording.VideoColorTransfer
+import com.llawsxx.uvclivestreaming.recording.UsbAudioInput
+import com.llawsxx.uvclivestreaming.recording.SystemAudioInputSettings
+import com.llawsxx.uvclivestreaming.recording.SystemAudioInputPreferences
 
 internal data class UsbUiSettings(
     val selectedDeviceName: String? = null,
@@ -22,6 +25,8 @@ internal data class UsbUiSettings(
     val customVideoMode: UsbCustomVideoMode = UsbCustomVideoMode(),
     val customVideoModeSelected: Boolean = false,
     val includeAudio: Boolean = true,
+    val audioInput: UsbAudioInput = UsbAudioInput.USB,
+    val systemAudioInput: SystemAudioInputSettings = SystemAudioInputSettings(),
     val audioPreviewEnabled: Boolean = false,
     val audioDsp: AudioDspSettings = AudioDspSettings(),
     val videoColorGrade: VideoColorGradeSettings = VideoColorGradeSettings(),
@@ -68,6 +73,8 @@ internal object UsbUiPreferences {
             ).takeIf { it.valid } ?: UsbCustomVideoMode(),
             customVideoModeSelected = p.getBoolean("customVideoModeSelected", false),
             includeAudio = p.getBoolean("includeAudio", true),
+            audioInput = enumValue(p.getString("audioInput", null), UsbAudioInput.USB),
+            systemAudioInput = SystemAudioInputPreferences.load(p),
             audioPreviewEnabled = p.getBoolean("audioPreviewEnabled", false),
             videoColorGrade = VideoColorGradeSettings(
                 enabled = p.getBoolean("videoColorGradeEnabled", false),
@@ -138,6 +145,8 @@ internal object UsbUiPreferences {
             .putString("customVideoFormat", settings.customVideoMode.format.name)
             .putBoolean("customVideoModeSelected", settings.customVideoModeSelected)
             .putBoolean("includeAudio", settings.includeAudio)
+            .putString("audioInput", settings.audioInput.name)
+            .also { SystemAudioInputPreferences.save(it, settings.systemAudioInput) }
             .putBoolean("audioPreviewEnabled", settings.audioPreviewEnabled)
             .putBoolean("videoColorGradeEnabled", settings.videoColorGrade.enabled)
             .remove("videoGradeBrightness")

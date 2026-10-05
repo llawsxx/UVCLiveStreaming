@@ -19,6 +19,8 @@ object ConfigPreferences {
             usbVideoInputFormat = enumValue(p.getString("usbVideoInputFormat", null), UsbVideoInputFormat.AUTO),
             usbCustomVideoMode = p.getBoolean("usbCustomVideoMode", false),
             usbAudioSampleRate = p.getInt("usbAudioSampleRate", 0).coerceAtLeast(0),
+            usbAudioInput = enumValue(p.getString("usbAudioInput", null), UsbAudioInput.USB),
+            systemAudioInput = SystemAudioInputPreferences.load(p),
             usbVideoBufferFrames = p.getInt("usbVideoBufferFrames", 2).coerceIn(1, 30),
             usbYuvMatrix = enumValue(p.getString("usbYuvMatrix", null), UsbYuvMatrix.BT601),
             usbSourceRange = enumValue(p.getString("usbSourceRange", null), UsbSourceRange.AUTO),
@@ -243,6 +245,8 @@ object ConfigPreferences {
             .putString("usbVideoInputFormat", c.usbVideoInputFormat.name)
             .putBoolean("usbCustomVideoMode", c.usbCustomVideoMode)
             .putInt("usbAudioSampleRate", c.usbAudioSampleRate.coerceAtLeast(0))
+            .putString("usbAudioInput", c.usbAudioInput.name)
+            .also { SystemAudioInputPreferences.save(it, c.systemAudioInput) }
             .putInt("usbVideoBufferFrames", c.usbVideoBufferFrames.coerceIn(1, 30))
             .putString("usbYuvMatrix", c.usbYuvMatrix.name)
             .putString("usbSourceRange", c.usbSourceRange.name)

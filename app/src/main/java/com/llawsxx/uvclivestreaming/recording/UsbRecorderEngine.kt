@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
 
-/** Captures video and PCM directly from the USB Host fd, without Camera2 or AudioRecord. */
+/** USB video with either UAC PCM or an independently captured system audio input. */
 @RequiresApi(Build.VERSION_CODES.O)
 class UsbRecorderEngine(
     private val context: Context,
@@ -89,6 +89,7 @@ class UsbRecorderEngine(
     private var videoWidth = 0
     private var videoHeight = 0
     private var audioCaptureEnabled = false
+    private var systemAudioCapture: SystemAudioCapture? = null
     @Volatile private var audioMonitor: UsbAudioMonitor? = null
     @Volatile private var audioPipeline: UsbAudioPipeline? = null
     private val audioPipelineDone = AtomicBoolean(true)
@@ -129,7 +130,7 @@ class UsbRecorderEngine(
         nativeHandle = NativeUsbCapture.nativeOpen(
             checkNotNull(usbConnection).fileDescriptor,
             config.width, config.height, config.fps, config.usbVideoInputFormat.nativeValue,
-            config.hasAudio, config.usbAudioSampleRate, config.usbCustomVideoMode,
+            config.hasAudio && config.usbAudioInput == UsbAudioInput.USB, config.usbAudioSampleRate, config.usbCustomVideoMode,
         )
         check(nativeHandle != 0L) { "无法初始化 USB 摄像头" }
         val format = NativeUsbCapture.nativeFormat(nativeHandle)
@@ -137,6 +138,12 @@ class UsbRecorderEngine(
         videoHeight = format[1]
         audioRate = format[2]
         audioChannels = format[3]
+        if (config.hasAudio && config.usbAudioInput == UsbAudioInput.SYSTEM) {
+            val capture = SystemAudioCapture.open(context, config.systemAudioInput, config.usbAudioSampleRate)
+            systemAudioCapture = capture
+            audioRate = capture.sampleRate
+            audioChannels = capture.channels
+        }
         audioCaptureEnabled = config.hasAudio && audioRate > 0 && audioChannels in 1..2
         if (audioCaptureEnabled && config.usbTimestampSmoothingEnabled) {
             audioTimestampSmoother = TimestampSmoother(audioRate.toDouble(), config.usbTimestampSmoothingMaxDeltaSeconds)
@@ -155,7 +162,7 @@ class UsbRecorderEngine(
                 audioPipelineDone.set(false)
                 audioPipeline = UsbAudioPipeline(audioRate, audioChannels, audioDspSettings,
                     onPcm = ::onProcessedAudioPcm,
-                    onError = { onError("USB 音频 DSP 失败：$it") },
+                    onError = { onError("音频 DSP 失败：$it") },
                     onStopped = { audioPipelineDone.set(true) })
             }
         }
@@ -206,6 +213,8 @@ class UsbRecorderEngine(
         mjpegDecodePool.start()
         startVideoRender()
         NativeUsbCapture.nativeStart(nativeHandle, this)
+        systemAudioCapture?.start(onPcm = ::onUsbAudioPcm,
+            onError = { onError("系统音频采集失败：$it") }, onNotice = onNotice)
         Thread({
             try { Thread.sleep(5_000) } catch (_: InterruptedException) { return@Thread }
             if (running.get() && frameCount.get() == 0L) {
@@ -572,6 +581,8 @@ class UsbRecorderEngine(
         }
         try {
         mjpegDecodePool.close()
+        systemAudioCapture?.close()
+        systemAudioCapture = null
         synchronized(nativeMetricsLock) {
             val handle = nativeHandle
             nativeHandle = 0L

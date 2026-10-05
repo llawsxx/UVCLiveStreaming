@@ -44,4 +44,23 @@ class VideoGopPreferencesTest {
             assertEquals(interval, ConfigPreferences.load(prefs).videoKeyFrameIntervalSeconds, 0f)
         }
     }
+
+    @Test fun audioInputAndDeviceIdentitySurviveSavingAndReloading() {
+        val prefs = preferences(mutableMapOf())
+        val input = SystemAudioInputSettings(AudioInputSource.VOICE_RECOGNITION,
+            SystemAudioDevice(37, 15, "bottom", "Phone"))
+        ConfigPreferences.save(prefs, RecordingConfig(usbAudioInput = UsbAudioInput.SYSTEM, systemAudioInput = input))
+        val loaded = ConfigPreferences.load(prefs)
+        assertEquals(UsbAudioInput.SYSTEM, loaded.usbAudioInput)
+        assertEquals(input, loaded.systemAudioInput)
+        ConfigPreferences.save(prefs, loaded.copy(usbAudioInput = UsbAudioInput.USB,
+            systemAudioInput = input.copy(device = null)))
+        assertEquals(null, ConfigPreferences.load(prefs).systemAudioInput.device)
+    }
+
+    @Test fun oldPreferencesContinueUsingUsbAudioAndDefaultSystemMicrophone() {
+        val loaded = ConfigPreferences.load(preferences(mutableMapOf()))
+        assertEquals(UsbAudioInput.USB, loaded.usbAudioInput)
+        assertEquals(SystemAudioInputSettings(), loaded.systemAudioInput)
+    }
 }

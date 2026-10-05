@@ -81,6 +81,12 @@ import com.llawsxx.uvclivestreaming.recording.UsbRecorderEngine
 import com.llawsxx.uvclivestreaming.recording.UsbReceiveRate
 import com.llawsxx.uvclivestreaming.recording.UsbAudioMonitor
 import com.llawsxx.uvclivestreaming.recording.UsbVideoInputFormat
+import com.llawsxx.uvclivestreaming.recording.UsbAudioInput
+import com.llawsxx.uvclivestreaming.recording.AudioInputSource
+import com.llawsxx.uvclivestreaming.recording.SystemAudioInputSettings
+import com.llawsxx.uvclivestreaming.recording.SystemAudioDevice
+import com.llawsxx.uvclivestreaming.recording.SystemAudioCapture
+import com.llawsxx.uvclivestreaming.recording.resolveSystemAudioDevice
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
 import com.llawsxx.uvclivestreaming.recording.VideoCodec
 import com.llawsxx.uvclivestreaming.recording.VideoColorRange
@@ -187,6 +193,9 @@ private fun UsbCameraScreen() {
     var usbPermissionEpoch by remember { mutableStateOf(0) }
     var runtimePermissionEpoch by remember { mutableStateOf(0) }
     var includeAudio by rememberSaveable { mutableStateOf(uiSettings.includeAudio) }
+    var audioInput by rememberSaveable { mutableStateOf(uiSettings.audioInput) }
+    var systemAudioInput by rememberSaveable { mutableStateOf(uiSettings.systemAudioInput) }
+    val systemAudioDevices = rememberSystemAudioInputDevices()
     var audioPreviewEnabled by rememberSaveable { mutableStateOf(uiSettings.audioPreviewEnabled) }
     var audioDsp by remember { mutableStateOf(uiSettings.audioDsp) }
     var videoColorGrade by remember { mutableStateOf(uiSettings.videoColorGrade) }
@@ -264,7 +273,7 @@ private fun UsbCameraScreen() {
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(
-        selectedName, selectedMode?.display, customVideoMode, includeAudio, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
+        selectedName, selectedMode?.display, customVideoMode, includeAudio, audioInput, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -277,6 +286,8 @@ private fun UsbCameraScreen() {
             customVideoMode = customVideoMode,
             customVideoModeSelected = selectedMode?.custom == true,
             includeAudio = includeAudio,
+            audioInput = audioInput,
+            systemAudioInput = systemAudioInput,
             audioPreviewEnabled = audioPreviewEnabled,
             audioDsp = audioDsp,
             videoColorGrade = videoColorGrade,
@@ -320,7 +331,7 @@ private fun UsbCameraScreen() {
         } else if (includeAudio && it.containsKey(Manifest.permission.RECORD_AUDIO) &&
             it[Manifest.permission.RECORD_AUDIO] != true
         ) {
-            // USB 音频是可选通道：拒绝麦克风权限时仍允许视频继续，
+            // 音频是可选通道：拒绝麦克风权限时仍允许视频继续，
             // 同时关闭音频，避免录像/串流整个流程被中止。
             includeAudio = false
             message = "未获得麦克风权限，已关闭音频，继续视频"
@@ -429,6 +440,19 @@ private fun UsbCameraScreen() {
         idlePreview?.updateAudioPreview(enabled)
     }
 
+    LaunchedEffect(includeAudio, audioInput, systemAudioInput, audioRate) {
+        if (previewRequested && !recording && idlePreview != null && pendingAction == UsbAction.NONE)
+            pendingAction = UsbAction.PREVIEW
+    }
+
+    LaunchedEffect(systemAudioDevices) {
+        if (!recording) systemAudioInput.device?.let { selectedDevice ->
+            resolveSystemAudioDevice(selectedDevice, systemAudioDevices)?.takeIf { it != selectedDevice }?.let {
+                systemAudioInput = systemAudioInput.copy(device = it)
+            }
+        }
+    }
+
     LaunchedEffect(audioDsp, idlePreview) {
         RecorderController.updateUsbAudioDsp(audioDsp)
         idlePreview?.updateAudioDsp(audioDsp)
@@ -481,7 +505,7 @@ private fun UsbCameraScreen() {
         ) {
             val needed = buildList {
                 add(Manifest.permission.CAMERA)
-                if (pendingAction != UsbAction.PREVIEW && includeAudio) {
+                if (includeAudio && (pendingAction != UsbAction.PREVIEW || audioInput == UsbAudioInput.SYSTEM)) {
                     add(Manifest.permission.RECORD_AUDIO)
                 }
                 if (pendingAction != UsbAction.PREVIEW && Build.VERSION.SDK_INT >= 33) {
@@ -524,8 +548,9 @@ private fun UsbCameraScreen() {
                 val beginPreview: () -> Unit = {
                     if (previewRequested && requestRevision == previewRequestRevision &&
                         selectedName == device.deviceName && !recording && target.isValid) {
-                        UsbIdlePreview(manager, device, target, width, height, fps, videoFormat,
+                        UsbIdlePreview(context, manager, device, target, width, height, fps, videoFormat,
                             bufferFrames, includeAudio, audioRate, yuvMatrix, sourceRange, lowFrameRatePreview,
+                            audioInput = audioInput, systemAudioInput = systemAudioInput,
                             initialAudioDsp = audioDsp,
                             initialColorGrade = videoColorGrade,
                             customVideoMode = selectedMode?.custom == true,
@@ -555,7 +580,7 @@ private fun UsbCameraScreen() {
             val previous = idlePreview
             idlePreview = null
             val config = usbRecordingConfig(
-                context, device, selectedMode, includeAudio, audioRate, bufferFrames, container,
+                context, device, selectedMode, includeAudio, audioInput, systemAudioInput, audioRate, bufferFrames, container,
                 requested == UsbAction.STREAM, requested == UsbAction.RTMP, rtmpUrl,
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
@@ -744,7 +769,24 @@ private fun UsbCameraScreen() {
                     { it.label }) { sourceRange = it }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = includeAudio, onCheckedChange = { includeAudio = it }, enabled = !recording)
-                    Text("USB 麦克风")
+                    Text("启用音频")
+                }
+                UsbSettingChoice("音频采集", UsbAudioInput.entries, audioInput, !recording && includeAudio,
+                    { it.label }) { audioInput = it }
+                if (audioInput == UsbAudioInput.SYSTEM) {
+                    val sources = AudioInputSource.entries.filter { it != AudioInputSource.VOICE_PERFORMANCE || Build.VERSION.SDK_INT >= 29 }
+                    UsbSettingChoice("音频输入源", sources, systemAudioInput.source, !recording && includeAudio,
+                        { it.label }) { systemAudioInput = systemAudioInput.copy(source = it) }
+                    val selectedDevice = systemAudioInput.device
+                    val resolved = selectedDevice?.let { resolveSystemAudioDevice(it, systemAudioDevices) }
+                    val options = listOf<SystemAudioDevice?>(null) + systemAudioDevices +
+                        listOfNotNull(selectedDevice?.takeIf { it !in systemAudioDevices })
+                    UsbSettingChoice("音频输入设备", options, selectedDevice, !recording && includeAudio,
+                        { it?.let { device -> device.label + if (resolveSystemAudioDevice(device, systemAudioDevices) == null) "（当前不可用）" else "" }
+                            ?: "系统默认" }) { systemAudioInput = systemAudioInput.copy(device = it) }
+                    if (selectedDevice != null && resolved == null) Text("所选输入设备当前不可用，请重新选择。")
+                    Text("输入源决定系统采集策略，设备决定实际输入；电话音频等输入是否可用由系统决定。",
+                        style = MaterialTheme.typography.bodySmall)
                 }
                 UsbSettingChoice("源采样率", audioRates, audioRate, !recording && includeAudio,
                     { if (it == 0) "自动" else "$it Hz" }) { audioRate = it }
@@ -936,6 +978,7 @@ private fun usbVideoDevices(manager: UsbManager): List<UsbDevice> = manager.devi
     .sortedBy { it.deviceName }
 
 private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVideoMode?, audio: Boolean,
+                               audioInput: UsbAudioInput, systemAudioInput: SystemAudioInputSettings,
                                audioRate: Int, bufferFrames: Int, container: ContainerFormat,
                                httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, videoCodec: VideoCodec,
                                bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
@@ -958,6 +1001,8 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
         usbVideoInputFormat = mode?.inputFormat ?: UsbVideoInputFormat.AUTO,
         usbCustomVideoMode = mode?.custom == true,
         usbAudioSampleRate = audioRate,
+        usbAudioInput = audioInput,
+        systemAudioInput = systemAudioInput,
         usbVideoBufferFrames = bufferFrames,
         usbYuvMatrix = yuvMatrix,
         usbSourceRange = sourceRange,
@@ -991,6 +1036,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
 }
 
 private class UsbIdlePreview(
+    private val context: Context,
     private val manager: UsbManager,
     private val device: UsbDevice,
     initialSurface: Surface,
@@ -1007,6 +1053,8 @@ private class UsbIdlePreview(
     initialAudioDsp: AudioDspSettings,
     initialColorGrade: VideoColorGradeSettings,
     private val customVideoMode: Boolean,
+    private val audioInput: UsbAudioInput,
+    private val systemAudioInput: SystemAudioInputSettings,
     private val onMessage: (String) -> Unit,
     private val onAudioLevel: (Float) -> Unit,
 ) : UsbCaptureCallback {
@@ -1053,6 +1101,7 @@ private class UsbIdlePreview(
             var handle = 0L
             var connection: android.hardware.usb.UsbDeviceConnection? = null
             var gateAcquired = false
+            var systemCapture: SystemAudioCapture? = null
             try {
                 usbPreviewGate.acquire()
                 gateAcquired = true
@@ -1060,17 +1109,22 @@ private class UsbIdlePreview(
                 connection = manager.openDevice(device)
                 checkNotNull(connection) { "无法打开 USB 摄像头" }
                 handle = NativeUsbCapture.nativeOpen(checkNotNull(connection).fileDescriptor, width, height, fps,
-                    videoFormat.nativeValue, audioEnabled, audioRate, customVideoMode)
+                    videoFormat.nativeValue, audioEnabled && audioInput == UsbAudioInput.USB, audioRate, customVideoMode)
                 if (stopped.get()) return@Thread
                 val format = NativeUsbCapture.nativeFormat(handle)
-                if (audioEnabled && format[2] > 0 && format[3] in 1..2) {
-                    val monitor = UsbAudioMonitor(format[2], format[3], onError = {
+                if (audioEnabled && audioInput == UsbAudioInput.SYSTEM) {
+                    systemCapture = SystemAudioCapture.open(context, systemAudioInput, audioRate)
+                }
+                val pcmRate = systemCapture?.sampleRate ?: format[2]
+                val pcmChannels = systemCapture?.channels ?: format[3]
+                if (audioEnabled && pcmRate > 0 && pcmChannels in 1..2) {
+                    val monitor = UsbAudioMonitor(pcmRate, pcmChannels, onError = {
                         mainHandler.post { if (!stopped.get()) onMessage("音频预览已停止：$it") }
                     })
                     synchronized(audioMonitorLock) {
                         audioMonitor = monitor
                         monitor.setEnabled(audioPreviewEnabled)
-                        audioPipeline = UsbAudioPipeline(format[2], format[3], audioDspSettings,
+                        audioPipeline = UsbAudioPipeline(pcmRate, pcmChannels, audioDspSettings,
                             onPcm = ::onProcessedAudioPcm,
                             onError = { error -> mainHandler.post {
                                 if (!stopped.get()) onMessage("音频 DSP 已停止：$error")
@@ -1080,6 +1134,11 @@ private class UsbIdlePreview(
                 mainHandler.post { onMessage("USB 预览：${format[0]}×${format[1]}") }
                 renderThread = Thread({ renderFrames() }, "usb-preview-render").apply { start() }
                 NativeUsbCapture.nativeStart(handle, this)
+                systemCapture?.start(onPcm = ::onUsbAudioPcm,
+                    onError = { error ->
+                        mainHandler.post { onMessage("系统音频采集失败：$error") }
+                        stop()
+                    }, onNotice = { notice -> mainHandler.post { if (!stopped.get()) onMessage(notice) } })
                 val receiveRate = UsbReceiveRate()
                 receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(handle))
                 while (!finished.await(1, TimeUnit.SECONDS)) {
@@ -1089,6 +1148,7 @@ private class UsbIdlePreview(
                 if (!stopped.get()) mainHandler.post { onMessage("USB 预览失败：${error.message}") }
             } finally {
                 usbVideoReceiveBitsPerSecond = null
+                runCatching { systemCapture?.close() }
                 if (handle != 0L) runCatching { NativeUsbCapture.nativeClose(handle) }
                 val pipeline = audioPipeline.also { audioPipeline = null }
                 pipeline?.let { it.close(); runCatching { it.awaitStopped() } }
