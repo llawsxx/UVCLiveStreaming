@@ -25,6 +25,7 @@ object ConfigPreferences {
             usbAudioBitDepth = UsbAudioDevicePreferences.bitDepth(p),
             systemAudioInput = SystemAudioInputPreferences.load(p),
             usbVideoBufferFrames = p.getInt("usbVideoBufferFrames", 2).coerceIn(1, 30),
+            usbBulkTransferCount = p.getInt("usbBulkTransferCount", 64).coerceIn(8, 256),
             usbYuvMatrix = enumValue(p.getString("usbYuvMatrix", null), UsbYuvMatrix.BT601),
             usbSourceRange = enumValue(p.getString("usbSourceRange", null), UsbSourceRange.AUTO),
             usbTimestampSmoothingEnabled = p.getBoolean("usbTimestampSmoothingEnabled", true),
@@ -254,6 +255,7 @@ object ConfigPreferences {
             .putString("uacBitDepth", c.usbAudioBitDepth.name)
             .also { SystemAudioInputPreferences.save(it, c.systemAudioInput) }
             .putInt("usbVideoBufferFrames", c.usbVideoBufferFrames.coerceIn(1, 30))
+            .putInt("usbBulkTransferCount", c.usbBulkTransferCount.coerceIn(8, 256))
             .putString("usbYuvMatrix", c.usbYuvMatrix.name)
             .putString("usbSourceRange", c.usbSourceRange.name)
             .putBoolean("usbTimestampSmoothingEnabled", c.usbTimestampSmoothingEnabled)

@@ -35,7 +35,7 @@ internal object NativeUsbCapture {
 
     external fun nativeOpen(
         fd: Int, width: Int, height: Int, fps: Double, videoFormat: Int, audio: Boolean, audioRate: Int,
-        customVideoMode: Boolean = false, audioBitDepth: Int = 0,
+        customVideoMode: Boolean = false, audioBitDepth: Int = 0, bulkTransferCount: Int = 64,
     ): Long
     /** Independent UAC-only handle; no UVC negotiation or video interface claim. */
     external fun nativeOpenAudio(fd: Int, audioRate: Int, audioBitDepth: Int = 0): Long

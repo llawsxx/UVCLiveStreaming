@@ -101,7 +101,9 @@ add_library(uvc STATIC
 )
 target_include_directories(uvc PUBLIC ${LIBUVC_ROOT}/include ${CMAKE_CURRENT_BINARY_DIR}/include
     PRIVATE ${LIBJPEG_ROOT}/src ${LIBJPEG_BUILD})
-target_compile_definitions(uvc PRIVATE LIBUVC_NUM_TRANSFER_BUFS=8 LIBUVC_PACKETS_PER_TRANSFER_MAX=16
+# A 120 KiB Bulk queue lasts less than a millisecond at raw 1080p60 rates.
+# Reserve up to 256 slots; runtime selection defaults to 64 requests.
+target_compile_definitions(uvc PRIVATE LIBUVC_NUM_TRANSFER_BUFS=256 LIBUVC_NUM_ISO_TRANSFER_BUFS=8 LIBUVC_PACKETS_PER_TRANSFER_MAX=16
     UVCLIVESTREAMING_DISABLE_UVC_STATUS_XFER=1)
 target_compile_options(uvc PRIVATE -O2)
 add_dependencies(uvc jpeg_turbo_build)

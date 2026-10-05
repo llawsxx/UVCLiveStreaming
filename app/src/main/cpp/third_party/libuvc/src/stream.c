@@ -1398,6 +1398,7 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
         free(transfer->buffer);
         libusb_free_transfer(transfer);
         strmh->transfers[i] = NULL;
+        strmh->transfer_bufs[i] = NULL;
         break;
       }
     }
@@ -1436,6 +1437,7 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
             free(transfer->buffer);
             libusb_free_transfer(transfer);
             strmh->transfers[i] = NULL;
+            strmh->transfer_bufs[i] = NULL;
             break;
           }
         }
@@ -1457,6 +1459,7 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
           free(transfer->buffer);
           libusb_free_transfer(transfer);
           strmh->transfers[i] = NULL;
+          strmh->transfer_bufs[i] = NULL;
           break;
         }
       }
@@ -1691,6 +1694,8 @@ uvc_error_t uvc_stream_start(
   size_t total_transfer_size = 0;
   struct libusb_transfer *transfer;
   int transfer_id;
+  int num_transfers = strmh->bulk_transfer_count ? strmh->bulk_transfer_count :
+      (LIBUVC_NUM_TRANSFER_BUFS < 64 ? LIBUVC_NUM_TRANSFER_BUFS : 64);
 
   ctrl = &strmh->cur_ctrl;
 
@@ -1734,6 +1739,10 @@ uvc_error_t uvc_stream_start(
   /* A VS interface uses isochronous transfers iff it has multiple altsettings.
    * (UVC 1.5: 2.4.3. VideoStreaming Interface) */
   isochronous = interface->num_altsetting > 1;
+#ifdef LIBUVC_NUM_ISO_TRANSFER_BUFS
+  if (isochronous)
+    num_transfers = LIBUVC_NUM_ISO_TRANSFER_BUFS;
+#endif
 
   if (isochronous) {
     UVC_DEBUG("isochronous transfer mode:  num_altsetting=%d", interface->num_altsetting);
@@ -1815,10 +1824,14 @@ uvc_error_t uvc_stream_start(
     }
 
   /* Set up the transfers */
-  for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
+  for (transfer_id = 0; transfer_id < num_transfers; ++transfer_id) {
       transfer = libusb_alloc_transfer(packets_per_transfer);
       strmh->transfers[transfer_id] = transfer;      
       strmh->transfer_bufs[transfer_id] = malloc(total_transfer_size);
+      if (!transfer || !strmh->transfer_bufs[transfer_id]) {
+        ret = UVC_ERROR_NO_MEM;
+        goto fail;
+      }
 
       libusb_fill_iso_transfer(
         transfer, strmh->devh->usb_devh, format_desc->parent->bEndpointAddress,
@@ -1836,12 +1849,16 @@ uvc_error_t uvc_stream_start(
         break;
       }
     }
-    for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS;
+    for (transfer_id = 0; transfer_id < num_transfers;
         ++transfer_id) {
       transfer = libusb_alloc_transfer(0);
       strmh->transfers[transfer_id] = transfer;
       strmh->transfer_bufs[transfer_id] = malloc (
           strmh->cur_ctrl.dwMaxPayloadTransferSize );
+      if (!transfer || !strmh->transfer_bufs[transfer_id]) {
+        ret = UVC_ERROR_NO_MEM;
+        goto fail;
+      }
       libusb_fill_bulk_transfer ( transfer, strmh->devh->usb_devh,
           format_desc->parent->bEndpointAddress,
           strmh->transfer_bufs[transfer_id],
@@ -1852,9 +1869,9 @@ uvc_error_t uvc_stream_start(
     __android_log_print(ANDROID_LOG_INFO, "UVCLiveStreamingUsb",
         "UVC bulk receive setup: speedEnum=%d packetBytes=%zu requests=%d requestBytes=%u queuedBytes=%llu fixedFrameBytes=%zu",
         libusb_get_device_speed(libusb_get_device(strmh->devh->usb_devh)),
-        strmh->bulk_packet_size, LIBUVC_NUM_TRANSFER_BUFS,
+        strmh->bulk_packet_size, num_transfers,
         strmh->cur_ctrl.dwMaxPayloadTransferSize,
-        (unsigned long long)LIBUVC_NUM_TRANSFER_BUFS * strmh->cur_ctrl.dwMaxPayloadTransferSize,
+        (unsigned long long)num_transfers * strmh->cur_ctrl.dwMaxPayloadTransferSize,
         strmh->bulk_fixed_frame_size);
 #endif
   }
@@ -1866,10 +1883,14 @@ uvc_error_t uvc_stream_start(
    * with the contents of each frame.
    */
   if (cb) {
-    pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh);
+    if (pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh) != 0) {
+      strmh->user_cb = NULL;
+      ret = UVC_ERROR_NO_MEM;
+      goto fail;
+    }
   }
 
-  for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS;
+  for (transfer_id = 0; transfer_id < num_transfers;
       transfer_id++) {
     ret = libusb_submit_transfer(strmh->transfers[transfer_id]);
     if (ret != UVC_SUCCESS) {
@@ -1879,31 +1900,49 @@ uvc_error_t uvc_stream_start(
   }
 
   if ( ret != UVC_SUCCESS && transfer_id >= 0 ) {
-    int num_submitted = transfer_id;
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_ERROR, "UVCLiveStreamingUsb",
+        "UVC receive queue submit failed: submitted=%d requested=%d error=%d",
+        transfer_id, num_transfers, ret);
+#endif
 
-    for ( ; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; transfer_id++) {
+    for ( ; transfer_id < num_transfers; transfer_id++) {
       free ( strmh->transfers[transfer_id]->buffer );
       libusb_free_transfer ( strmh->transfers[transfer_id]);
       strmh->transfers[transfer_id] = 0;
+      strmh->transfer_bufs[transfer_id] = NULL;
     }
 
-    /* If no transfer could be submitted, the stream would never deliver a
-     * frame: stop it (this also ends the callback thread) and report the
-     * error. Otherwise carry on with the transfers that are in flight. */
-    if (num_submitted == 0) {
-      uvc_stream_stop(strmh);
-      UVC_EXIT(ret);
-      return ret;
-    }
-    ret = UVC_SUCCESS;
+    /* Do not silently run with a smaller queue than the selected count. */
+    uvc_stream_stop(strmh);
+    UVC_EXIT(ret);
+    return ret;
   }
 
   UVC_EXIT(ret);
   return ret;
 fail:
+  /* No requests have been submitted on this path. */
+  for (transfer_id = 0; transfer_id < num_transfers; ++transfer_id) {
+    free(strmh->transfer_bufs[transfer_id]);
+    strmh->transfer_bufs[transfer_id] = NULL;
+    if (strmh->transfers[transfer_id]) {
+      libusb_free_transfer(strmh->transfers[transfer_id]);
+      strmh->transfers[transfer_id] = NULL;
+    }
+  }
   strmh->running = 0;
   UVC_EXIT(ret);
   return ret;
+}
+
+uvc_error_t uvc_stream_set_bulk_transfer_count(uvc_stream_handle_t *strmh, int count) {
+  if (!strmh || count < 8 || count > LIBUVC_NUM_TRANSFER_BUFS)
+    return UVC_ERROR_INVALID_PARAM;
+  if (strmh->running)
+    return UVC_ERROR_BUSY;
+  strmh->bulk_transfer_count = count;
+  return UVC_SUCCESS;
 }
 
 /** Begin streaming video from the stream into the callback function.

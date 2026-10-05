@@ -155,8 +155,8 @@ class UsbCapture {
 public:
     UsbCapture(JavaVM *vm, int fd, int width, int height, double fps,
                int preferred_video_format, bool audio, int audio_rate, bool custom_video_mode,
-               int audio_bit_depth, bool audio_only = false)
-        : vm_(vm) {
+               int audio_bit_depth, int bulk_transfer_count, bool audio_only = false)
+        : vm_(vm), bulk_transfer_count_(bulk_transfer_count) {
         try {
         libusb_init_option option{};
         option.option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY;
@@ -353,8 +353,14 @@ public:
             while (running_) libusb_handle_events_timeout(usb_ctx_, &timeout);
         });
         if (camera_) {
-            auto result = uvc_start_streaming(camera_, &video_ctrl_, &UsbCapture::video_callback, this, 0);
+            uvc_stream_handle_t *stream = nullptr;
+            auto result = uvc_stream_open_ctrl(camera_, &stream, &video_ctrl_);
+            if (result == UVC_SUCCESS)
+                result = uvc_stream_set_bulk_transfer_count(stream, bulk_transfer_count_);
+            if (result == UVC_SUCCESS)
+                result = uvc_stream_start(stream, &UsbCapture::video_callback, this, 0);
             if (result != UVC_SUCCESS) {
+                if (stream) uvc_stream_close(stream);
                 stop();
                 throw std::runtime_error("Cannot start USB video: " + std::to_string(result));
             }
@@ -514,6 +520,7 @@ private:
     }
 
     JavaVM *vm_;
+    int bulk_transfer_count_;
     int video_fd_ = -1;
     int audio_fd_ = -1;
     libusb_context *usb_ctx_ = nullptr;
@@ -555,12 +562,12 @@ private:
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeOpen(
     JNIEnv *env, jobject, jint fd, jint width, jint height, jdouble fps, jint video_format,
-    jboolean audio, jint audio_rate, jboolean custom_video_mode, jint audio_bit_depth) {
+    jboolean audio, jint audio_rate, jboolean custom_video_mode, jint audio_bit_depth, jint bulk_transfer_count) {
     try {
         JavaVM *vm = nullptr;
         env->GetJavaVM(&vm);
         return reinterpret_cast<jlong>(new UsbCapture(vm, fd, width, height, fps,
-            video_format, audio, audio_rate, custom_video_mode, audio_bit_depth));
+            video_format, audio, audio_rate, custom_video_mode, audio_bit_depth, bulk_transfer_count));
     } catch (const std::exception &error) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "open: %s", error.what());
         throw_java(env, error.what());
@@ -575,7 +582,7 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeOpenAudio(
         JavaVM *vm = nullptr;
         env->GetJavaVM(&vm);
         return reinterpret_cast<jlong>(new UsbCapture(vm, fd, 0, 0, 0, 0, true,
-            audio_rate, false, audio_bit_depth, true));
+            audio_rate, false, audio_bit_depth, 64, true));
     } catch (const std::exception &error) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "open audio: %s", error.what());
         throw_java(env, error.what());
