@@ -24,6 +24,10 @@ internal interface UsbCaptureCallback {
     fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long)
     /** Signed 16-bit little-endian, interleaved PCM at the rate reported by nativeFormat. */
     fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long)
+    /** Signed LE PCM in 2/3/4-byte subslots; valid bits are left-aligned per UAC. */
+    fun onUsbAudioPcmRaw(bytes: ByteArray, timestampNs: Long, sampleBytes: Int) {
+        onUsbAudioPcm(PcmSamples.toPcm16(bytes, sampleBytes), timestampNs)
+    }
 }
 
 internal object NativeUsbCapture {
@@ -31,8 +35,10 @@ internal object NativeUsbCapture {
 
     external fun nativeOpen(
         fd: Int, width: Int, height: Int, fps: Double, videoFormat: Int, audio: Boolean, audioRate: Int,
-        customVideoMode: Boolean = false,
+        customVideoMode: Boolean = false, audioBitDepth: Int = 0,
     ): Long
+    /** Independent UAC-only handle; no UVC negotiation or video interface claim. */
+    external fun nativeOpenAudio(fd: Int, audioRate: Int, audioBitDepth: Int = 0): Long
     /** Format label, width, height, fps, input format value, and interval description. */
     external fun nativeListVideoModes(fd: Int): Array<String>
     /** Decode MJPEG or repack raw YUV into I420; never performs YUV-to-RGB conversion. */
@@ -47,7 +53,7 @@ internal object NativeUsbCapture {
     }
     /** Repack raw YUV into planar samples, preserving 4:2:2 / 10-bit, or copy RGB/BGR. */
     external fun nativeConvertRawToGpuBuffer(bytes: ByteArray, format: Int, width: Int, height: Int, destination: ByteBuffer): Boolean
-    /** [video width, video height, audio sample rate, audio channels]. */
+    /** [video width, video height, audio sample rate, channels, valid bits, subslot bytes]. */
     external fun nativeFormat(handle: Long): IntArray
     external fun nativeStart(handle: Long, callback: UsbCaptureCallback)
     /** Received video endpoint bytes including UVC headers; excludes audio and bus overhead. */

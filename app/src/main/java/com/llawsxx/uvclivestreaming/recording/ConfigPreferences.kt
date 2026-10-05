@@ -21,6 +21,8 @@ object ConfigPreferences {
             usbCustomVideoMode = p.getBoolean("usbCustomVideoMode", false),
             usbAudioSampleRate = p.getInt("usbAudioSampleRate", 0).coerceAtLeast(0),
             usbAudioInput = enumValue(p.getString("usbAudioInput", null), UsbAudioInput.USB),
+            usbAudioDevice = UsbAudioDevicePreferences.load(p),
+            usbAudioBitDepth = UsbAudioDevicePreferences.bitDepth(p),
             systemAudioInput = SystemAudioInputPreferences.load(p),
             usbVideoBufferFrames = p.getInt("usbVideoBufferFrames", 2).coerceIn(1, 30),
             usbYuvMatrix = enumValue(p.getString("usbYuvMatrix", null), UsbYuvMatrix.BT601),
@@ -248,6 +250,8 @@ object ConfigPreferences {
             .putBoolean("usbCustomVideoMode", c.usbCustomVideoMode)
             .putInt("usbAudioSampleRate", c.usbAudioSampleRate.coerceAtLeast(0))
             .putString("usbAudioInput", c.usbAudioInput.name)
+            .also { UsbAudioDevicePreferences.save(it, c.usbAudioDevice) }
+            .putString("uacBitDepth", c.usbAudioBitDepth.name)
             .also { SystemAudioInputPreferences.save(it, c.systemAudioInput) }
             .putInt("usbVideoBufferFrames", c.usbVideoBufferFrames.coerceIn(1, 30))
             .putString("usbYuvMatrix", c.usbYuvMatrix.name)

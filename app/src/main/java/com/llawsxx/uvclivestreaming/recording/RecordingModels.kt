@@ -219,6 +219,8 @@ data class RecordingConfig(
     /** Zero selects a supported USB microphone rate automatically. */
     val usbAudioSampleRate: Int = 0,
     val usbAudioInput: UsbAudioInput = UsbAudioInput.USB,
+    val usbAudioDevice: UsbAudioDevice? = null,
+    val usbAudioBitDepth: UsbAudioBitDepth = UsbAudioBitDepth.AUTO,
     val systemAudioInput: SystemAudioInputSettings = SystemAudioInputSettings(),
     /** Bounded queue of pending USB video frames, including MJPEG decode input. */
     val usbVideoBufferFrames: Int = 2,

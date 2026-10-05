@@ -50,6 +50,9 @@ internal interface PcmDsp : AutoCloseable {
     val delayFrames: Int
     /** Owns and modifies the packet before it is shared with any output. */
     fun process(bytes: ByteArray)
+    /** Test processors may use this fallback; the native processor consumes full precision directly. */
+    fun processWide(bytes: ByteArray, sampleBytes: Int): ByteArray =
+        PcmSamples.toPcm16(bytes, sampleBytes).also(::process)
     fun updateSettings(settings: AudioDspSettings): Boolean = false
 }
 
@@ -59,6 +62,7 @@ internal object NativeAudioDsp {
     external fun delayFrames(handle: Long): Int
     external fun update(handle: Long, parameters: FloatArray)
     external fun process(handle: Long, bytes: ByteArray)
+    external fun processWide(handle: Long, bytes: ByteArray, sampleBytes: Int): ByteArray
     external fun destroy(handle: Long)
 
     fun processor(rate: Int, channels: Int, settings: AudioDspSettings): PcmDsp {
@@ -68,6 +72,7 @@ internal object NativeAudioDsp {
             private var current = settings
             override val delayFrames = delayFrames(handle)
             override fun process(bytes: ByteArray) = process(handle, bytes)
+            override fun processWide(bytes: ByteArray, sampleBytes: Int) = processWide(handle, bytes, sampleBytes)
             override fun close() = destroy(handle)
             override fun updateSettings(settings: AudioDspSettings): Boolean {
                 if (!settings.active || settings.loudnessEnabled != current.loudnessEnabled ||

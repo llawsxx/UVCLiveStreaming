@@ -6,6 +6,19 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VideoGopPreferencesTest {
+    @Test fun uacSelectionAndBitDepthPersistAndOldSettingsFollowVideo() {
+        val prefs = preferences(mutableMapOf())
+        assertEquals(null, ConfigPreferences.load(prefs).usbAudioDevice)
+        assertEquals(UsbAudioBitDepth.AUTO, ConfigPreferences.load(prefs).usbAudioBitDepth)
+        val mic = UsbAudioDevice("/dev/bus/usb/001/003", 1234, 5678, "External microphone")
+        ConfigPreferences.save(prefs, RecordingConfig(usbAudioDevice = mic, usbAudioBitDepth = UsbAudioBitDepth.PCM24))
+        assertEquals(mic, ConfigPreferences.load(prefs).usbAudioDevice)
+        assertEquals(UsbAudioBitDepth.PCM24, ConfigPreferences.load(prefs).usbAudioBitDepth)
+        ConfigPreferences.save(prefs, RecordingConfig(usbAudioDevice = null, usbAudioBitDepth = UsbAudioBitDepth.PCM32))
+        assertEquals(null, ConfigPreferences.load(prefs).usbAudioDevice)
+        assertEquals(UsbAudioBitDepth.PCM32, ConfigPreferences.load(prefs).usbAudioBitDepth)
+    }
+
     @Test fun virtualDevicePatternAndFractionalModeSurviveRestart() {
         val prefs = preferences(mutableMapOf())
         val card = TestCardSettings(TestCardPattern.RESOLUTION, 720, 480, 60000.0 / 1001)

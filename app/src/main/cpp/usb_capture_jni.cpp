@@ -154,15 +154,17 @@ uvc_error_t negotiate_custom_video_mode(uvc_device_handle_t *camera, uvc_stream_
 class UsbCapture {
 public:
     UsbCapture(JavaVM *vm, int fd, int width, int height, double fps,
-               int preferred_video_format, bool audio, int audio_rate, bool custom_video_mode)
+               int preferred_video_format, bool audio, int audio_rate, bool custom_video_mode,
+               int audio_bit_depth, bool audio_only = false)
         : vm_(vm) {
         try {
-        video_fd_ = dup(fd);
-        if (video_fd_ < 0) throw std::runtime_error("Cannot duplicate USB video descriptor");
         libusb_init_option option{};
         option.option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY;
         if (libusb_init_context(&usb_ctx_, &option, 1) != LIBUSB_SUCCESS)
             throw std::runtime_error("Cannot initialize libusb");
+        if (!audio_only) {
+        video_fd_ = dup(fd);
+        if (video_fd_ < 0) throw std::runtime_error("Cannot duplicate USB video descriptor");
         if (uvc_init(&uvc_ctx_, usb_ctx_) != UVC_SUCCESS || !uvc_ctx_)
             throw std::runtime_error("Cannot initialize libuvc");
         const auto result = uvc_wrap(video_fd_, uvc_ctx_, &camera_);
@@ -219,6 +221,7 @@ public:
         if (!width_) throw std::runtime_error("USB camera has no usable MJPG, YUYV, UYVY, RGB, NV12, I420, P010 or H264 mode");
         if (width_ > 3840 || height_ > 2160)
             throw std::runtime_error("USB video resolution exceeds the 3840x2160 processing limit");
+        }
         if (audio) {
             audio_fd_ = dup(fd);
             if (audio_fd_ < 0) throw std::runtime_error("Cannot duplicate USB audio descriptor");
@@ -264,7 +267,8 @@ public:
                 }
                 for (int channels : {2, 1}) {
                     for (auto rate : rates) {
-                        for (int bits : {16, 24, 32}) {
+                        for (int bits : {32, 24, 16}) {
+                            if (audio_bit_depth != 0 && bits != audio_bit_depth) continue;
                             audio_config_ = candidate.query_config_uncompressed(
                                 uac::UAC_FORMAT_DATA_PCM, channels, rate, bits);
                             if (audio_config_) break;
@@ -286,14 +290,18 @@ public:
                 audio_channels_ = audio_config_->bChannelCount;
                 audio_rate_ = audio_config_->tSampleRate;
                 audio_subframe_bytes_ = audio_config_->bSubframeSize;
-                if (audio_channels_ < 1 || audio_channels_ > 2 || audio_subframe_bytes_ < 2 || audio_subframe_bytes_ > 4) {
+                audio_bit_depth_ = audio_config_->bBitResolution;
+                if (audio_channels_ < 1 || audio_channels_ > 2 || audio_subframe_bytes_ < 2 || audio_subframe_bytes_ > 4 ||
+                    audio_bit_depth_ < 16 || audio_bit_depth_ > audio_subframe_bytes_ * 8) {
                     __android_log_print(ANDROID_LOG_WARN, TAG,
                         "Unsupported USB microphone PCM layout; continuing without USB audio");
                     audio_config_.reset();
-                    audio_channels_ = audio_rate_ = audio_subframe_bytes_ = 0;
+                    audio_channels_ = audio_rate_ = audio_subframe_bytes_ = audio_bit_depth_ = 0;
                 }
             }
         }
+        if ((audio_only || (audio && audio_bit_depth != 0)) && !audio_config_)
+            throw std::runtime_error("USB 音频设备不支持所选采样率／位深的单声道或双声道 PCM 输入");
         } catch (...) {
             cleanup();
             throw;
@@ -322,11 +330,12 @@ public:
         callback_ = env->NewGlobalRef(callback);
         auto klass = env->GetObjectClass(callback);
         video_method_ = env->GetMethodID(klass, "onUsbVideoFrame", "([BIIIJ)V");
-        audio_method_ = env->GetMethodID(klass, "onUsbAudioPcm", "([BJ)V");
+        audio_method_ = env->GetMethodID(klass, "onUsbAudioPcmRaw", "([BJI)V");
         env->DeleteLocalRef(klass);
         if (!video_method_ || (audio_config_ && !audio_method_))
             throw std::runtime_error("USB callback methods unavailable");
         running_ = true;
+        if (camera_) {
         // sysfs speed may be inaccessible on Android. Query the USB Host fd
         // directly; this ioctl neither claims an interface nor changes it.
         __android_log_print(ANDROID_LOG_INFO, TAG,
@@ -337,17 +346,22 @@ public:
             width_, height_, supported_format(video_format_), video_ctrl_.dwFrameInterval,
             video_ctrl_.dwFrameInterval ? 10000000.0 / video_ctrl_.dwFrameInterval : 0.0,
             video_ctrl_.dwMaxVideoFrameSize, video_ctrl_.dwMaxPayloadTransferSize, video_ctrl_.dwClockFrequency);
+        }
         event_thread_ = std::thread([this] {
             timeval timeout{0, 200000};
             while (running_) libusb_handle_events_timeout(usb_ctx_, &timeout);
         });
-        auto result = uvc_start_streaming(camera_, &video_ctrl_, &UsbCapture::video_callback, this, 0);
-        if (result != UVC_SUCCESS) {
-            stop();
-            throw std::runtime_error("Cannot start USB video: " + std::to_string(result));
+        if (camera_) {
+            auto result = uvc_start_streaming(camera_, &video_ctrl_, &UsbCapture::video_callback, this, 0);
+            if (result != UVC_SUCCESS) {
+                stop();
+                throw std::runtime_error("Cannot start USB video: " + std::to_string(result));
+            }
+            video_started_ = true;
         }
-        video_started_ = true;
         if (audio_config_) {
+            __android_log_print(ANDROID_LOG_INFO, TAG, "USB PCM input: rate=%d channels=%d bits=%d subslot=%d",
+                audio_rate_, audio_channels_, audio_bit_depth_, audio_subframe_bytes_);
             audio_stream_ = audio_device_->start_streaming(*audio_interface_, *audio_config_,
                 [this](uint8_t *data, uint count) { audio_frame(data, count); }, 8);
             if (!audio_stream_) {
@@ -387,6 +401,8 @@ public:
     int height() const { return height_; }
     int audio_rate() const { return audio_rate_; }
     int audio_channels() const { return audio_channels_; }
+    int audio_bit_depth() const { return audio_bit_depth_; }
+    int audio_sample_bytes() const { return audio_subframe_bytes_; }
     uint64_t received_video_bytes() const { return camera_ ? uvc_get_received_video_bytes(camera_) : 0; }
 
 private:
@@ -456,7 +472,9 @@ private:
         ++audio_packets_;
         audio_bytes_ += count;
         const auto old_size = audio_aggregate_.size();
-        audio_aggregate_.resize(old_size + static_cast<size_t>(total_samples) * 2);
+        audio_aggregate_.resize(old_size + static_cast<size_t>(total_samples) * sample_bytes);
+        // Keep every input bit until the DSP worker converts it directly to float.
+        std::memcpy(audio_aggregate_.data() + old_size, data, static_cast<size_t>(total_samples) * sample_bytes);
         for (int i = 0; i < total_samples; ++i) {
             const uint8_t *sample = data + i * sample_bytes;
             uint32_t raw = 0;
@@ -465,10 +483,8 @@ private:
             int32_t value = sample_bytes == 2 ? static_cast<int16_t>(raw) : static_cast<int32_t>(raw);
             value >>= (sample_bytes - 2) * 8;
             audio_peak_ = std::max(audio_peak_, value < 0 ? -value : value);
-            audio_aggregate_[old_size + static_cast<size_t>(i) * 2] = static_cast<jbyte>(value);
-            audio_aggregate_[old_size + static_cast<size_t>(i) * 2 + 1] = static_cast<jbyte>(value >> 8);
         }
-        const size_t batch_bytes = static_cast<size_t>(audio_rate_) * audio_channels_ * 2 / 100;
+        const size_t batch_bytes = static_cast<size_t>(audio_rate_) * audio_channels_ * sample_bytes / 100;
         if (audio_aggregate_.size() < batch_bytes) return;
         JNIEnv *env = nullptr;
         bool attached = vm_->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK;
@@ -476,10 +492,10 @@ private:
         auto bytes = env->NewByteArray(static_cast<jsize>(audio_aggregate_.size()));
         if (bytes) {
             env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(audio_aggregate_.size()), audio_aggregate_.data());
-            const auto frames = audio_aggregate_.size() / (audio_channels_ * 2);
+            const auto frames = audio_aggregate_.size() / (audio_channels_ * sample_bytes);
             const auto first_sample_ns = monotonic_ns() -
                 static_cast<int64_t>(frames) * 1000000000LL / audio_rate_;
-            env->CallVoidMethod(callback_, audio_method_, bytes, static_cast<jlong>(first_sample_ns));
+            env->CallVoidMethod(callback_, audio_method_, bytes, static_cast<jlong>(first_sample_ns), sample_bytes);
             ++audio_batches_;
             env->DeleteLocalRef(bytes);
         }
@@ -514,6 +530,7 @@ private:
     int audio_rate_ = 0;
     int audio_channels_ = 0;
     int audio_subframe_bytes_ = 0;
+    int audio_bit_depth_ = 0;
     std::vector<jbyte> audio_aggregate_;
     uint64_t audio_packets_ = 0;
     uint64_t video_frames_ = 0, video_bytes_ = 0, video_sequence_gaps_ = 0;
@@ -537,14 +554,29 @@ private:
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeOpen(
     JNIEnv *env, jobject, jint fd, jint width, jint height, jdouble fps, jint video_format,
-    jboolean audio, jint audio_rate, jboolean custom_video_mode) {
+    jboolean audio, jint audio_rate, jboolean custom_video_mode, jint audio_bit_depth) {
     try {
         JavaVM *vm = nullptr;
         env->GetJavaVM(&vm);
         return reinterpret_cast<jlong>(new UsbCapture(vm, fd, width, height, fps,
-            video_format, audio, audio_rate, custom_video_mode));
+            video_format, audio, audio_rate, custom_video_mode, audio_bit_depth));
     } catch (const std::exception &error) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "open: %s", error.what());
+        throw_java(env, error.what());
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeOpenAudio(
+    JNIEnv *env, jobject, jint fd, jint audio_rate, jint audio_bit_depth) {
+    try {
+        JavaVM *vm = nullptr;
+        env->GetJavaVM(&vm);
+        return reinterpret_cast<jlong>(new UsbCapture(vm, fd, 0, 0, 0, 0, true,
+            audio_rate, false, audio_bit_depth, true));
+    } catch (const std::exception &error) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "open audio: %s", error.what());
         throw_java(env, error.what());
         return 0;
     }
@@ -621,9 +653,10 @@ extern "C" JNIEXPORT jintArray JNICALL
 Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeFormat(JNIEnv *env, jobject, jlong handle) {
     auto capture = reinterpret_cast<UsbCapture *>(handle);
     if (!capture) return nullptr;
-    jint values[] = {capture->width(), capture->height(), capture->audio_rate(), capture->audio_channels()};
-    auto array = env->NewIntArray(4);
-    if (array) env->SetIntArrayRegion(array, 0, 4, values);
+    jint values[] = {capture->width(), capture->height(), capture->audio_rate(), capture->audio_channels(),
+        capture->audio_bit_depth(), capture->audio_sample_bytes()};
+    auto array = env->NewIntArray(6);
+    if (array) env->SetIntArrayRegion(array, 0, 6, values);
     return array;
 }
 

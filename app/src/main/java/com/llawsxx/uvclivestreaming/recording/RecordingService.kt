@@ -6,6 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.IBinder
 import android.os.Handler
@@ -13,6 +18,7 @@ import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.llawsxx.uvclivestreaming.MainActivity
 import com.llawsxx.uvclivestreaming.R
 
@@ -20,12 +26,21 @@ import com.llawsxx.uvclivestreaming.R
 class RecordingService : Service() {
     private var engine: UsbRecorderEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private val usbDetachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            @Suppress("DEPRECATION")
+            val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE) ?: return
+            if (engine?.usesUsbDevice(device.deviceName) == true) fail("正在使用的 USB 设备已断开：${device.productName ?: device.deviceName}")
+        }
+    }
     private val mainHandler = Handler(Looper.getMainLooper())
     private var captureGeneration = 0L
     private var notificationContent = ""
 
     override fun onCreate() {
         super.onCreate()
+        ContextCompat.registerReceiver(this, usbDetachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED),
+            ContextCompat.RECEIVER_NOT_EXPORTED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "视频录像串流", NotificationManager.IMPORTANCE_LOW),
@@ -160,6 +175,7 @@ class RecordingService : Service() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(usbDetachReceiver)
         captureGeneration++
         RecorderController.audioPreviewUpdater = null
         RecorderController.audioDspUpdater = null

@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 import java.io.Serializable
 
 enum class UsbAudioInput(val label: String) : Serializable {
-    USB("采集卡音频（USB UAC）"), SYSTEM("系统麦克风（AudioRecord）")
+    USB("USB 音频（UAC）"), SYSTEM("系统麦克风（AudioRecord）")
 }
 
 data class SystemAudioDevice(

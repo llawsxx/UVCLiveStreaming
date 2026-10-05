@@ -8,6 +8,38 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class UsbAudioPipelineTest {
+    @Test fun wideInputReachesDspIntactAndSpanTimingUsesInputSampleWidth() {
+        val output = Collections.synchronizedList(mutableListOf<Pair<ByteArray, Long>>())
+        val raw = byteArrayOf(64,0,0, -64,-1,-1)
+        val processor = object : PcmDsp {
+            override val delayFrames = 0
+            override fun process(bytes: ByteArray) { fail("Wide input was quantized before DSP") }
+            override fun processWide(bytes: ByteArray, sampleBytes: Int): ByteArray {
+                assertSame(raw, bytes)
+                assertEquals(3, sampleBytes)
+                return byteArrayOf(4,0, -4,-1)
+            }
+            override fun close() = Unit
+        }
+        val pipeline = UsbAudioPipeline(1000, 1, AudioDspSettings(enabled = true),
+            { bytes, pts -> output.add(bytes to pts) }, { fail(it) }, factory = { _, _, _ -> processor })
+        pipeline.offer(raw, 2_000_000_000L, 3)
+        finish(pipeline)
+        assertEquals(1, output.size)
+        assertEquals(2_000_000_000L, output[0].second)
+        assertArrayEquals(byteArrayOf(4,0, -4,-1), output[0].first)
+    }
+
+    @Test fun widePcmBypassAndDelayedOutputPreserveFramesAndPts() {
+        val output = Collections.synchronizedList(mutableListOf<Pair<Int, Long>>())
+        val pipeline = UsbAudioPipeline(1000, 1, AudioDspSettings(enabled = true), { bytes, pts ->
+            for (offset in bytes.indices step 2) output.add(bytes[offset].toInt() to (pts + offset / 2 * 1_000_000L))
+        }, { fail(it) }, factory = { _, _, _ -> Delay(5) })
+        pipeline.offer((1..8).flatMap { listOf(0.toByte(), it.toByte(), 0.toByte()) }.toByteArray(), 1_000_000_000L, 3)
+        finish(pipeline)
+        assertEquals((1..8).map { it to (1_000_000_000L + (it - 1) * 1_000_000L) }, output.toList())
+    }
+
     private class Delay(override val delayFrames: Int) : PcmDsp {
         val samples = java.util.ArrayDeque<Byte>()
         init { repeat(delayFrames) { samples.add(0) } }

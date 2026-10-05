@@ -89,7 +89,9 @@ class UsbRecorderEngine(
     private var videoWidth = 0
     private var videoHeight = 0
     private var audioCaptureEnabled = false
+    private var bundledUsbAudio = false
     private var systemAudioCapture: SystemAudioCapture? = null
+    @Volatile private var usbAudioCapture: UsbUacCapture? = null
     @Volatile private var audioMonitor: UsbAudioMonitor? = null
     @Volatile private var audioPipeline: UsbAudioPipeline? = null
     private val audioPipelineDone = AtomicBoolean(true)
@@ -132,11 +134,14 @@ class UsbRecorderEngine(
             val deviceName = config.cameraId.removePrefix(USB_CAMERA_PREFIX)
             val device = requireNotNull(manager.deviceList[deviceName]) { "USB 摄像头已断开" }
             check(manager.hasPermission(device)) { "缺少 USB 摄像头访问权限" }
+            bundledUsbAudio = config.hasAudio && config.usbAudioInput == UsbAudioInput.USB &&
+                (config.usbAudioDevice == null || resolveUsbAudioDevice(config.usbAudioDevice,
+                    usbAudioInputDevices(manager))?.deviceName == device.deviceName)
             usbConnection = requireNotNull(manager.openDevice(device)) { "无法打开 USB 摄像头" }
             nativeHandle = NativeUsbCapture.nativeOpen(
                 checkNotNull(usbConnection).fileDescriptor,
                 config.width, config.height, config.fps, config.usbVideoInputFormat.nativeValue,
-                config.hasAudio && config.usbAudioInput == UsbAudioInput.USB, config.usbAudioSampleRate, config.usbCustomVideoMode,
+                bundledUsbAudio, config.usbAudioSampleRate, config.usbCustomVideoMode, config.usbAudioBitDepth.nativeValue,
             )
             check(nativeHandle != 0L) { "无法初始化 USB 摄像头" }
             val format = NativeUsbCapture.nativeFormat(nativeHandle)
@@ -144,6 +149,18 @@ class UsbRecorderEngine(
             videoHeight = format[1]
             audioRate = format[2]
             audioChannels = format[3]
+            if (bundledUsbAudio && config.usbAudioDevice != null) check(audioRate > 0 && audioChannels in 1..2) {
+                "所选 USB 音频设备没有可用的 PCM 输入，请检查采样率和位深"
+            }
+            if (bundledUsbAudio && audioRate > 0) onNotice("USB 音频：${device.productName ?: device.deviceName} · " +
+                "$audioRate Hz · $audioChannels 声道 · ${format[4]} bit")
+        }
+        if (config.hasAudio && config.usbAudioInput == UsbAudioInput.USB && config.usbAudioDevice != null && !bundledUsbAudio) {
+            val capture = UsbUacCapture.open(context, config.usbAudioDevice, config.usbAudioSampleRate, config.usbAudioBitDepth)
+            usbAudioCapture = capture
+            audioRate = capture.sampleRate
+            audioChannels = capture.channels
+            onNotice("USB 音频：${capture.device.name} · $audioRate Hz · $audioChannels 声道 · ${capture.bitDepth} bit")
         }
         if (config.hasAudio && config.usbAudioInput == UsbAudioInput.SYSTEM) {
             val capture = SystemAudioCapture.open(context, config.systemAudioInput, config.usbAudioSampleRate)
@@ -225,6 +242,7 @@ class UsbRecorderEngine(
         }
         systemAudioCapture?.start(onPcm = ::onUsbAudioPcm,
             onError = { onError("系统音频采集失败：$it") }, onNotice = onNotice)
+        usbAudioCapture?.start(this)
         Thread({
             try { Thread.sleep(5_000) } catch (_: InterruptedException) { return@Thread }
             if (running.get() && frameCount.get() == 0L) {
@@ -365,6 +383,13 @@ class UsbRecorderEngine(
         if (!running.get() || !audioCaptureEnabled) return
         audioPipeline?.offer(bytes, timestampNs)
     }
+    override fun onUsbAudioPcmRaw(bytes: ByteArray, timestampNs: Long, sampleBytes: Int) {
+        if (running.get() && audioCaptureEnabled) audioPipeline?.offer(bytes, timestampNs, sampleBytes)
+    }
+
+    fun usesUsbDevice(name: String): Boolean = config.cameraId == USB_CAMERA_PREFIX + name ||
+        usbAudioCapture?.device?.deviceName == name || (config.hasAudio && config.usbAudioInput == UsbAudioInput.USB &&
+            config.usbAudioDevice?.deviceName == name)
 
     private fun onProcessedAudioPcm(bytes: ByteArray, timestampNs: Long) {
         val sampleFrames = bytes.size / (audioChannels * 2)
@@ -613,6 +638,8 @@ class UsbRecorderEngine(
         mjpegDecodePool.close()
         systemAudioCapture?.close()
         systemAudioCapture = null
+        usbAudioCapture?.close()
+        usbAudioCapture = null
         synchronized(nativeMetricsLock) {
             val handle = nativeHandle
             nativeHandle = 0L

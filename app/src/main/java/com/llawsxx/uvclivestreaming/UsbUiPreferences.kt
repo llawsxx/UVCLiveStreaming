@@ -20,6 +20,9 @@ import com.llawsxx.uvclivestreaming.recording.SystemAudioInputSettings
 import com.llawsxx.uvclivestreaming.recording.SystemAudioInputPreferences
 import com.llawsxx.uvclivestreaming.recording.TestCardSettings
 import com.llawsxx.uvclivestreaming.recording.TestCardPreferences
+import com.llawsxx.uvclivestreaming.recording.UsbAudioDevice
+import com.llawsxx.uvclivestreaming.recording.UsbAudioBitDepth
+import com.llawsxx.uvclivestreaming.recording.UsbAudioDevicePreferences
 
 internal data class UsbUiSettings(
     val selectedDeviceName: String? = null,
@@ -29,6 +32,8 @@ internal data class UsbUiSettings(
     val customVideoModeSelected: Boolean = false,
     val includeAudio: Boolean = true,
     val audioInput: UsbAudioInput = UsbAudioInput.USB,
+    val usbAudioDevice: UsbAudioDevice? = null,
+    val usbAudioBitDepth: UsbAudioBitDepth = UsbAudioBitDepth.AUTO,
     val systemAudioInput: SystemAudioInputSettings = SystemAudioInputSettings(),
     val audioPreviewEnabled: Boolean = false,
     val audioDsp: AudioDspSettings = AudioDspSettings(),
@@ -78,6 +83,8 @@ internal object UsbUiPreferences {
             customVideoModeSelected = p.getBoolean("customVideoModeSelected", false),
             includeAudio = p.getBoolean("includeAudio", true),
             audioInput = enumValue(p.getString("audioInput", null), UsbAudioInput.USB),
+            usbAudioDevice = UsbAudioDevicePreferences.load(p),
+            usbAudioBitDepth = UsbAudioDevicePreferences.bitDepth(p),
             systemAudioInput = SystemAudioInputPreferences.load(p),
             audioPreviewEnabled = p.getBoolean("audioPreviewEnabled", false),
             videoColorGrade = VideoColorGradeSettings(
@@ -151,6 +158,8 @@ internal object UsbUiPreferences {
             .putBoolean("customVideoModeSelected", settings.customVideoModeSelected)
             .putBoolean("includeAudio", settings.includeAudio)
             .putString("audioInput", settings.audioInput.name)
+            .also { UsbAudioDevicePreferences.save(it, settings.usbAudioDevice) }
+            .putString("uacBitDepth", settings.usbAudioBitDepth.name)
             .also { SystemAudioInputPreferences.save(it, settings.systemAudioInput) }
             .putBoolean("audioPreviewEnabled", settings.audioPreviewEnabled)
             .putBoolean("videoColorGradeEnabled", settings.videoColorGrade.enabled)

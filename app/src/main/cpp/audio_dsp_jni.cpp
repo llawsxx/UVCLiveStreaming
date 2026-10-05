@@ -53,11 +53,45 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeAudioDsp_process(
     for (int i = 0; i < size / 2; ++i) {
         float sample = dsp->samples[i];
         if (!std::isfinite(sample)) sample = 0.f;
-        const int value = std::clamp(static_cast<int>(std::lrintf(sample * 32768.f)), -32768, 32767);
+        const int value = static_cast<int>(std::lrintf(std::clamp(sample, -1.f, 32767.f / 32768.f) * 32768.f));
         dsp->pcm[i * 2] = static_cast<uint8_t>(value);
         dsp->pcm[i * 2 + 1] = static_cast<uint8_t>(value >> 8);
     }
     env->SetByteArrayRegion(bytes, 0, size, reinterpret_cast<const jbyte *>(dsp->pcm.data()));
+}
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeAudioDsp_processWide(
+        JNIEnv *env, jobject, jlong handle, jbyteArray bytes, jint sample_bytes) {
+    auto *dsp = reinterpret_cast<PcmDsp *>(handle);
+    if (!dsp || !bytes || sample_bytes < 2 || sample_bytes > 4) return nullptr;
+    const int size = env->GetArrayLength(bytes);
+    if (size % (dsp->channels * sample_bytes) != 0) return nullptr;
+    const int samples = size / sample_bytes;
+    dsp->pcm.resize(size);
+    dsp->samples.resize(samples);
+    env->GetByteArrayRegion(bytes, 0, size, reinterpret_cast<jbyte *>(dsp->pcm.data()));
+    if (env->ExceptionCheck()) return nullptr;
+    const float divisor = sample_bytes == 2 ? 32768.f : sample_bytes == 3 ? 8388608.f : 2147483648.f;
+    for (int i = 0; i < samples; ++i) {
+        uint32_t raw = 0;
+        for (int b = 0; b < sample_bytes; ++b) raw |= uint32_t(dsp->pcm[i * sample_bytes + b]) << (8 * b);
+        if (sample_bytes == 3 && (raw & 0x800000u)) raw |= 0xff000000u;
+        const int32_t value = sample_bytes == 2 ? int16_t(raw) : int32_t(raw);
+        dsp->samples[i] = value / divisor;
+    }
+    audio_dsp_process_float(dsp->state, dsp->samples.data(), dsp->samples.data(), samples / dsp->channels);
+    auto output = env->NewByteArray(samples * 2);
+    if (!output) return nullptr;
+    dsp->pcm.resize(samples * 2);
+    for (int i = 0; i < samples; ++i) {
+        float sample = dsp->samples[i];
+        if (!std::isfinite(sample)) sample = 0.f;
+        const int value = static_cast<int>(std::lrintf(std::clamp(sample, -1.f, 32767.f / 32768.f) * 32768.f));
+        dsp->pcm[i * 2] = static_cast<uint8_t>(value);
+        dsp->pcm[i * 2 + 1] = static_cast<uint8_t>(value >> 8);
+    }
+    env->SetByteArrayRegion(output, 0, samples * 2, reinterpret_cast<const jbyte *>(dsp->pcm.data()));
+    return output;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_llawsxx_uvclivestreaming_recording_NativeAudioDsp_destroy(

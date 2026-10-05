@@ -17,7 +17,7 @@ internal class UsbAudioPipeline(
     private val onStopped: () -> Unit = {},
     private val factory: (Int, Int, AudioDspSettings) -> PcmDsp = NativeAudioDsp::processor,
 ) : AutoCloseable {
-    private data class Packet(val bytes: ByteArray, val timestampNs: Long, val sequence: Long)
+    private data class Packet(val bytes: ByteArray, val timestampNs: Long, val sequence: Long, val sampleBytes: Int)
     private data class Span(val timestampNs: Long, val frames: Int, var offset: Int = 0)
     private val queue = ArrayBlockingQueue<Packet>(16)
     private val sequence = AtomicLong()
@@ -38,9 +38,9 @@ internal class UsbAudioPipeline(
         peakMeter.offer(bytes, timestampNs)
         onPcm(bytes, timestampNs)
     }
-    fun offer(bytes: ByteArray, timestampNs: Long) {
-        if (closed.get() || bytes.isEmpty() || bytes.size % (channels * 2) != 0) return
-        val packet = Packet(bytes, timestampNs, sequence.getAndIncrement())
+    fun offer(bytes: ByteArray, timestampNs: Long, sampleBytes: Int = 2) {
+        if (closed.get() || bytes.isEmpty() || sampleBytes !in 2..4 || bytes.size % (channels * sampleBytes) != 0) return
+        val packet = Packet(bytes, timestampNs, sequence.getAndIncrement(), sampleBytes)
         if (!queue.offer(packet)) {
             if (queue.poll() != null) droppedPackets.incrementAndGet()
             if (!queue.offer(packet)) droppedPackets.incrementAndGet()
@@ -98,11 +98,12 @@ internal class UsbAudioPipeline(
                 applied = next
                 lastSequence = packet.sequence
                 val dsp = processor
-                if (dsp == null) publishPcm(packet.bytes, packet.timestampNs)
+                if (dsp == null) publishPcm(PcmSamples.toPcm16(packet.bytes, packet.sampleBytes), packet.timestampNs)
                 else {
-                    spans.add(Span(packet.timestampNs, packet.bytes.size / frameBytes))
-                    dsp.process(packet.bytes)
-                    emit(packet.bytes)
+                    spans.add(Span(packet.timestampNs, packet.bytes.size / (channels * packet.sampleBytes)))
+                    val output = if (packet.sampleBytes == 2) packet.bytes.also(dsp::process)
+                        else dsp.processWide(packet.bytes, packet.sampleBytes)
+                    emit(output)
                 }
             }
             finishProcessor()
