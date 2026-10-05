@@ -18,9 +18,12 @@ import com.llawsxx.uvclivestreaming.recording.VideoColorTransfer
 import com.llawsxx.uvclivestreaming.recording.UsbAudioInput
 import com.llawsxx.uvclivestreaming.recording.SystemAudioInputSettings
 import com.llawsxx.uvclivestreaming.recording.SystemAudioInputPreferences
+import com.llawsxx.uvclivestreaming.recording.TestCardSettings
+import com.llawsxx.uvclivestreaming.recording.TestCardPreferences
 
 internal data class UsbUiSettings(
     val selectedDeviceName: String? = null,
+    val testCard: TestCardSettings = TestCardSettings(),
     val selectedModeDisplay: String? = null,
     val customVideoMode: UsbCustomVideoMode = UsbCustomVideoMode(),
     val customVideoModeSelected: Boolean = false,
@@ -65,6 +68,7 @@ internal object UsbUiPreferences {
         val p = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
         return UsbUiSettings(
             selectedDeviceName = p.getString("selectedDeviceName", null),
+            testCard = TestCardPreferences.load(p),
             selectedModeDisplay = p.getString("selectedModeDisplay", null),
             customVideoMode = UsbCustomVideoMode(
                 p.getInt("customVideoWidth", 1280), p.getInt("customVideoHeight", 720),
@@ -138,6 +142,7 @@ internal object UsbUiPreferences {
     fun save(context: Context, settings: UsbUiSettings) {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
             .putString("selectedDeviceName", settings.selectedDeviceName)
+            .also { TestCardPreferences.save(it, settings.testCard) }
             .putString("selectedModeDisplay", settings.selectedModeDisplay)
             .putInt("customVideoWidth", settings.customVideoMode.width)
             .putInt("customVideoHeight", settings.customVideoMode.height)

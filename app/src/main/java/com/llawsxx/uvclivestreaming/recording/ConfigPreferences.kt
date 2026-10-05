@@ -16,6 +16,7 @@ object ConfigPreferences {
         return RecordingConfig(
             mode = enumValue(p.getString("mode", null), RecordingMode.AUDIO_VIDEO),
             cameraId = p.getString("cameraId", "").orEmpty(),
+            testCard = TestCardPreferences.load(p),
             usbVideoInputFormat = enumValue(p.getString("usbVideoInputFormat", null), UsbVideoInputFormat.AUTO),
             usbCustomVideoMode = p.getBoolean("usbCustomVideoMode", false),
             usbAudioSampleRate = p.getInt("usbAudioSampleRate", 0).coerceAtLeast(0),
@@ -242,6 +243,7 @@ object ConfigPreferences {
         p.edit()
             .putString("mode", c.mode.name)
             .putString("cameraId", c.cameraId)
+            .also { TestCardPreferences.save(it, c.testCard) }
             .putString("usbVideoInputFormat", c.usbVideoInputFormat.name)
             .putBoolean("usbCustomVideoMode", c.usbCustomVideoMode)
             .putInt("usbAudioSampleRate", c.usbAudioSampleRate.coerceAtLeast(0))

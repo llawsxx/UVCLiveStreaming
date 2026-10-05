@@ -213,6 +213,7 @@ enum class RawDemosaicAlgorithm(val label: String) : Serializable {
 data class RecordingConfig(
     val mode: RecordingMode = RecordingMode.AUDIO_VIDEO,
     val cameraId: String = "",
+    val testCard: TestCardSettings = TestCardSettings(),
     val usbVideoInputFormat: UsbVideoInputFormat = UsbVideoInputFormat.AUTO,
     val usbCustomVideoMode: Boolean = false,
     /** Zero selects a supported USB microphone rate automatically. */

@@ -87,6 +87,10 @@ import com.llawsxx.uvclivestreaming.recording.SystemAudioInputSettings
 import com.llawsxx.uvclivestreaming.recording.SystemAudioDevice
 import com.llawsxx.uvclivestreaming.recording.SystemAudioCapture
 import com.llawsxx.uvclivestreaming.recording.resolveSystemAudioDevice
+import com.llawsxx.uvclivestreaming.recording.TestCardSettings
+import com.llawsxx.uvclivestreaming.recording.TestCardPattern
+import com.llawsxx.uvclivestreaming.recording.runTestCardFrames
+import com.llawsxx.uvclivestreaming.recording.videoSmoothingFrameRate
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
 import com.llawsxx.uvclivestreaming.recording.VideoCodec
 import com.llawsxx.uvclivestreaming.recording.VideoColorRange
@@ -181,8 +185,13 @@ private fun UsbCameraScreen() {
     val outputControlsEnabled = state !is RecorderState.Starting && state !is RecorderState.Stopping &&
         (state as? RecorderState.Recording)?.stats?.outputChangePending != true
     var devices by remember { mutableStateOf(usbVideoDevices(manager)) }
-    var selectedName by rememberSaveable { mutableStateOf(uiSettings.selectedDeviceName ?: devices.firstOrNull()?.deviceName) }
+    var selectedName by rememberSaveable { mutableStateOf(uiSettings.selectedDeviceName?.takeIf { name ->
+        name == TestCardSettings.DEVICE_ID || devices.any { it.deviceName == name }
+    } ?: devices.firstOrNull()?.deviceName ?: TestCardSettings.DEVICE_ID) }
     val selected = devices.firstOrNull { it.deviceName == selectedName }
+    val testCardSelected = selectedName == TestCardSettings.DEVICE_ID
+    val hasVideoInput = selected != null || testCardSelected
+    var testCardSettings by rememberSaveable { mutableStateOf(uiSettings.testCard) }
     var surface by remember { mutableStateOf<Surface?>(null) }
     var surfaceRevision by remember { mutableStateOf(0) }
     var idlePreview by remember { mutableStateOf<UsbIdlePreview?>(null) }
@@ -196,6 +205,7 @@ private fun UsbCameraScreen() {
     var audioInput by rememberSaveable { mutableStateOf(uiSettings.audioInput) }
     var systemAudioInput by rememberSaveable { mutableStateOf(uiSettings.systemAudioInput) }
     val systemAudioDevices = rememberSystemAudioInputDevices()
+    val captureAudioEnabled = includeAudio && (!testCardSelected || audioInput == UsbAudioInput.SYSTEM)
     var audioPreviewEnabled by rememberSaveable { mutableStateOf(uiSettings.audioPreviewEnabled) }
     var audioDsp by remember { mutableStateOf(uiSettings.audioDsp) }
     var videoColorGrade by remember { mutableStateOf(uiSettings.videoColorGrade) }
@@ -229,6 +239,8 @@ private fun UsbCameraScreen() {
     var selectedMode by rememberSaveable {
         mutableStateOf<UsbVideoMode?>(uiSettings.customVideoMode.takeIf { uiSettings.customVideoModeSelected && it.valid }?.asVideoMode())
     }
+    val effectiveMode = if (testCardSelected) UsbVideoMode("RGB", testCardSettings.width, testCardSettings.height,
+        testCardSettings.fps, UsbVideoInputFormat.RGB, "测试卡") else selectedMode
     var audioRate by rememberSaveable { mutableStateOf(uiSettings.audioRate) }
     var bufferFrames by rememberSaveable { mutableStateOf(uiSettings.bufferFrames) }
     var previewRequestRevision by remember { mutableStateOf(0L) }
@@ -273,7 +285,7 @@ private fun UsbCameraScreen() {
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(
-        selectedName, selectedMode?.display, customVideoMode, includeAudio, audioInput, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
+        selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -282,6 +294,7 @@ private fun UsbCameraScreen() {
     ) {
         UsbUiPreferences.save(context, UsbUiSettings(
             selectedDeviceName = selectedName,
+            testCard = testCardSettings,
             selectedModeDisplay = selectedMode?.display,
             customVideoMode = customVideoMode,
             customVideoModeSelected = selectedMode?.custom == true,
@@ -324,7 +337,7 @@ private fun UsbCameraScreen() {
         val cameraGranted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.CAMERA
         ) == PackageManager.PERMISSION_GRANTED
-        if (!cameraGranted) {
+        if (!cameraGranted && !testCardSelected) {
             pendingAction = UsbAction.NONE
             previewRequested = false
             message = "未获得相机权限，无法录像或串流"
@@ -356,13 +369,13 @@ private fun UsbCameraScreen() {
                     }
                     UsbManager.ACTION_USB_DEVICE_ATTACHED, UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                         devices = usbVideoDevices(manager)
-                        if (devices.none { it.deviceName == selectedName }) {
+                        if (selectedName != TestCardSettings.DEVICE_ID && devices.none { it.deviceName == selectedName }) {
                             idlePreview?.stop()
                             idlePreview = null
                             if (RecorderController.state.value is RecorderState.Recording ||
                                 RecorderController.state.value is RecorderState.Starting
                             ) RecorderController.stop(context)
-                            selectedName = devices.firstOrNull()?.deviceName
+                            selectedName = devices.firstOrNull()?.deviceName ?: TestCardSettings.DEVICE_ID
                             selectedMode = null
                             previewRequested = false
                             usbPermissionRequestPending = false
@@ -391,6 +404,15 @@ private fun UsbCameraScreen() {
         val scanKey = selectedName to usbPermissionEpoch
         modesReadyKey = null
         modes = emptyList()
+        if (testCardSelected) {
+            modes = listOf(Triple(720,480,60.0), Triple(1280,720,30.0), Triple(1280,720,60.0),
+                Triple(1920,1080,30.0), Triple(1920,1080,60.0), Triple(1920,1080,59.94),
+                Triple(1920,1080,29.97), Triple(3840,2160,30.0), Triple(3840,2160,60.0)).map { (w,h,fps) ->
+                UsbVideoMode("RGB", w,h,fps,UsbVideoInputFormat.RGB,"测试卡")
+            }
+            modesReadyKey = scanKey
+            return@LaunchedEffect
+        }
         val device = selected
         if (device == null || !manager.hasPermission(device)) {
             modesReadyKey = scanKey
@@ -422,7 +444,7 @@ private fun UsbCameraScreen() {
 
     LaunchedEffect(surface, surfaceRevision, recording, previewEnabled, lowFrameRatePreview, foregroundEpoch) {
         idlePreview?.updateSurface(surface)
-        RecorderController.attachPreview(surface, selectedMode?.width ?: 1280, selectedMode?.height ?: 720,
+        RecorderController.attachPreview(surface, effectiveMode?.width ?: 1280, effectiveMode?.height ?: 720,
             enabled = recording && previewEnabled && surface?.isValid == true, lowFrameRate = lowFrameRatePreview)
     }
 
@@ -445,6 +467,10 @@ private fun UsbCameraScreen() {
             pendingAction = UsbAction.PREVIEW
     }
 
+    LaunchedEffect(testCardSettings, timestampSmoothingNtscEnabled) {
+        if (testCardSelected && previewRequested && !recording && idlePreview != null && pendingAction == UsbAction.NONE)
+            pendingAction = UsbAction.PREVIEW
+    }
     LaunchedEffect(systemAudioDevices) {
         if (!recording) systemAudioInput.device?.let { selectedDevice ->
             resolveSystemAudioDevice(selectedDevice, systemAudioDevices)?.takeIf { it != selectedDevice }?.let {
@@ -490,9 +516,10 @@ private fun UsbCameraScreen() {
 
     LaunchedEffect(pendingAction, selectedName, usbPermissionEpoch, runtimePermissionEpoch, modesReadyKey) {
         if (pendingAction == UsbAction.NONE) return@LaunchedEffect
-        val device = selected ?: run {
+        val device = selected
+        if (device == null && !testCardSelected) {
             pendingAction = UsbAction.NONE
-            message = "没有可用的 USB 摄像头"
+            message = "请选择 USB 摄像头或测试卡"
             return@LaunchedEffect
         }
         // Android P+ requires CAMERA runtime permission before USB permission
@@ -504,8 +531,8 @@ private fun UsbCameraScreen() {
             pendingAction == UsbAction.RTMP
         ) {
             val needed = buildList {
-                add(Manifest.permission.CAMERA)
-                if (includeAudio && (pendingAction != UsbAction.PREVIEW || audioInput == UsbAudioInput.SYSTEM)) {
+                if (!testCardSelected) add(Manifest.permission.CAMERA)
+                if (captureAudioEnabled && (pendingAction != UsbAction.PREVIEW || audioInput == UsbAudioInput.SYSTEM)) {
                     add(Manifest.permission.RECORD_AUDIO)
                 }
                 if (pendingAction != UsbAction.PREVIEW && Build.VERSION.SDK_INT >= 33) {
@@ -517,7 +544,7 @@ private fun UsbCameraScreen() {
                 return@LaunchedEffect
             }
         }
-        if (!manager.hasPermission(device)) {
+        if (device != null && !manager.hasPermission(device)) {
             if (usbPermissionRequestPending) return@LaunchedEffect
             usbPermissionRequestPending = true
             // The USB service appends EXTRA_DEVICE and
@@ -541,15 +568,17 @@ private fun UsbCameraScreen() {
             } else {
                 val previous = idlePreview
                 idlePreview = null
-                val width = selectedMode?.width ?: 1280
-                val height = selectedMode?.height ?: 720
-                val fps = selectedMode?.fps ?: 30.0
-                val videoFormat = selectedMode?.inputFormat ?: UsbVideoInputFormat.AUTO
+                val width = effectiveMode?.width ?: 1280
+                val height = effectiveMode?.height ?: 720
+                val fps = effectiveMode?.fps ?: 30.0
+                val videoFormat = effectiveMode?.inputFormat ?: UsbVideoInputFormat.AUTO
                 val beginPreview: () -> Unit = {
                     if (previewRequested && requestRevision == previewRequestRevision &&
-                        selectedName == device.deviceName && !recording && target.isValid) {
+                        selectedName == (device?.deviceName ?: TestCardSettings.DEVICE_ID) && !recording && target.isValid) {
                         UsbIdlePreview(context, manager, device, target, width, height, fps, videoFormat,
-                            bufferFrames, includeAudio, audioRate, yuvMatrix, sourceRange, lowFrameRatePreview,
+                            bufferFrames, captureAudioEnabled, audioRate, yuvMatrix, sourceRange, lowFrameRatePreview,
+                            testCard = testCardSettings.takeIf { testCardSelected }?.copy(
+                                fps = videoSmoothingFrameRate(fps, timestampSmoothingNtscEnabled)),
                             audioInput = audioInput, systemAudioInput = systemAudioInput,
                             initialAudioDsp = audioDsp,
                             initialColorGrade = videoColorGrade,
@@ -580,7 +609,7 @@ private fun UsbCameraScreen() {
             val previous = idlePreview
             idlePreview = null
             val config = usbRecordingConfig(
-                context, device, selectedMode, includeAudio, audioInput, systemAudioInput, audioRate, bufferFrames, container,
+                context, device, effectiveMode, testCardSettings, captureAudioEnabled, audioInput, systemAudioInput, audioRate, bufferFrames, container,
                 requested == UsbAction.STREAM, requested == UsbAction.RTMP, rtmpUrl,
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
@@ -601,18 +630,19 @@ private fun UsbCameraScreen() {
         }
     }
 
-    if (customModeDialog) UsbCustomVideoModeDialog(customVideoMode,
+    if (customModeDialog) UsbCustomVideoModeDialog(if (testCardSelected) UsbCustomVideoMode(
+        testCardSettings.width, testCardSettings.height, testCardSettings.fps, UsbVideoInputFormat.RGB) else customVideoMode,
         onDismiss = { customModeDialog = false },
         onApply = {
-            customVideoMode = it
-            selectedMode = it.asVideoMode()
+            if (testCardSelected) testCardSettings = testCardSettings.copy(width = it.width, height = it.height, fps = it.fps)
+            else { customVideoMode = it; selectedMode = it.asVideoMode() }
             customModeDialog = false
             if (previewRequested && !recording) pendingAction = UsbAction.PREVIEW
-        })
+        }, virtual = testCardSelected)
     BackHandler(enabled = fullscreen) { fullscreen = false; activity?.exitUsbFullscreen() }
     UsbCameraWorkspace(
-        aspectRatio = (selectedMode?.width ?: 1280).toFloat() / (selectedMode?.height ?: 720),
-        includeAudio = includeAudio,
+        aspectRatio = (effectiveMode?.width ?: 1280).toFloat() / (effectiveMode?.height ?: 720),
+        includeAudio = captureAudioEnabled,
         fullscreen = fullscreen,
         onExitFullscreen = { fullscreen = false; activity?.exitUsbFullscreen() },
         lowFrameRatePreview = lowFrameRatePreview,
@@ -678,14 +708,14 @@ private fun UsbCameraScreen() {
                         recentAudioPeakDb = -60f
                         message = "预览已停止"
                     } else { previewRequested = true; pendingAction = UsbAction.PREVIEW }
-                }, enabled = !recording && (hasPreview || selected != null), modifier = Modifier.weight(1f)) {
+                }, enabled = !recording && (hasPreview || hasVideoInput), modifier = Modifier.weight(1f)) {
                     Text(if (hasPreview) "停止预览" else "预览")
                 }
                 Button(onClick = {
                     if (fileRecording) RecorderController.stopRecording(context)
                     else if (recording) RecorderController.startRecording(context, container)
                     else { previewRequested = false; pendingAction = UsbAction.RECORD }
-                }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                }, enabled = hasVideoInput && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                     outputControlsEnabled, modifier = Modifier.weight(1f)) {
                     Text(if (fileRecording) "停止录制" else "开始录制")
                 }
@@ -695,7 +725,7 @@ private fun UsbCameraScreen() {
                     if (httpStreaming) RecorderController.stopHttpOutput(context)
                     else if (recording) RecorderController.startHttpOutput(context)
                     else { previewRequested = false; pendingAction = UsbAction.STREAM }
-                }, enabled = selected != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                }, enabled = hasVideoInput && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                     outputControlsEnabled, modifier = Modifier.weight(1f)) {
                     Text(if (httpStreaming) "停止 HTTP" else "HTTP 串流")
                 }
@@ -703,7 +733,7 @@ private fun UsbCameraScreen() {
                     if (rtmpStreaming) RecorderController.stopRtmpOutput(context)
                     else if (recording) RecorderController.startRtmpOutput(context, rtmpUrl)
                     else { previewRequested = false; pendingAction = UsbAction.RTMP }
-                }, enabled = selected != null && rtmpUrl.startsWith("rtmp://") &&
+                }, enabled = hasVideoInput && rtmpUrl.startsWith("rtmp://") &&
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && outputControlsEnabled,
                     modifier = Modifier.weight(1f)) {
                     Text(if (rtmpStreaming) "停止 RTMP" else "RTMP 推流")
@@ -717,10 +747,14 @@ private fun UsbCameraScreen() {
                     Box(Modifier.weight(1f)) {
                         OutlinedButton(onClick = { devicesExpanded = true }, enabled = !recording,
                             modifier = Modifier.fillMaxWidth()) {
-                            Text(selected?.productName?.takeIf { it.isNotBlank() } ?: selected?.deviceName ?: "选择摄像头",
+                            Text(if (testCardSelected) "测试卡（虚拟设备）" else selected?.productName?.takeIf { it.isNotBlank() } ?: selected?.deviceName ?: "选择摄像头",
                                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                         }
                         DropdownMenu(expanded = devicesExpanded, onDismissRequest = { devicesExpanded = false }) {
+                            DropdownMenuItem(text = { Text("测试卡（虚拟设备）") }, onClick = {
+                                idlePreview?.stop(); idlePreview = null; previewRequested = false
+                                selectedName = TestCardSettings.DEVICE_ID; devicesExpanded = false
+                            })
                             devices.forEach { device ->
                                 DropdownMenuItem(text = { Text("${device.productName ?: "USB 摄像头"} · ${device.deviceName}") },
                                     onClick = {
@@ -736,19 +770,20 @@ private fun UsbCameraScreen() {
                     }
                     OutlinedButton(onClick = {
                         devices = usbVideoDevices(manager)
-                        if (devices.none { it.deviceName == selectedName }) selectedName = devices.firstOrNull()?.deviceName
+                        if (!testCardSelected && devices.none { it.deviceName == selectedName }) selectedName = devices.firstOrNull()?.deviceName ?: TestCardSettings.DEVICE_ID
                     }) { Text("刷新") }
                 }
                 Box {
                     OutlinedButton(onClick = { modesExpanded = true }, enabled = !recording,
                         modifier = Modifier.fillMaxWidth()) {
-                        Text(selectedMode?.display ?: "自动 · 1280×720 · 30 fps")
+                        Text(effectiveMode?.display ?: "自动 · 1280×720 · 30 fps")
                     }
                     DropdownMenu(expanded = modesExpanded, onDismissRequest = { modesExpanded = false }) {
-                        DropdownMenuItem(text = { Text("自动 · 1280×720 · 30 fps") }, onClick = {
-                            selectedMode = null; modesExpanded = false
+                        DropdownMenuItem(text = { Text(if (testCardSelected) "默认 · 1920×1080 · 60 fps" else "自动 · 1280×720 · 30 fps") }, onClick = {
+                            if (testCardSelected) testCardSettings = TestCardSettings(pattern = testCardSettings.pattern) else selectedMode = null
+                            modesExpanded = false
                         })
-                        DropdownMenuItem(text = { Text("自定义分辨率／帧率／格式…") }, onClick = {
+                        DropdownMenuItem(text = { Text(if (testCardSelected) "自定义分辨率／帧率…" else "自定义分辨率／帧率／格式…") }, onClick = {
                             selectedMode?.let { mode ->
                                 mode.inputFormat?.takeIf { it in UsbCustomVideoMode.formats }?.let { format ->
                                     customVideoMode = UsbCustomVideoMode(mode.width, mode.height, mode.fps, format)
@@ -758,14 +793,24 @@ private fun UsbCameraScreen() {
                         })
                         modes.forEach { mode ->
                             DropdownMenuItem(text = { Text(mode.display) }, enabled = mode.canRecord,
-                                onClick = { selectedMode = mode; modesExpanded = false })
+                                onClick = {
+                                    if (testCardSelected) testCardSettings = testCardSettings.copy(width = mode.width, height = mode.height, fps = mode.fps)
+                                    else selectedMode = mode
+                                    modesExpanded = false
+                                })
                         }
                     }
                 }
-                if (devices.isEmpty()) Text("没有检测到 UVC 视频接口；请连接 USB 摄像头。")
-                UsbSettingChoice("YUV → RGB 矩阵", UsbYuvMatrix.entries, yuvMatrix, !recording,
+                if (testCardSelected) {
+                    UsbSettingChoice("测试卡样式", TestCardPattern.entries, testCardSettings.pattern, !recording,
+                        { it.label }) { testCardSettings = testCardSettings.copy(pattern = it) }
+                    Text("GPU 生成 RGB；W/H 为像素尺寸，FPS 为源帧率，F 为帧号，T 为秒表。",
+                        style = MaterialTheme.typography.bodySmall)
+                    if (includeAudio && audioInput == UsbAudioInput.USB) Text("测试卡只提供视频；如需音频请选择系统麦克风。")
+                } else if (devices.isEmpty()) Text("没有检测到 UVC 视频接口；可使用虚拟测试卡。")
+                UsbSettingChoice("YUV → RGB 矩阵", UsbYuvMatrix.entries, yuvMatrix, !recording && !testCardSelected,
                     { it.label }) { yuvMatrix = it }
-                UsbSettingChoice("源范围", UsbSourceRange.entries, sourceRange, !recording,
+                UsbSettingChoice("源范围", UsbSourceRange.entries, sourceRange, !recording && !testCardSelected,
                     { it.label }) { sourceRange = it }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = includeAudio, onCheckedChange = { includeAudio = it }, enabled = !recording)
@@ -977,7 +1022,8 @@ private fun usbVideoDevices(manager: UsbManager): List<UsbDevice> = manager.devi
     .filter { device -> (0 until device.interfaceCount).any { device.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_VIDEO } }
     .sortedBy { it.deviceName }
 
-private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVideoMode?, audio: Boolean,
+private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVideoMode?,
+                               testCard: TestCardSettings, audio: Boolean,
                                audioInput: UsbAudioInput, systemAudioInput: SystemAudioInputSettings,
                                audioRate: Int, bufferFrames: Int, container: ContainerFormat,
                                httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, videoCodec: VideoCodec,
@@ -994,7 +1040,8 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
     val saved = ConfigPreferences.load(context)
     return RecordingConfig(
         mode = if (audio) RecordingMode.AUDIO_VIDEO else RecordingMode.VIDEO,
-        cameraId = UsbRecorderEngine.USB_CAMERA_PREFIX + device.deviceName,
+        cameraId = device?.let { UsbRecorderEngine.USB_CAMERA_PREFIX + it.deviceName } ?: TestCardSettings.DEVICE_ID,
+        testCard = testCard,
         width = mode?.width ?: 1280,
         height = mode?.height ?: 720,
         fps = mode?.fps ?: 30.0,
@@ -1038,7 +1085,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice, mode: UsbVid
 private class UsbIdlePreview(
     private val context: Context,
     private val manager: UsbManager,
-    private val device: UsbDevice,
+    private val device: UsbDevice?,
     initialSurface: Surface,
     private val width: Int,
     private val height: Int,
@@ -1053,6 +1100,7 @@ private class UsbIdlePreview(
     initialAudioDsp: AudioDspSettings,
     initialColorGrade: VideoColorGradeSettings,
     private val customVideoMode: Boolean,
+    private val testCard: TestCardSettings?,
     private val audioInput: UsbAudioInput,
     private val systemAudioInput: SystemAudioInputSettings,
     private val onMessage: (String) -> Unit,
@@ -1096,22 +1144,24 @@ private class UsbIdlePreview(
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
-        mjpegDecodePool.start()
+        if (testCard == null) mjpegDecodePool.start()
         Thread({
             var handle = 0L
             var connection: android.hardware.usb.UsbDeviceConnection? = null
             var gateAcquired = false
             var systemCapture: SystemAudioCapture? = null
             try {
-                usbPreviewGate.acquire()
-                gateAcquired = true
+                if (testCard == null) { usbPreviewGate.acquire(); gateAcquired = true }
                 if (stopped.get()) return@Thread
-                connection = manager.openDevice(device)
-                checkNotNull(connection) { "无法打开 USB 摄像头" }
-                handle = NativeUsbCapture.nativeOpen(checkNotNull(connection).fileDescriptor, width, height, fps,
-                    videoFormat.nativeValue, audioEnabled && audioInput == UsbAudioInput.USB, audioRate, customVideoMode)
+                if (testCard == null) {
+                    connection = manager.openDevice(checkNotNull(device))
+                    checkNotNull(connection) { "无法打开 USB 摄像头" }
+                    handle = NativeUsbCapture.nativeOpen(checkNotNull(connection).fileDescriptor, width, height, fps,
+                        videoFormat.nativeValue, audioEnabled && audioInput == UsbAudioInput.USB, audioRate, customVideoMode)
+                    check(handle != 0L) { "无法初始化 USB 摄像头" }
+                }
                 if (stopped.get()) return@Thread
-                val format = NativeUsbCapture.nativeFormat(handle)
+                val format = if (handle != 0L) NativeUsbCapture.nativeFormat(handle) else intArrayOf(width, height, 0, 0)
                 if (audioEnabled && audioInput == UsbAudioInput.SYSTEM) {
                     systemCapture = SystemAudioCapture.open(context, systemAudioInput, audioRate)
                 }
@@ -1131,21 +1181,21 @@ private class UsbIdlePreview(
                             } })
                     }
                 }
-                mainHandler.post { onMessage("USB 预览：${format[0]}×${format[1]}") }
+                mainHandler.post { onMessage("${if (testCard != null) "测试卡" else "USB"}预览：${format[0]}×${format[1]}") }
                 renderThread = Thread({ renderFrames() }, "usb-preview-render").apply { start() }
-                NativeUsbCapture.nativeStart(handle, this)
+                if (handle != 0L) NativeUsbCapture.nativeStart(handle, this)
                 systemCapture?.start(onPcm = ::onUsbAudioPcm,
                     onError = { error ->
                         mainHandler.post { onMessage("系统音频采集失败：$error") }
                         stop()
                     }, onNotice = { notice -> mainHandler.post { if (!stopped.get()) onMessage(notice) } })
                 val receiveRate = UsbReceiveRate()
-                receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(handle))
+                if (handle != 0L) receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(handle)) else null
                 while (!finished.await(1, TimeUnit.SECONDS)) {
-                    usbVideoReceiveBitsPerSecond = receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(handle))
+                    usbVideoReceiveBitsPerSecond = if (handle != 0L) receiveRate.sample(NativeUsbCapture.nativeReceivedVideoBytes(handle)) else null
                 }
             } catch (error: Throwable) {
-                if (!stopped.get()) mainHandler.post { onMessage("USB 预览失败：${error.message}") }
+                if (!stopped.get()) mainHandler.post { onMessage("${if (testCard != null) "测试卡" else "USB"}预览失败：${error.message}") }
             } finally {
                 usbVideoReceiveBitsPerSecond = null
                 runCatching { systemCapture?.close() }
@@ -1223,6 +1273,13 @@ private class UsbIdlePreview(
                 var timestampOriginNs = Long.MIN_VALUE
                 var wallOriginNs = 0L
                 var boundRevision = -1L
+                if (testCard != null) {
+                    runTestCardFrames(testCard, System.nanoTime(), { !stopped.get() }) { frame ->
+                        gpu.setColorGrade(colorGradeSettings)
+                        gpu.render(frame, GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate))
+                    }
+                    return@use
+                }
                 while (!stopped.get()) {
                     val decoded = mjpegDecodePool.poll(5)
                     var converted: RawVideoConverter.ConvertedFrame? = null
@@ -1276,7 +1333,7 @@ private class UsbIdlePreview(
             // Normal preview shutdown.
         } catch (error: Throwable) {
             if (!stopped.get()) {
-                mainHandler.post { onMessage("USB GPU 预览失败：${error.message}") }
+                mainHandler.post { onMessage("${if (testCard != null) "测试卡" else "USB"} GPU 预览失败：${error.message}") }
                 stop()
             }
         } finally {

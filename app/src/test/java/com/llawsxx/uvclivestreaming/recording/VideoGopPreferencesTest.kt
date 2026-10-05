@@ -6,6 +6,18 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VideoGopPreferencesTest {
+    @Test fun virtualDevicePatternAndFractionalModeSurviveRestart() {
+        val prefs = preferences(mutableMapOf())
+        val card = TestCardSettings(TestCardPattern.RESOLUTION, 720, 480, 60000.0 / 1001)
+        ConfigPreferences.save(prefs, RecordingConfig(cameraId = TestCardSettings.DEVICE_ID, testCard = card))
+        val loaded = ConfigPreferences.load(prefs)
+        assertEquals(TestCardSettings.DEVICE_ID, loaded.cameraId)
+        assertEquals(card, loaded.testCard)
+        assertEquals(TestCardSettings(), ConfigPreferences.load(preferences(mutableMapOf())).testCard)
+        prefs.edit().putString("testCardFps", "NaN").apply()
+        assertEquals(TestCardSettings(), ConfigPreferences.load(prefs).testCard)
+    }
+
     private fun preferences(values: MutableMap<String, Any?>): SharedPreferences {
         val editor = Proxy.newProxyInstance(SharedPreferences.Editor::class.java.classLoader,
             arrayOf(SharedPreferences.Editor::class.java)) { proxy, method, args ->

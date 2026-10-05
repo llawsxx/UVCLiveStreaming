@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
 
-/** USB video with either UAC PCM or an independently captured system audio input. */
+/** USB or procedural test video with UAC PCM or an independently captured system audio input. */
 @RequiresApi(Build.VERSION_CODES.O)
 class UsbRecorderEngine(
     private val context: Context,
@@ -103,6 +103,7 @@ class UsbRecorderEngine(
     private var audioTimestampSmoother: TimestampSmoother? = null
     private var audioOutputTimestampSmoother: TimestampSmoother? = null
     private val previewRevision = AtomicLong()
+    private val isTestCard = config.cameraId == TestCardSettings.DEVICE_ID
 
     override fun start(preview: Surface?, previewEnabled: Boolean, previewRotationDegrees: Int) {
         this.preview = preview
@@ -113,7 +114,7 @@ class UsbRecorderEngine(
             try {
                 prepare()
             } catch (error: Throwable) {
-                if (running.get()) onError("USB 摄像头启动失败：${error.message}")
+                if (running.get()) onError("${if (isTestCard) "测试卡" else "USB 摄像头"}启动失败：${error.message}")
             } finally {
                 setupDone.countDown()
                 if (!running.get()) releaseResources()
@@ -122,22 +123,28 @@ class UsbRecorderEngine(
     }
 
     private fun prepare() {
-        val manager = context.getSystemService(UsbManager::class.java)
-        val deviceName = config.cameraId.removePrefix(USB_CAMERA_PREFIX)
-        val device = requireNotNull(manager.deviceList[deviceName]) { "USB 摄像头已断开" }
-        check(manager.hasPermission(device)) { "缺少 USB 摄像头访问权限" }
-        usbConnection = requireNotNull(manager.openDevice(device)) { "无法打开 USB 摄像头" }
-        nativeHandle = NativeUsbCapture.nativeOpen(
-            checkNotNull(usbConnection).fileDescriptor,
-            config.width, config.height, config.fps, config.usbVideoInputFormat.nativeValue,
-            config.hasAudio && config.usbAudioInput == UsbAudioInput.USB, config.usbAudioSampleRate, config.usbCustomVideoMode,
-        )
-        check(nativeHandle != 0L) { "无法初始化 USB 摄像头" }
-        val format = NativeUsbCapture.nativeFormat(nativeHandle)
-        videoWidth = format[0]
-        videoHeight = format[1]
-        audioRate = format[2]
-        audioChannels = format[3]
+        if (isTestCard) {
+            videoWidth = config.width
+            videoHeight = config.height
+            require(config.testCard.copy(width = videoWidth, height = videoHeight, fps = config.fps).valid) { "测试卡参数无效" }
+        } else {
+            val manager = context.getSystemService(UsbManager::class.java)
+            val deviceName = config.cameraId.removePrefix(USB_CAMERA_PREFIX)
+            val device = requireNotNull(manager.deviceList[deviceName]) { "USB 摄像头已断开" }
+            check(manager.hasPermission(device)) { "缺少 USB 摄像头访问权限" }
+            usbConnection = requireNotNull(manager.openDevice(device)) { "无法打开 USB 摄像头" }
+            nativeHandle = NativeUsbCapture.nativeOpen(
+                checkNotNull(usbConnection).fileDescriptor,
+                config.width, config.height, config.fps, config.usbVideoInputFormat.nativeValue,
+                config.hasAudio && config.usbAudioInput == UsbAudioInput.USB, config.usbAudioSampleRate, config.usbCustomVideoMode,
+            )
+            check(nativeHandle != 0L) { "无法初始化 USB 摄像头" }
+            val format = NativeUsbCapture.nativeFormat(nativeHandle)
+            videoWidth = format[0]
+            videoHeight = format[1]
+            audioRate = format[2]
+            audioChannels = format[3]
+        }
         if (config.hasAudio && config.usbAudioInput == UsbAudioInput.SYSTEM) {
             val capture = SystemAudioCapture.open(context, config.systemAudioInput, config.usbAudioSampleRate)
             systemAudioCapture = capture
@@ -152,7 +159,8 @@ class UsbRecorderEngine(
         if (videoWidth != config.width || videoHeight != config.height) {
             onNotice("USB 摄像头使用 ${videoWidth}×${videoHeight}，所选分辨率不可用")
         }
-        if (config.hasAudio && !audioCaptureEnabled) onNotice("USB 摄像头未提供可用 UAC 麦克风路由，已跳过音频，视频仍可录制")
+        if (config.hasAudio && !audioCaptureEnabled) onNotice(if (isTestCard) "测试卡仅提供视频，可选择系统麦克风添加音频"
+            else "USB 摄像头未提供可用 UAC 麦克风路由，已跳过音频，视频仍可录制")
         if (audioCaptureEnabled) {
             val monitor = UsbAudioMonitor(audioRate, audioChannels,
                 onError = { onNotice("音频预览已停止：$it") })
@@ -210,15 +218,17 @@ class UsbRecorderEngine(
         audioCodec?.start()
         startVideoDrain()
         if (audioCaptureEnabled) startAudioDrain()
-        mjpegDecodePool.start()
-        startVideoRender()
-        NativeUsbCapture.nativeStart(nativeHandle, this)
+        if (isTestCard) startTestCardRender() else {
+            mjpegDecodePool.start()
+            startVideoRender()
+            NativeUsbCapture.nativeStart(nativeHandle, this)
+        }
         systemAudioCapture?.start(onPcm = ::onUsbAudioPcm,
             onError = { onError("系统音频采集失败：$it") }, onNotice = onNotice)
         Thread({
             try { Thread.sleep(5_000) } catch (_: InterruptedException) { return@Thread }
             if (running.get() && frameCount.get() == 0L) {
-                onError("USB 摄像头连接后 5 秒内没有输出可解码的视频帧")
+                onError(if (isTestCard) "测试卡启动后 5 秒内没有编码输出" else "USB 摄像头连接后 5 秒内没有输出可解码的视频帧")
             }
         }, "usb-video-watchdog").start()
     }
@@ -329,6 +339,26 @@ class UsbRecorderEngine(
                 rawVideoConverter.close()
             }
         }, "usb-video-render").apply { start() }
+    }
+
+    private fun startTestCardRender() {
+        videoRenderThread = Thread({
+            try {
+                GpuVideoRenderer(checkNotNull(encoderInputSurface), initialColorGrade = colorGradeSettings).use { gpu ->
+                    val settings = config.testCard.copy(width = videoWidth, height = videoHeight,
+                        fps = videoSmoothingFrameRate(config.fps, config.usbTimestampSmoothingNtscEnabled))
+                    runTestCardFrames(settings, startedAtNs, running::get) { frame ->
+                        receivedVideoFrames.incrementAndGet()
+                        gpu.setColorGrade(colorGradeSettings)
+                        gpu.render(frame, GpuVideoRenderer.PreviewTarget(preview.takeIf { previewEnabled },
+                            previewRevision.get(), RecorderController.previewLowFrameRate))
+                        renderedVideoFrames.set(gpu.encodedFrameCount)
+                    }
+                }
+            } catch (error: Throwable) {
+                if (running.get()) onError("测试卡渲染失败：${error.message}")
+            }
+        }, "test-card-render").apply { start() }
     }
 
     override fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long) {

@@ -16,7 +16,7 @@ import androidx.core.app.ServiceCompat
 import com.llawsxx.uvclivestreaming.MainActivity
 import com.llawsxx.uvclivestreaming.R
 
-/** Foreground lifetime owner for USB UVC/UAC capture. */
+/** Foreground lifetime owner for USB capture or virtual test-card generation. */
 class RecordingService : Service() {
     private var engine: UsbRecorderEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -28,7 +28,7 @@ class RecordingService : Service() {
         super.onCreate()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "USB 录像串流", NotificationManager.IMPORTANCE_LOW),
+                NotificationChannel(CHANNEL_ID, "视频录像串流", NotificationManager.IMPORTANCE_LOW),
             )
         }
     }
@@ -54,15 +54,15 @@ class RecordingService : Service() {
 
     private fun startCapture(config: RecordingConfig) {
         if (engine != null) return
-        if (!config.cameraId.startsWith(UsbRecorderEngine.USB_CAMERA_PREFIX)) {
-            fail("当前版本只支持 USB 摄像头")
+        if (!config.cameraId.startsWith(UsbRecorderEngine.USB_CAMERA_PREFIX) && config.cameraId != TestCardSettings.DEVICE_ID) {
+            fail("请选择 USB 摄像头或测试卡")
             return
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             fail("USB 录像需要 Android 8.0 或更高版本")
             return
         }
-        startAsForeground("正在准备 USB 摄像头", config)
+        startAsForeground(if (config.cameraId == TestCardSettings.DEVICE_ID) "正在准备测试卡" else "正在准备 USB 摄像头", config)
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:usb-capture")
             .apply { acquire() }
@@ -128,7 +128,8 @@ class RecordingService : Service() {
 
     private fun startAsForeground(content: String, config: RecordingConfig) {
         val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            (if (config.hasVideo) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0) or
+            (if (config.cameraId == TestCardSettings.DEVICE_ID) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                else if (config.hasVideo) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0) or
                 (if (config.hasAudio) android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
         } else 0
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(content), serviceType)
@@ -136,6 +137,10 @@ class RecordingService : Service() {
 
     private fun updateNotification(content: String) =
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(content))
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopCapture("系统已结束后台测试卡服务，请返回 APP 后重新启动")
+    }
 
     private fun notification(content: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),

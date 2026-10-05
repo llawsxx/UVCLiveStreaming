@@ -31,6 +31,10 @@ internal class GpuVideoRenderer(
     private var boundPreview: PreviewTarget? = null
     private val previewFrameLimiter = PreviewFrameLimiter()
     private var program = 0
+    private var testProgram = 0
+    private var testLutEnabledLocation = -1
+    private var testLutInfoLocation = -1
+    private var testLutTextureLocation = -1
     private val textures = IntArray(4)
     private val lutWorker = VideoColorLutWorker(initialColorGrade, onError = {
         Log.e("UsbGpuRenderer", "Color LUT bake failed", it)
@@ -192,6 +196,7 @@ internal class GpuVideoRenderer(
     }
 
     private fun upload(frame: GpuVideoFrame) {
+        if (frame.testCard != null) return
         val cw = frame.chromaWidth
         val ch = frame.chromaHeight
         require(cw in 1..frame.width && ch in 1..frame.height)
@@ -239,43 +244,61 @@ internal class GpuVideoRenderer(
         val dw = (frame.width * scale).toInt().coerceAtLeast(1)
         val dh = (frame.height * scale).toInt().coerceAtLeast(1)
         GLES20.glViewport((width - dw) / 2, (height - dh) / 2, dw, dh)
-        GLES20.glUseProgram(program)
-        val position = GLES20.glGetAttribLocation(program, "aPosition")
-        val uv = GLES20.glGetAttribLocation(program, "aUv")
+        val card = frame.testCard
+        if (card != null && testProgram == 0) {
+            testProgram = createProgram(TestCardShader.fragment)
+            testLutEnabledLocation = GLES20.glGetUniformLocation(testProgram, "uGradeEnabled")
+            testLutInfoLocation = GLES20.glGetUniformLocation(testProgram, "uLutInfo")
+            testLutTextureLocation = GLES20.glGetUniformLocation(testProgram, "uColorLut")
+        }
+        val shader = if (card != null) testProgram else program
+        GLES20.glUseProgram(shader)
+        val position = GLES20.glGetAttribLocation(shader, "aPosition")
+        val uv = GLES20.glGetAttribLocation(shader, "aUv")
         vertices.position(0)
         GLES20.glEnableVertexAttribArray(position)
         GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 16, vertices)
         vertices.position(2)
         GLES20.glEnableVertexAttribArray(uv)
         GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 16, vertices)
-        for (plane in 0..2) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + plane)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[plane])
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uPlane$plane"), plane)
+        if (card != null) {
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(shader, "uTestPattern"), card.pattern.ordinal)
+            GLES20.glUniform4f(GLES20.glGetUniformLocation(shader, "uTestMode"), frame.width.toFloat(), frame.height.toFloat(),
+                card.fps.toFloat(), (card.index % 1_000_000).toFloat())
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(shader, "uTestSeconds"), ((card.index / card.fps) % 10_000).toFloat())
+        } else {
+            for (plane in 0..2) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + plane)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[plane])
+                GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uPlane$plane"), plane)
+            }
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uLayout"), frame.layout)
+            val fullRange = sourceRange.isFullRange(frame.fullRange)
+            val tenBit = frame.layout == GpuVideoFrame.YUV10
+            GLES20.glUniformMatrix3fv(GLES20.glGetUniformLocation(program, "uYuvToRgb"), 1, false,
+                if (tenBit) { if (fullRange) fullRangeMatrix10 else tvRangeMatrix10 }
+                else { if (fullRange) fullRangeMatrix else tvRangeMatrix }, 0)
+            val maxSample = if (tenBit) 1023f else 255f
+            val sampleScale = if (tenBit) 4f else 1f
+            GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uYuvOffset"),
+                if (fullRange) 0f else -16f * sampleScale / maxSample,
+                -128f * sampleScale / maxSample, -128f * sampleScale / maxSample)
+            GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uRgbRange"),
+                if (fullRange) 0f else -16f / 255f, if (fullRange) 1f else 255f / 219f)
         }
-        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uLayout"), frame.layout)
-        val fullRange = sourceRange.isFullRange(frame.fullRange)
-        val tenBit = frame.layout == GpuVideoFrame.YUV10
-        GLES20.glUniformMatrix3fv(GLES20.glGetUniformLocation(program, "uYuvToRgb"), 1, false,
-            if (tenBit) { if (fullRange) fullRangeMatrix10 else tvRangeMatrix10 }
-            else { if (fullRange) fullRangeMatrix else tvRangeMatrix }, 0)
-        val maxSample = if (tenBit) 1023f else 255f
-        val sampleScale = if (tenBit) 4f else 1f
-        GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uYuvOffset"),
-            if (fullRange) 0f else -16f * sampleScale / maxSample,
-            -128f * sampleScale / maxSample, -128f * sampleScale / maxSample)
-        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uRgbRange"),
-            if (fullRange) 0f else -16f / 255f, if (fullRange) 1f else 255f / 219f)
-        GLES20.glUniform1i(lutEnabledLocation, if (lutEnabled) 1 else 0)
+        val gradeLocation = if (card != null) testLutEnabledLocation else lutEnabledLocation
+        val infoLocation = if (card != null) testLutInfoLocation else lutInfoLocation
+        val samplerLocation = if (card != null) testLutTextureLocation else lutTextureLocation
+        GLES20.glUniform1i(gradeLocation, if (lutEnabled) 1 else 0)
         if (lutEnabled) {
             val lut = checkNotNull(uploadedLut)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE3)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3])
-            GLES20.glUniform1i(lutTextureLocation, 3)
-            GLES20.glUniform4f(lutInfoLocation, lut.size.toFloat(), lut.columns.toFloat(), lut.width.toFloat(), lut.height.toFloat())
+            GLES20.glUniform1i(samplerLocation, 3)
+            GLES20.glUniform4f(infoLocation, lut.size.toFloat(), lut.columns.toFloat(), lut.width.toFloat(), lut.height.toFloat())
         } else {
             // Keep sampler types/units unambiguous even before the first LUT upload.
-            GLES20.glUniform1i(lutTextureLocation, 3)
+            GLES20.glUniform1i(samplerLocation, 3)
         }
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
     }
@@ -316,6 +339,7 @@ internal class GpuVideoRenderer(
             EGL14.eglMakeCurrent(display, parkingSurface, parkingSurface, context)
             GLES20.glDeleteTextures(4, textures, 0)
             if (program != 0) GLES20.glDeleteProgram(program)
+            if (testProgram != 0) GLES20.glDeleteProgram(testProgram)
         }
         EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
         for (window in arrayOf(previewWindow, encoderWindow, parkingSurface))
@@ -327,7 +351,7 @@ internal class GpuVideoRenderer(
         uploadedLut = null
     }
 
-    private fun createProgram(): Int {
+    private fun createProgram(fragmentSource: String = FRAGMENT): Int {
         fun compile(type: Int, source: String): Int {
             val shader = GLES20.glCreateShader(type)
             GLES20.glShaderSource(shader, source)
@@ -342,7 +366,7 @@ internal class GpuVideoRenderer(
             return shader
         }
         val vertex = compile(GLES20.GL_VERTEX_SHADER, VERTEX)
-        val fragment = try { compile(GLES20.GL_FRAGMENT_SHADER, FRAGMENT) }
+        val fragment = try { compile(GLES20.GL_FRAGMENT_SHADER, fragmentSource) }
             catch (error: Throwable) { GLES20.glDeleteShader(vertex); throw error }
         val result = GLES20.glCreateProgram()
         GLES20.glAttachShader(result, vertex); GLES20.glAttachShader(result, fragment)

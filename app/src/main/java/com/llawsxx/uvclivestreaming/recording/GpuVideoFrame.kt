@@ -12,6 +12,7 @@ internal data class GpuVideoFrame(
     val directBuffer: ByteBuffer? = null,
     val chromaWidth: Int = (width + 1) / 2,
     val chromaHeight: Int = (height + 1) / 2,
+    val testCard: TestCardFrame? = null,
 ) {
     val isRgb: Boolean get() = layout == RGB || layout == BGR
     val sampleBytes: Int get() = if (layout == YUV10) 2 else 1
