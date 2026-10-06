@@ -34,6 +34,23 @@ Android USB camera recorder and streamer.
 - Video and AAC audio bitrates are entered in kbps. Audio defaults to 192 kbps,
   accepts 16-512 kbps, and is saved for subsequent sessions. Recording and
   streaming use the same audio encoder settings.
+- The Device tab has a saved audio delay from -500 to +500 milliseconds (default
+  0), applied to PCM timestamps after optional PCM smoothing, before AAC encoding.
+  Negative values advance audio; positive values delay it. PCM samples are unchanged,
+  and the original monotonic capture clock remains in use with smoothing enabled or disabled.
+- The Output tab has a saved muxing reorder queue size (0-1024 packets, default 64).
+  Each recording, HTTP or RTMP output retains this many combined audio/video packets,
+  and interleaves by final encoder timestamps after optional AAC smoothing. Larger
+  queues give late packets more opportunity to be reordered and increase output latency;
+  0 writes immediately. Reordering is best effort within the retained window: packets
+  arriving behind already written media are still written with their original timestamps;
+  the reorder queue neither drops media nor guarantees globally increasing timestamps.
+  Audio and video each keep their original encoder order, even when PTS decreases.
+  Only their queue heads are compared by final PTS to choose the next interleaved packet;
+  equal timestamps retain arrival order. This also preserves video decode order for B frames.
+  Stopping a recording flushes its remaining packets. Both settings
+  take effect at the next capture start. This is a continuous reorder window, not a
+  direct implementation of FFmpeg's startup-only max_muxing_queue_size limit.
 - Selectable BT.601/BT.709/BT.2020 NCL/SMPTE 240M YUV-to-RGB conversion and automatic/TV/full source range, shared by preview and encoding.
 - Optional encoded H.264/HEVC SPS/VUI color rewriting with independent Range,
   Primaries, Transfer and Matrix selections; each field can preserve its original

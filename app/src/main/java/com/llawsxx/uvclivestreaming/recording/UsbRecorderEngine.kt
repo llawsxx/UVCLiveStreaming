@@ -66,7 +66,10 @@ class UsbRecorderEngine(
     private var usbConnection: android.hardware.usb.UsbDeviceConnection? = null
     private var videoCodec: MediaCodec? = null
     private var audioCodec: MediaCodec? = null
-    private val outputs = EncodedOutputRouter<MediaFormat>(::onOutputFailure)
+    private val outputs = EncodedOutputRouter<MediaFormat>(
+        muxingQueueSize = config.muxingQueueSize,
+        onFailure = ::onOutputFailure,
+    )
     private val vuiRewriter = if (config.spsVuiRewriteEnabled) H26xVuiRewriter(config) else null
     @Volatile private var outputFactory: UsbEncodedOutputFactory? = null
     private val outputChanges = AtomicInteger()
@@ -397,14 +400,15 @@ class UsbRecorderEngine(
         if (sampleFrames == 0) return
         audioMonitor?.offer(bytes)
         val smoothedTimestampNs = audioTimestampSmoother?.smooth(timestampNs, sampleFrames.toLong()) ?: timestampNs
+        val encoderTimestampNs = pcmTimestampWithDelayNs(smoothedTimestampNs, config.audioDelayMs)
         if (timestampNs - lastAudioLevelNs.get() >= 100_000_000L) {
             lastAudioLevelNs.set(timestampNs)
             audioLevelDb = usbPcmLevelDb(bytes)
             RecorderController.updateUsbAudioLevel(audioLevelDb)
         }
-        if (!audioQueue.offer(bytes to smoothedTimestampNs)) {
+        if (!audioQueue.offer(bytes to encoderTimestampNs)) {
             audioQueue.poll()
-            audioQueue.offer(bytes to smoothedTimestampNs)
+            audioQueue.offer(bytes to encoderTimestampNs)
         }
     }
 
@@ -464,31 +468,39 @@ class UsbRecorderEngine(
             val info = MediaCodec.BufferInfo()
             var endedInput = false
             var endedOutput = false
+            var pendingPcm: Pair<ByteArray, Long>? = null
+            var pendingOffset = 0
+            var lastInputEndUs = 0L
             try {
                 while (!endedOutput) {
                     val acceptingAudio = running.get() || !audioPipelineDone.get()
-                    val packet = if (acceptingAudio) audioQueue.poll(10, TimeUnit.MILLISECONDS) else audioQueue.poll()
+                    if (pendingPcm == null) {
+                        pendingPcm = if (acceptingAudio) audioQueue.poll(10, TimeUnit.MILLISECONDS) else audioQueue.poll()
+                        pendingOffset = 0
+                    }
+                    val packet = pendingPcm
                     if (packet != null) {
-                        var offset = 0
                         val bytes = packet.first
-                        while (offset < bytes.size) {
-                            val index = codec.dequeueInputBuffer(10_000)
-                            if (index < 0) break
-                            val buffer = codec.getInputBuffer(index) ?: continue
+                        val index = codec.dequeueInputBuffer(10_000)
+                        if (index >= 0) {
+                            val buffer = checkNotNull(codec.getInputBuffer(index))
                             buffer.clear()
-                            val length = minOf(buffer.remaining(), bytes.size - offset) / (audioChannels * 2) * (audioChannels * 2)
-                            if (length <= 0) break
-                            buffer.put(bytes, offset, length)
-                            val sampleOffsetNs = offset.toLong() * 1_000_000_000L / (audioChannels * 2 * audioRate)
-                            val ptsUs = ((packet.second + sampleOffsetNs - startedAtNs) / 1_000).coerceAtLeast(0)
+                            val length = minOf(buffer.remaining(), bytes.size - pendingOffset) / (audioChannels * 2) * (audioChannels * 2)
+                            check(length > 0) { "AAC input buffer cannot hold a PCM frame" }
+                            buffer.put(bytes, pendingOffset, length)
+                            val sampleOffsetNs = pendingOffset.toLong() * 1_000_000_000L / (audioChannels * 2 * audioRate)
+                            val ptsUs = (packet.second + sampleOffsetNs - startedAtNs) / 1_000
                             codec.queueInputBuffer(index, 0, length, ptsUs, 0)
-                            offset += length
+                            lastInputEndUs = ptsUs + length.toLong() * 1_000_000L / (audioChannels * 2 * audioRate)
+                            pendingOffset += length
+                            if (pendingOffset == bytes.size) pendingPcm = null
                         }
+                        // Keep unsent PCM and drain encoded output before retrying a busy input codec.
                     } else if (!running.get() && audioPipelineDone.get() && audioQueue.isEmpty() && !endedInput) {
                         val index = codec.dequeueInputBuffer(10_000)
                         if (index >= 0) {
                             codec.queueInputBuffer(index, 0, 0,
-                                (System.nanoTime() - startedAtNs) / 1_000, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                lastInputEndUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             endedInput = true
                         }
                     }

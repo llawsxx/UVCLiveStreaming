@@ -112,6 +112,8 @@ object ConfigPreferences {
                 ?.toFloat()?.takeIf { it.isFinite() }?.coerceIn(0f, 60f) ?: 2f,
             videoMaxBFrames = p.getInt("videoMaxBFrames", 0).coerceIn(0, 4),
             audioBitrate = p.getInt("audioBitrate", 192_000),
+            audioDelayMs = p.getInt("audioDelayMs", 0).coerceIn(-500, 500),
+            muxingQueueSize = p.getInt("muxingQueueSize", 64).coerceIn(0, 1024),
             audioAacProfile = enumValue(p.getString("audioAacProfile", null), AudioAacProfile.LC),
             audioSampleRate = p.getInt("audioSampleRate", 48_000),
             audioChannelCount = p.getInt("audioChannelCount", 2).coerceIn(1, 2),
@@ -311,6 +313,8 @@ object ConfigPreferences {
             .putFloat("videoKeyFrameIntervalSeconds", c.videoKeyFrameIntervalSeconds)
             .putInt("videoMaxBFrames", c.videoMaxBFrames)
             .putInt("audioBitrate", c.audioBitrate)
+            .putInt("audioDelayMs", c.audioDelayMs.coerceIn(-500, 500))
+            .putInt("muxingQueueSize", c.muxingQueueSize.coerceIn(0, 1024))
             .putString("audioAacProfile", c.audioAacProfile.name)
             .putInt("audioSampleRate", c.audioSampleRate)
             .putInt("audioChannelCount", c.audioChannelCount)

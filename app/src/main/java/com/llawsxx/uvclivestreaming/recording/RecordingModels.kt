@@ -279,6 +279,10 @@ data class RecordingConfig(
     val videoKeyFrameIntervalSeconds: Float = 2f,
     val videoMaxBFrames: Int = 0,
     val audioBitrate: Int = 192_000,
+    /** Applied to PCM timestamps after optional smoothing, before AAC encoding. */
+    val audioDelayMs: Int = 0,
+    /** Combined audio/video packets retained per output for timestamp interleaving. */
+    val muxingQueueSize: Int = 64,
     val audioAacProfile: AudioAacProfile = AudioAacProfile.LC,
     val audioSampleRate: Int = 48_000,
     val audioChannelCount: Int = 2,

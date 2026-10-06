@@ -28,9 +28,11 @@ internal data class EncodedOutputInfo(val path: String?, val segment: Int, val b
 
 /** Serializes output changes with both encoder drain threads, without owning capture or codecs. */
 internal class EncodedOutputRouter<F>(
+    private val muxingQueueSize: Int = 0,
     private val onFailure: (CaptureOutput, Exception) -> Unit,
 ) : Closeable {
-    private class Entry<F>(val output: EncodedOutput<F>, val needsVideo: Boolean, val needsAudio: Boolean) {
+    private class Entry<F>(val output: EncodedOutput<F>, val needsVideo: Boolean, val needsAudio: Boolean,
+                           val queue: MuxingPacketQueue) {
         var originUs: Long? = null
     }
     private val lock = Any()
@@ -46,7 +48,8 @@ internal class EncodedOutputRouter<F>(
             check(type !in entries) { "$type output already exists" }
             videoFormat?.let(output::setVideoFormat)
             audioFormat?.let(output::setAudioFormat)
-            entries[type] = Entry(output, needsVideo, needsAudio)
+            entries[type] = Entry(output, needsVideo, needsAudio,
+                MuxingPacketQueue(muxingQueueSize))
         } catch (error: Exception) {
             runCatching { output.close() }
             throw error
@@ -54,7 +57,16 @@ internal class EncodedOutputRouter<F>(
     }
 
     fun detach(type: CaptureOutput): Boolean {
-        val entry = synchronized(lock) { entries.remove(type) } ?: return false
+        val entry = synchronized(lock) {
+            val removed = entries.remove(type) ?: return false
+            try {
+                if (type == CaptureOutput.RECORDING) drain(removed, force = true)
+            } catch (error: Exception) {
+                runCatching { removed.output.close() }
+                throw error
+            }
+            removed
+        }
         // Removal waits for an in-flight write; later writes cannot reach the removed sink.
         entry.output.close()
         return true
@@ -69,15 +81,24 @@ internal class EncodedOutputRouter<F>(
         }
     }
 
-    fun write(sample: EncodedSample) = visit { entry ->
-        if ((entry.needsVideo && videoFormat == null) || (entry.needsAudio && audioFormat == null)) return@visit
-        if (entry.originUs == null) {
-            if (entry.needsVideo && (!sample.video || !sample.keyFrame)) return@visit
-            entry.originUs = sample.ptsUs
+    fun write(sample: EncodedSample) {
+        visit { entry ->
+            if ((entry.needsVideo && videoFormat == null) || (entry.needsAudio && audioFormat == null)) return@visit
+            if (entry.originUs == null) {
+                if (entry.needsVideo && (!sample.video || !sample.keyFrame)) return@visit
+                entry.originUs = sample.ptsUs
+            }
+            val pts = sample.ptsUs - checkNotNull(entry.originUs)
+            // Keep negative PCM/AAC timestamps intact until the output's common video origin is known.
+            // Clamping them to zero would turn an audio advance into repeated zero timestamps.
+            if (pts < 0) return@visit
+            entry.queue.offer(sample.copy(ptsUs = pts))
+            drain(entry)
         }
-        val pts = sample.ptsUs - checkNotNull(entry.originUs)
-        // Audio draining may arrive after the keyframe but describe earlier samples.
-        if (pts >= 0) entry.output.write(sample.copy(ptsUs = pts))
+    }
+
+    private fun drain(entry: Entry<F>, force: Boolean = false) {
+        while (true) entry.output.write(entry.queue.poll(force) ?: break)
     }
 
     private fun visit(before: () -> Unit = {}, action: (Entry<F>) -> Unit) {
@@ -110,6 +131,7 @@ internal class EncodedOutputRouter<F>(
     override fun close() {
         val outputs = synchronized(lock) {
             if (closed) return
+            visit { drain(it, force = true) }
             closed = true
             entries.values.map { it.output }.also { entries.clear() }
         }

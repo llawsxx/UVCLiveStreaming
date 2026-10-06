@@ -23,6 +23,68 @@ class EncodedOutputRouterTest {
         setVideoFormat("H264 CSD"); setAudioFormat("AAC CSD")
     }
 
+    @Test fun allOutputsInterleaveHeadsPreserveTrackOrderAndFlushTheirTails() {
+        val router = EncodedOutputRouter<String>(muxingQueueSize = 3) { _, error -> throw AssertionError(error) }
+        router.setVideoFormat("H264 CSD"); router.setAudioFormat("AAC CSD")
+        val outputs = CaptureOutput.entries.associateWith { Output() }
+        outputs.forEach { (type, output) -> router.attach(type, output, needsAudio = true) }
+        val frames = listOf(video(1_000_000, true), audio(1_200_000), video(1_040_000), audio(1_010_000))
+        frames.forEach(router::write)
+        outputs.values.forEach { assertEquals(listOf(0L), it.samples.map { sample -> sample.ptsUs }) }
+        router.close()
+        outputs.values.forEach { output ->
+            assertEquals(listOf(0L, 40_000L, 200_000L, 10_000L), output.samples.map { it.ptsUs })
+            assertSame(frames[0].data, output.samples[0].data)
+            assertSame(frames[2].data, output.samples[1].data)
+            assertSame(frames[1].data, output.samples[2].data)
+            assertSame(frames[3].data, output.samples[3].data)
+            assertTrue(output.closed)
+        }
+    }
+
+    @Test fun recordingStopsFlushOnlyItsQueueAndRestartStartsWithAFreshKeyframe() {
+        val router = EncodedOutputRouter<String>(muxingQueueSize = 3) { _, error -> throw AssertionError(error) }
+        router.setVideoFormat("H264 CSD"); router.setAudioFormat("AAC CSD")
+        val file = Output(); val stream = Output(); val newFile = Output()
+        router.attach(CaptureOutput.RECORDING, file, needsAudio = true)
+        router.attach(CaptureOutput.RTMP, stream, needsAudio = true)
+        router.write(video(1_000_000, true)); router.write(audio(1_020_000)); router.write(video(1_040_000))
+        assertTrue(router.detach(CaptureOutput.RECORDING))
+        assertEquals(listOf(0L, 20_000L, 40_000L), file.samples.map { it.ptsUs })
+        assertTrue(stream.samples.isEmpty())
+        router.attach(CaptureOutput.RECORDING, newFile, needsAudio = true)
+        router.write(audio(1_060_000)); router.write(video(1_080_000))
+        router.write(video(2_000_000, true)); router.write(audio(2_020_000))
+        router.close()
+        assertEquals(listOf(0L, 20_000L), newFile.samples.map { it.ptsUs })
+        assertEquals(listOf(0L, 20_000L, 40_000L, 60_000L, 80_000L, 1_000_000L, 1_020_000L),
+            stream.samples.map { it.ptsUs })
+    }
+
+    @Test fun negativeAudioPtsAreDiscardedInsteadOfClampedToZero() {
+        val router = EncodedOutputRouter<String>(muxingQueueSize = 3) { _, error -> throw AssertionError(error) }
+        router.setVideoFormat("H264 CSD"); router.setAudioFormat("AAC CSD")
+        val output = Output()
+        router.attach(CaptureOutput.RTMP, output, needsAudio = true)
+        router.write(video(0, true)); router.write(audio(-200_000)); router.write(audio(-100_000)); router.write(audio(20_000))
+        router.close()
+        assertEquals(listOf(0L, 20_000L), output.samples.map { it.ptsUs })
+    }
+
+    @Test fun cacheTooSmallStillWritesLateVideoWithoutDroppingFramesOrChangingTimestamps() {
+        val router = EncodedOutputRouter<String>(muxingQueueSize = 1) { _, error ->
+            throw AssertionError(error)
+        }
+        router.setVideoFormat("H264 CSD"); router.setAudioFormat("AAC CSD")
+        val output = Output(); router.attach(CaptureOutput.RTMP, output, needsAudio = true)
+        router.write(video(0, true)); router.write(audio(200_000)); router.write(audio(220_000))
+        router.write(video(40_000)); router.write(video(80_000))
+        router.write(video(240_000, true)); router.write(audio(260_000))
+        router.close()
+        assertEquals(listOf(0L, 200_000L, 40_000L, 80_000L, 220_000L, 240_000L, 260_000L),
+            output.samples.map { it.ptsUs })
+    }
+
     @Test fun recordingAndStreamingConsumeTheSameEncodedAudioAndVideoBytes() {
         router().use { router ->
             val recording = Output(); val rtmp = Output()

@@ -6,6 +6,24 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VideoGopPreferencesTest {
+    @Test fun audioDelayAndMuxingWindowPersistAndClampToTheirSupportedRanges() {
+        val data = mutableMapOf<String, Any?>()
+        val prefs = preferences(data)
+        assertEquals(0, ConfigPreferences.load(prefs).audioDelayMs)
+        assertEquals(64, ConfigPreferences.load(prefs).muxingQueueSize)
+        for (delay in listOf(-500, -200, 0, 200, 500)) {
+            for (window in listOf(0, 1, 64, 1024)) {
+                ConfigPreferences.save(prefs, RecordingConfig(audioDelayMs = delay, muxingQueueSize = window))
+                val restored = ConfigPreferences.load(prefs)
+                assertEquals(delay, restored.audioDelayMs)
+                assertEquals(window, restored.muxingQueueSize)
+            }
+        }
+        data["audioDelayMs"] = -1000; data["muxingQueueSize"] = 5000
+        assertEquals(-500, ConfigPreferences.load(prefs).audioDelayMs)
+        assertEquals(1024, ConfigPreferences.load(prefs).muxingQueueSize)
+    }
+
     @Test fun rtmpSendTimeoutDefaultsToTenSecondsAndSurvivesRestart() {
         val prefs = preferences(mutableMapOf())
         assertEquals(10, ConfigPreferences.load(prefs).rtmpSendTimeoutSeconds)

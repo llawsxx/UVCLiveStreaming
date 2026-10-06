@@ -47,6 +47,8 @@ internal data class UsbUiSettings(
     val rtmpSendTimeoutSeconds: Int = 10,
     val videoBitrateKbps: String = "12000",
     val audioBitrateKbps: String = "192",
+    val audioDelayMs: String = "0",
+    val muxingQueueSize: String = "64",
     val gopSeconds: String = "2",
     val bFrames: String = "0",
     val videoCodec: VideoCodec = VideoCodec.H264,
@@ -131,6 +133,8 @@ internal object UsbUiPreferences {
             audioBitrateKbps = p.getString("audioBitrateKbps", null)
                 ?: (ConfigPreferences.load(context).audioBitrate / 1_000).coerceIn(16, 512).toString(),
             gopSeconds = p.getString("gopSeconds", "2").orEmpty(),
+            audioDelayMs = p.getString("audioDelayMs", "0").orEmpty(),
+            muxingQueueSize = p.getString("muxingQueueSize", "64").orEmpty(),
             bFrames = p.getString("bFrames", "0").orEmpty(),
             videoCodec = enumValue(p.getString("videoCodec", null), VideoCodec.H264),
             bitrateMode = enumValue(p.getString("bitrateMode", null), VideoBitrateMode.DEFAULT),
@@ -205,6 +209,8 @@ internal object UsbUiPreferences {
             .putInt("rtmpSendTimeoutSeconds", settings.rtmpSendTimeoutSeconds.coerceIn(3, 30))
             .putString("videoBitrateKbps", settings.videoBitrateKbps)
             .putString("audioBitrateKbps", settings.audioBitrateKbps)
+            .putString("audioDelayMs", settings.audioDelayMs)
+            .putString("muxingQueueSize", settings.muxingQueueSize)
             .remove("videoBitrate")
             .putString("gopSeconds", settings.gopSeconds)
             .putString("bFrames", settings.bFrames)

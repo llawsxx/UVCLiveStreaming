@@ -255,6 +255,10 @@ private fun UsbCameraScreen() {
     var videoBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.videoBitrateKbps) }
     var audioBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.audioBitrateKbps) }
     val audioBitrateValue = audioBitrateKbps.toIntOrNull()?.takeIf { it in 16..512 }
+    var audioDelayMs by rememberSaveable { mutableStateOf(uiSettings.audioDelayMs) }
+    val audioDelayValue = audioDelayMs.toIntOrNull()?.takeIf { it in -500..500 }
+    var muxingQueueSize by rememberSaveable { mutableStateOf(uiSettings.muxingQueueSize) }
+    val muxingQueueValue = muxingQueueSize.toIntOrNull()?.takeIf { it in 0..1024 }
     var gopSeconds by rememberSaveable { mutableStateOf(uiSettings.gopSeconds) }
     val gopSecondsValue = gopSeconds.toFloatOrNull()?.takeIf { it.isFinite() && it in 0f..30f }
     var bFrames by rememberSaveable { mutableStateOf(uiSettings.bFrames) }
@@ -324,7 +328,7 @@ private fun UsbCameraScreen() {
     }
     LaunchedEffect(
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
-        container, confirmStopOutputs, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
+        container, confirmStopOutputs, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
@@ -353,6 +357,8 @@ private fun UsbCameraScreen() {
             rtmpSendTimeoutSeconds = rtmpSendTimeoutSeconds,
             videoBitrateKbps = videoBitrateKbps,
             audioBitrateKbps = audioBitrateKbps,
+            audioDelayMs = audioDelayMs,
+            muxingQueueSize = muxingQueueSize,
             gopSeconds = gopSeconds,
             bFrames = bFrames,
             videoCodec = videoCodec,
@@ -674,6 +680,14 @@ private fun UsbCameraScreen() {
                 message = "音频码率请输入 16～512 kbps 的整数"
                 return@LaunchedEffect
             }
+            if (includeAudio && audioDelayValue == null) {
+                message = "音频延迟请输入 -500～500 毫秒的整数，负数提前、正数延迟"
+                return@LaunchedEffect
+            }
+            if (muxingQueueValue == null) {
+                message = "封装排序缓存请输入 0～1024 个包的整数"
+                return@LaunchedEffect
+            }
             if (timestampSmoothingEnabled && timestampSmoothingDelta == null) {
                 message = "时间戳平滑最大偏差请输入大于或等于 0 的秒数"
                 return@LaunchedEffect
@@ -687,6 +701,7 @@ private fun UsbCameraScreen() {
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
                 (audioBitrateValue ?: 192) * 1_000,
+                audioDelayValue ?: 0, muxingQueueValue,
                 gopSecondsValue,
                 if (gopSecondsValue == 0f) 0 else bFrames.toIntOrNull()?.coerceIn(0, 4) ?: 0,
                 timestampSmoothingEnabled, timestampSmoothingNtscEnabled, timestampSmoothingDelta ?: 0.1,
@@ -952,6 +967,18 @@ private fun UsbCameraScreen() {
                 }
                 UsbSettingChoice("源采样率", audioRates, audioRate, !recording && includeAudio,
                     { if (it == 0) "自动" else "$it Hz" }) { audioRate = it }
+                OutlinedTextField(
+                    value = audioDelayMs,
+                    onValueChange = { audioDelayMs = it.filter { char -> char.isDigit() || char == '-' || char == '+' } },
+                    enabled = !recording && includeAudio,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    isError = includeAudio && audioDelayValue == null,
+                    label = { Text("音频延迟（毫秒）") },
+                    supportingText = { Text(if (audioDelayValue == null) "请输入 -500～500 的整数"
+                        else "负数提前，正数延迟，0 不偏移；调整 PCM 时间戳，下次启动录像／串流生效。") },
+                )
             }
             UsbSettingsTab.COLOR -> {
                 VideoColorGradePanel(videoColorGrade) { videoColorGrade = it }
@@ -1029,6 +1056,18 @@ private fun UsbCameraScreen() {
                 }
             }
             UsbSettingsTab.OUTPUT -> {
+                OutlinedTextField(
+                    value = muxingQueueSize,
+                    onValueChange = { muxingQueueSize = it.filter(Char::isDigit) },
+                    enabled = !recording,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = muxingQueueValue == null,
+                    label = { Text("封装排序缓存（包）") },
+                    supportingText = { Text(if (muxingQueueValue == null) "请输入 0～1024 的整数"
+                        else "默认 64，0 立即写入；缓存音视频包后按最终时间戳交错写入。数量越大，排序窗口和输出延迟越大；下次启动生效。") },
+                )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = confirmStopOutputs, onCheckedChange = { confirmStopOutputs = it })
                     Text("停止前确认")
@@ -1165,6 +1204,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, rtmpBufferMs: Int,
                                rtmpSendTimeoutSeconds: Int, videoCodec: VideoCodec,
                                bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
+                               audioDelayMs: Int, muxingQueueSize: Int,
                                gopSeconds: Float, bFrames: Int,
                                timestampSmoothingEnabled: Boolean, timestampSmoothingNtscEnabled: Boolean,
                                timestampSmoothingMaxDeltaSeconds: Double,
@@ -1210,6 +1250,8 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         videoKeyFrameIntervalSeconds = gopSeconds,
         videoMaxBFrames = bFrames,
         audioBitrate = audioBitrate,
+        audioDelayMs = audioDelayMs.coerceIn(-500, 500),
+        muxingQueueSize = muxingQueueSize.coerceIn(0, 1024),
         // Preserve the chosen recording container when starting a stream-only encoder session.
         container = container,
         httpStreamPort = saved.httpStreamPort,
