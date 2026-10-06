@@ -7,6 +7,8 @@ Android USB camera recorder and streamer.
 - MediaCodec H.264/H.265 and AAC encoding, MP4 or MPEG-TS recording.
 - Multi-client HTTP MPEG-TS server and RTMP publishing.
 - Recording, HTTP streaming and RTMP publishing can be started/stopped independently during one capture session; they share the same H.264/HEVC + AAC encoder output. Newly added outputs begin at a keyframe with their own timestamp origin.
+- Stop buttons for recording, HTTP and RTMP ask for confirmation by default.
+  The saved "Confirm before stopping" setting in the Output tab can disable it.
 - RTMP H.264/HEVC (`hvc1`) + AAC publishing with reconnect.
 - The main status and Output tab show RTMP reconnect attempts for the current
   publishing session. The first connection is excluded; restarting RTMP resets

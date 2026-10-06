@@ -41,6 +41,7 @@ internal data class UsbUiSettings(
     val previewEnabled: Boolean = true,
     val lowFrameRatePreview: Boolean = false,
     val container: ContainerFormat = ContainerFormat.MP4,
+    val confirmStopOutputs: Boolean = true,
     val rtmpUrl: String = "",
     val rtmpBufferMs: Int = 5_000,
     val rtmpSendTimeoutSeconds: Int = 10,
@@ -121,6 +122,7 @@ internal object UsbUiPreferences {
             previewEnabled = p.getBoolean("previewEnabled", true),
             lowFrameRatePreview = p.getBoolean("lowFrameRatePreview", false),
             container = enumValue(p.getString("container", null), ContainerFormat.MP4),
+            confirmStopOutputs = p.getBoolean("confirmStopOutputs", true),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
             rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
             rtmpSendTimeoutSeconds = p.getInt("rtmpSendTimeoutSeconds", 10).coerceIn(3, 30),
@@ -197,6 +199,7 @@ internal object UsbUiPreferences {
             .putBoolean("previewEnabled", settings.previewEnabled)
             .putBoolean("lowFrameRatePreview", settings.lowFrameRatePreview)
             .putString("container", settings.container.name)
+            .putBoolean("confirmStopOutputs", settings.confirmStopOutputs)
             .putString("rtmpUrl", settings.rtmpUrl)
             .putInt("rtmpBufferMs", settings.rtmpBufferMs.coerceIn(100, 30_000))
             .putInt("rtmpSendTimeoutSeconds", settings.rtmpSendTimeoutSeconds.coerceIn(3, 30))

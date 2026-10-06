@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -39,6 +40,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -148,6 +150,9 @@ class UsbCameraActivity : ComponentActivity() {
 }
 
 private enum class UsbAction { NONE, PREVIEW, RECORD, STREAM, RTMP }
+private enum class UsbStopAction(val label: String) {
+    RECORDING("录像"), HTTP("HTTP 串流"), RTMP("RTMP 推流")
+}
 
 private val usbPreviewGate = Semaphore(1)
 
@@ -201,6 +206,22 @@ private fun UsbCameraScreen() {
     var surfaceRevision by remember { mutableStateOf(0) }
     var idlePreview by remember { mutableStateOf<UsbIdlePreview?>(null) }
     var pendingAction by remember { mutableStateOf(UsbAction.NONE) }
+    var pendingStop by remember { mutableStateOf<UsbStopAction?>(null) }
+    var confirmStopOutputs by rememberSaveable { mutableStateOf(uiSettings.confirmStopOutputs) }
+
+    fun stopOutput(target: UsbStopAction) {
+        val stats = (RecorderController.state.value as? RecorderState.Recording)?.stats ?: return
+        if (stats.outputChangePending) return
+        when (target) {
+            UsbStopAction.RECORDING -> if (stats.fileRecording) RecorderController.stopRecording(context)
+            UsbStopAction.HTTP -> if (stats.httpStreaming) RecorderController.stopHttpOutput(context)
+            UsbStopAction.RTMP -> if (stats.rtmpStreaming) RecorderController.stopRtmpOutput(context)
+        }
+    }
+
+    fun requestStop(target: UsbStopAction) {
+        if (confirmStopOutputs) pendingStop = target else stopOutput(target)
+    }
     // Do not issue repeated requests while the system USB service is deciding
     // (some vendor builds return permission=false without showing the dialog).
     var usbPermissionRequestPending by remember { mutableStateOf(false) }
@@ -303,7 +324,7 @@ private fun UsbCameraScreen() {
     }
     LaunchedEffect(
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
-        container, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
+        container, confirmStopOutputs, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
@@ -326,6 +347,7 @@ private fun UsbCameraScreen() {
             previewEnabled = previewEnabled,
             lowFrameRatePreview = lowFrameRatePreview,
             container = container,
+            confirmStopOutputs = confirmStopOutputs,
             rtmpUrl = rtmpUrl,
             rtmpBufferMs = rtmpBufferMs,
             rtmpSendTimeoutSeconds = rtmpSendTimeoutSeconds,
@@ -690,6 +712,32 @@ private fun UsbCameraScreen() {
             customModeDialog = false
             if (previewRequested && !recording) pendingAction = UsbAction.PREVIEW
         }, virtual = testCardSelected)
+    val stopTarget = pendingStop
+    val stopTargetActive = when (stopTarget) {
+        UsbStopAction.RECORDING -> fileRecording
+        UsbStopAction.HTTP -> httpStreaming
+        UsbStopAction.RTMP -> rtmpStreaming
+        null -> false
+    }
+    LaunchedEffect(stopTarget, stopTargetActive) {
+        if (!stopTargetActive) pendingStop = null
+    }
+    if (stopTarget != null && stopTargetActive) {
+        AlertDialog(
+            onDismissRequest = { pendingStop = null },
+            title = { Text("停止${stopTarget.label}") },
+            text = { Text("确定要停止${stopTarget.label}吗？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingStop = null
+                    stopOutput(stopTarget)
+                }, enabled = outputControlsEnabled) { Text("确认停止") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingStop = null }) { Text("取消") }
+            },
+        )
+    }
     BackHandler(enabled = fullscreen) { fullscreen = false; activity?.exitUsbFullscreen() }
     UsbCameraWorkspace(
         aspectRatio = (effectiveMode?.width ?: 1280).toFloat() / (effectiveMode?.height ?: 720),
@@ -763,7 +811,7 @@ private fun UsbCameraScreen() {
                     Text(if (hasPreview) "停止预览" else "预览")
                 }
                 Button(onClick = {
-                    if (fileRecording) RecorderController.stopRecording(context)
+                    if (fileRecording) requestStop(UsbStopAction.RECORDING)
                     else if (recording) RecorderController.startRecording(context, container)
                     else { previewRequested = false; pendingAction = UsbAction.RECORD }
                 }, enabled = hasVideoInput && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -773,7 +821,7 @@ private fun UsbCameraScreen() {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
-                    if (httpStreaming) RecorderController.stopHttpOutput(context)
+                    if (httpStreaming) requestStop(UsbStopAction.HTTP)
                     else if (recording) RecorderController.startHttpOutput(context)
                     else { previewRequested = false; pendingAction = UsbAction.STREAM }
                 }, enabled = hasVideoInput && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -781,7 +829,7 @@ private fun UsbCameraScreen() {
                     Text(if (httpStreaming) "停止 HTTP" else "HTTP 串流")
                 }
                 OutlinedButton(onClick = {
-                    if (rtmpStreaming) RecorderController.stopRtmpOutput(context)
+                    if (rtmpStreaming) requestStop(UsbStopAction.RTMP)
                     else if (recording) RecorderController.startRtmpOutput(context, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds)
                     else { previewRequested = false; pendingAction = UsbAction.RTMP }
                 }, enabled = hasVideoInput && rtmpUrl.startsWith("rtmp://") &&
@@ -981,6 +1029,12 @@ private fun UsbCameraScreen() {
                 }
             }
             UsbSettingsTab.OUTPUT -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = confirmStopOutputs, onCheckedChange = { confirmStopOutputs = it })
+                    Text("停止前确认")
+                }
+                Text("停止录像、RTMP 推流或 HTTP 串流前弹出确认框。",
+                    style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("录像格式")
                     ContainerFormat.entries.forEach { format ->
