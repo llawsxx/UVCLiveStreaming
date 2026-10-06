@@ -60,7 +60,8 @@ class RecordingService : Service() {
             ACTION_STOP_RECORDING -> engine?.stopRecording()
             ACTION_START_HTTP_OUTPUT -> engine?.startHttp()
             ACTION_STOP_HTTP_OUTPUT -> engine?.stopHttp()
-            ACTION_START_RTMP_OUTPUT -> engine?.startRtmp(intent.getStringExtra(EXTRA_RTMP_URL).orEmpty())
+            ACTION_START_RTMP_OUTPUT -> engine?.startRtmp(intent.getStringExtra(EXTRA_RTMP_URL).orEmpty(),
+                intent.getIntExtra(EXTRA_RTMP_BUFFER_MS, 5_000))
             ACTION_STOP_RTMP_OUTPUT -> engine?.stopRtmp()
             ACTION_STOP -> stopCapture()
         }
@@ -200,6 +201,7 @@ class RecordingService : Service() {
         const val EXTRA_CONFIG = "config"
         const val EXTRA_CONTAINER = "container"
         const val EXTRA_RTMP_URL = "rtmpUrl"
+        const val EXTRA_RTMP_BUFFER_MS = "rtmpBufferMs"
         private const val CHANNEL_ID = "usb_capture"
         private const val NOTIFICATION_ID = 4102
     }

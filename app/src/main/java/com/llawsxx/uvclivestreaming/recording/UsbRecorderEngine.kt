@@ -222,7 +222,7 @@ class UsbRecorderEngine(
         }
         val factory = UsbEncodedOutputFactory(config, outputStore, audioCaptureEnabled,
             if (audioCaptureEnabled) audioRate else config.audioSampleRate,
-            if (audioCaptureEnabled) audioChannels else config.audioChannelCount, onNotice)
+            if (audioCaptureEnabled) audioChannels else config.audioChannelCount, onNotice, ::requestKeyFrame)
         outputFactory = factory
         if (!config.httpServiceOnly) outputs.attach(CaptureOutput.RECORDING, factory.recording(config.container),
             needsAudio = audioCaptureEnabled)
@@ -533,7 +533,8 @@ class UsbRecorderEngine(
     fun stopRecording() = changeOutput(CaptureOutput.RECORDING, false)
     fun startHttp() = changeOutput(CaptureOutput.HTTP, true) { it.http() }
     fun stopHttp() = changeOutput(CaptureOutput.HTTP, false)
-    fun startRtmp(url: String) = changeOutput(CaptureOutput.RTMP, true) { it.rtmp(url) }
+    fun startRtmp(url: String, bufferMs: Int = config.rtmpBufferMs) =
+        changeOutput(CaptureOutput.RTMP, true) { it.rtmp(url, bufferMs) }
     fun stopRtmp() = changeOutput(CaptureOutput.RTMP, false)
     fun hasActiveOutputs(): Boolean = outputChanges.get() > 0 || outputs.snapshot().isNotEmpty()
 

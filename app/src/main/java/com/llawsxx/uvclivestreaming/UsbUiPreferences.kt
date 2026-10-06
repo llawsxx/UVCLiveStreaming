@@ -42,6 +42,7 @@ internal data class UsbUiSettings(
     val lowFrameRatePreview: Boolean = false,
     val container: ContainerFormat = ContainerFormat.MP4,
     val rtmpUrl: String = "",
+    val rtmpBufferMs: Int = 5_000,
     val videoBitrateKbps: String = "12000",
     val audioBitrateKbps: String = "192",
     val gopSeconds: String = "2",
@@ -120,6 +121,7 @@ internal object UsbUiPreferences {
             lowFrameRatePreview = p.getBoolean("lowFrameRatePreview", false),
             container = enumValue(p.getString("container", null), ContainerFormat.MP4),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
+            rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
             videoBitrateKbps = p.getString("videoBitrateKbps", null)
                 ?: ((p.getString("videoBitrate", "12000000")?.toLongOrNull() ?: 12_000_000L) / 1_000L).toString(),
             audioBitrateKbps = p.getString("audioBitrateKbps", null)
@@ -194,6 +196,7 @@ internal object UsbUiPreferences {
             .putBoolean("lowFrameRatePreview", settings.lowFrameRatePreview)
             .putString("container", settings.container.name)
             .putString("rtmpUrl", settings.rtmpUrl)
+            .putInt("rtmpBufferMs", settings.rtmpBufferMs.coerceIn(100, 30_000))
             .putString("videoBitrateKbps", settings.videoBitrateKbps)
             .putString("audioBitrateKbps", settings.audioBitrateKbps)
             .remove("videoBitrate")

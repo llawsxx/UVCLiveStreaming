@@ -16,6 +16,7 @@ internal class UsbEncodedOutputFactory(
     private val audioRate: Int,
     private val audioChannels: Int,
     private val onNotice: (String) -> Unit,
+    private val onRequestKeyFrame: () -> Unit,
 ) {
     fun recording(container: ContainerFormat): EncodedOutput<MediaFormat> {
         val baseName = "USB_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}"
@@ -52,13 +53,14 @@ internal class UsbEncodedOutputFactory(
         }
     }
 
-    fun rtmp(url: String): EncodedOutput<MediaFormat> {
+    fun rtmp(url: String, bufferMs: Int = config.rtmpBufferMs): EncodedOutput<MediaFormat> {
         require(url.startsWith("rtmp://", ignoreCase = true)) { "RTMP 地址必须以 rtmp:// 开头" }
         val streamConfig = config.copy(
             rtmpEnabled = true, rtmpUrl = url,
+            rtmpBufferMs = bufferMs.coerceIn(100, 30_000),
             mode = if (hasAudio) RecordingMode.AUDIO_VIDEO else RecordingMode.VIDEO,
         )
-        return RtmpOutput(RtmpStreamSink(streamConfig, onNotice).also { it.start() })
+        return RtmpOutput(RtmpStreamSink(streamConfig, onNotice, onRequestKeyFrame).also { it.start() })
     }
 
     private class MuxOutput(

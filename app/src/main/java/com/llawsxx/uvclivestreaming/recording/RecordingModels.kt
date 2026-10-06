@@ -375,6 +375,8 @@ data class RecordingConfig(
     /** RTMP is available for USB capture and uses H.264/HEVC + AAC messages. */
     val rtmpEnabled: Boolean = false,
     val rtmpUrl: String = "",
+    /** Send queue capacity expressed as milliseconds of the configured encoding bitrate. */
+    val rtmpBufferMs: Int = 5_000,
     val rtmpReconnectDelaySeconds: Int = 3,
     /** Start without a file; a recording output can be attached to the same encoder later. */
     val httpServiceOnly: Boolean = false,

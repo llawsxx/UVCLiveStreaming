@@ -5,7 +5,6 @@ import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.nio.ByteBuffer
-import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.atomic.AtomicLong
@@ -21,13 +20,13 @@ import kotlin.concurrent.withLock
 internal class RtmpStreamSink(
     private val config: RecordingConfig,
     private val onNotice: (String) -> Unit,
+    private val onRequestKeyFrame: () -> Unit,
 ) : Closeable {
-    private data class Packet(val type: Int, val timestampMs: Int, val payload: ByteArray)
-
     private val lock = ReentrantLock()
     private val changed = lock.newCondition()
-    private val queue = ArrayDeque<Packet>()
-    private var queuedBytes = 0L
+    private val maxQueuedBytes = ((config.videoBitrate.coerceAtLeast(100_000).toLong() + config.audioBitrate) / 8L) *
+        config.rtmpBufferMs.coerceIn(100, 30_000) / 1_000L
+    private val queue = RtmpMediaQueue(maxQueuedBytes)
     private var videoConfig: ByteArray? = null
     private var videoCodec = VideoCodec.H264
     private var hevcInputLengthSize = 4
@@ -92,6 +91,7 @@ internal class RtmpStreamSink(
 
     fun writeVideo(data: ByteArray, ptsUs: Long, keyFrame: Boolean) {
         if (!running || !videoReady || data.isEmpty()) return
+        val generation = lock.withLock { queue.currentGeneration } ?: return
         val avcc = if (videoCodec == VideoCodec.H265) {
             runCatching { RtmpHevc.codedFrame(data, hevcInputLengthSize) }
                 .getOrElse { Log.e(TAG, "Invalid HEVC frame framing", it); return }
@@ -113,29 +113,26 @@ internal class RtmpStreamSink(
                 avcc.copyInto(it, 5)
             }
         }
-        enqueue(Packet(9, (ptsUs / 1_000L).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(), payload))
+        enqueue(RtmpMediaPacket(9, ptsUs, payload, keyFrame), generation)
     }
 
     fun writeAudio(data: ByteArray, ptsUs: Long) {
         if (!running || data.isEmpty()) return
+        val generation = lock.withLock { queue.currentGeneration } ?: return
         val payload = ByteArray(2 + data.size)
         payload[0] = 0xAF.toByte()
         payload[1] = 1
         data.copyInto(payload, 2)
-        enqueue(Packet(8, (ptsUs / 1_000L).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(), payload))
+        enqueue(RtmpMediaPacket(8, ptsUs, payload), generation)
     }
 
-    private fun enqueue(packet: Packet) {
-        lock.withLock {
+    private fun enqueue(packet: RtmpMediaPacket, generation: Long) {
+        val requestKeyFrame = lock.withLock {
             if (!running) return
-            val maxBytes = ((config.videoBitrate.coerceAtLeast(100_000).toLong() + config.audioBitrate) / 8L) * 5L
-            while (queuedBytes + packet.payload.size > maxBytes && queue.isNotEmpty()) {
-                queuedBytes -= queue.removeFirst().payload.size
-            }
-            queue.addLast(packet)
-            queuedBytes += packet.payload.size
-            changed.signalAll()
+            if (queue.offer(packet, generation)) changed.signalAll()
+            queue.takeKeyFrameRequest()
         }
+        if (requestKeyFrame) onRequestKeyFrame()
     }
 
     private fun runLoop() {
@@ -152,17 +149,21 @@ internal class RtmpStreamSink(
                     session.open()
                     if (!running) break
                     sendInitialMessages(session)
+                    lock.withLock { if (running) queue.beginSession() }
+                    if (!running) break
+                    onRequestKeyFrame()
                     onNotice("RTMP 推流已连接")
                 }
                 connection!!.ensureActive()
-                val nextPacket: Packet? = lock.withLock {
-                    if (running && queue.isEmpty()) changed.await(250, TimeUnit.MILLISECONDS)
-                    if (!running || queue.isEmpty()) null else queue.removeFirst().also { queuedBytes -= it.payload.size }
+                val nextPacket = lock.withLock {
+                    if (running && queue.isEmpty) changed.await(250, TimeUnit.MILLISECONDS)
+                    if (!running) null else queue.poll()
                 }
                 if (nextPacket == null) continue
                 val packet = nextPacket
                 sendMessage(connection!!, packet.type, packet.timestampMs, packet.payload, if (packet.type == 9) 6 else 4)
             } catch (error: Throwable) {
+                lock.withLock { queue.disconnect() }
                 if (running) {
                     Log.e(TAG, "RTMP connection failed", error)
                     onNotice("RTMP 连接中断：${error.message ?: "网络错误"}，正在重连")
@@ -210,7 +211,7 @@ internal class RtmpStreamSink(
         worker?.interrupt()
         worker?.join(2_000)
         worker = null
-        lock.withLock { queue.clear(); queuedBytes = 0 }
+        lock.withLock { queue.disconnect() }
         closeSocket()
     }
 

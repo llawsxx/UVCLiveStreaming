@@ -229,6 +229,7 @@ private fun UsbCameraScreen() {
     var fullscreen by rememberSaveable { mutableStateOf(false) }
     var container by rememberSaveable { mutableStateOf(uiSettings.container) }
     var rtmpUrl by rememberSaveable { mutableStateOf(uiSettings.rtmpUrl) }
+    var rtmpBufferMs by rememberSaveable { mutableStateOf(uiSettings.rtmpBufferMs) }
     var videoBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.videoBitrateKbps) }
     var audioBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.audioBitrateKbps) }
     val audioBitrateValue = audioBitrateKbps.toIntOrNull()?.takeIf { it in 16..512 }
@@ -301,7 +302,7 @@ private fun UsbCameraScreen() {
     }
     LaunchedEffect(
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
-        container, rtmpUrl, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
+        container, rtmpUrl, rtmpBufferMs, videoBitrateKbps, audioBitrateKbps, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
@@ -325,6 +326,7 @@ private fun UsbCameraScreen() {
             lowFrameRatePreview = lowFrameRatePreview,
             container = container,
             rtmpUrl = rtmpUrl,
+            rtmpBufferMs = rtmpBufferMs,
             videoBitrateKbps = videoBitrateKbps,
             audioBitrateKbps = audioBitrateKbps,
             gopSeconds = gopSeconds,
@@ -657,7 +659,7 @@ private fun UsbCameraScreen() {
             idlePreview = null
             val config = usbRecordingConfig(
                 context, device, effectiveMode, testCardSettings, captureAudioEnabled, audioInput, systemAudioInput, captureUacDevice, uacBitDepth, audioRate, bufferFrames, receiveTransferCount, container,
-                requested == UsbAction.STREAM, requested == UsbAction.RTMP, rtmpUrl,
+                requested == UsbAction.STREAM, requested == UsbAction.RTMP, rtmpUrl, rtmpBufferMs,
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
                 (audioBitrateValue ?: 192) * 1_000,
@@ -778,7 +780,7 @@ private fun UsbCameraScreen() {
                 }
                 OutlinedButton(onClick = {
                     if (rtmpStreaming) RecorderController.stopRtmpOutput(context)
-                    else if (recording) RecorderController.startRtmpOutput(context, rtmpUrl)
+                    else if (recording) RecorderController.startRtmpOutput(context, rtmpUrl, rtmpBufferMs)
                     else { previewRequested = false; pendingAction = UsbAction.RTMP }
                 }, enabled = hasVideoInput && rtmpUrl.startsWith("rtmp://") &&
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && outputControlsEnabled,
@@ -994,6 +996,11 @@ private fun UsbCameraScreen() {
                     label = { Text("RTMP 地址（可选）") },
                     placeholder = { Text("rtmp://服务器/app/串流密钥") },
                 )
+                UsbSettingChoice("RTMP 推流缓存", listOf(100, 250, 500, 1_000, 2_000, 3_000, 5_000, 10_000, 15_000, 30_000),
+                    rtmpBufferMs, !rtmpStreaming && outputControlsEnabled,
+                    { "${it / 1_000.0} 秒" }) { rtmpBufferMs = it }
+                Text("默认 5 秒，按编码码率估算缓存容量；较小可减少网络拥堵时的积压，较大可缓冲网络波动。启动 RTMP 时生效；断线重连会丢弃旧缓存。",
+                    style = MaterialTheme.typography.bodySmall)
                 val usbReceiveRate = if (recording)
                     (state as? RecorderState.Recording)?.stats?.usbVideoReceiveBitsPerSecond else idleUsbReceiveRate
                 if (recording || idlePreview != null) {
@@ -1092,7 +1099,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                audioInput: UsbAudioInput, systemAudioInput: SystemAudioInputSettings,
                                uacDevice: UsbAudioDevice?, uacBitDepth: UsbAudioBitDepth,
                                audioRate: Int, bufferFrames: Int, receiveTransferCount: Int, container: ContainerFormat,
-                               httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, videoCodec: VideoCodec,
+                               httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, rtmpBufferMs: Int, videoCodec: VideoCodec,
                                bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
                                gopSeconds: Float, bFrames: Int,
                                timestampSmoothingEnabled: Boolean, timestampSmoothingNtscEnabled: Boolean,
@@ -1147,6 +1154,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         httpServiceOnly = httpEnabled || rtmpEnabled,
         rtmpEnabled = rtmpEnabled,
         rtmpUrl = rtmpUrl,
+        rtmpBufferMs = rtmpBufferMs.coerceIn(100, 30_000),
         outputTreeUri = saved.outputTreeUri,
     )
 }
