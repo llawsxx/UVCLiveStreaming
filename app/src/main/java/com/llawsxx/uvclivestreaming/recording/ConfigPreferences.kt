@@ -233,6 +233,7 @@ object ConfigPreferences {
             rtmpEnabled = p.getBoolean("rtmpEnabled", false),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
             rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
+            rtmpSendTimeoutSeconds = p.getInt("rtmpSendTimeoutSeconds", 10).coerceIn(3, 30),
             rtmpReconnectDelaySeconds = p.getInt("rtmpReconnectDelaySeconds", 3).coerceIn(1, 30),
             outputTreeUri = p.getString("outputTreeUri", null),
         )
@@ -398,6 +399,7 @@ object ConfigPreferences {
             .putBoolean("rtmpEnabled", c.rtmpEnabled)
             .putString("rtmpUrl", c.rtmpUrl)
             .putInt("rtmpBufferMs", c.rtmpBufferMs.coerceIn(100, 30_000))
+            .putInt("rtmpSendTimeoutSeconds", c.rtmpSendTimeoutSeconds.coerceIn(3, 30))
             .putInt("rtmpReconnectDelaySeconds", c.rtmpReconnectDelaySeconds.coerceIn(1, 30))
             .putString("outputTreeUri", c.outputTreeUri)
             .apply()

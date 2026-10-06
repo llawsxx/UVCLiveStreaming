@@ -6,6 +6,15 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VideoGopPreferencesTest {
+    @Test fun rtmpSendTimeoutDefaultsToTenSecondsAndSurvivesRestart() {
+        val prefs = preferences(mutableMapOf())
+        assertEquals(10, ConfigPreferences.load(prefs).rtmpSendTimeoutSeconds)
+        for (timeout in listOf(3, 5, 10, 15, 30)) {
+            ConfigPreferences.save(prefs, RecordingConfig(rtmpSendTimeoutSeconds = timeout))
+            assertEquals(timeout, ConfigPreferences.load(prefs).rtmpSendTimeoutSeconds)
+        }
+    }
+
     @Test fun uacSelectionAndBitDepthPersistAndOldSettingsFollowVideo() {
         val prefs = preferences(mutableMapOf())
         assertEquals(null, ConfigPreferences.load(prefs).usbAudioDevice)

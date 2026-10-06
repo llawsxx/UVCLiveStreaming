@@ -8,6 +8,9 @@ Android USB camera recorder and streamer.
 - Multi-client HTTP MPEG-TS server and RTMP publishing.
 - Recording, HTTP streaming and RTMP publishing can be started/stopped independently during one capture session; they share the same H.264/HEVC + AAC encoder output. Newly added outputs begin at a keyframe with their own timestamp origin.
 - RTMP H.264/HEVC (`hvc1`) + AAC publishing with reconnect.
+- The main status and Output tab show RTMP reconnect attempts for the current
+  publishing session. The first connection is excluded; restarting RTMP resets
+  the count, and failed retries are included.
 - RTMP reconnect discards queued and disconnected media, requests a fresh video
   keyframe after publishing is ready, and restarts audio/video timestamps together
   from that frame without replaying the outage backlog.
@@ -18,6 +21,10 @@ Android USB camera recorder and streamer.
   while earlier audio remains queued. If no keyframe is available, audio continues
   while a fresh video keyframe is requested; audio can resume ahead of the picture.
   Audio-only backlog is still bounded by the configured queue capacity.
+- RTMP send timeout is selectable in the Output tab (3/5/10/15/30 seconds, default
+  10). Each blocked socket write is watched independently; a timeout closes the
+  socket to unblock sending and reconnect with fresh media. The saved setting
+  takes effect when RTMP starts and covers handshake and control writes as well.
 - RTMP transport handles negotiated chunks, compressed headers, extended timestamps, transaction replies, server stream IDs, acknowledgements and ping replies; it is a plain RTMP publisher rather than a complete FFmpeg protocol port.
 - Preview has separate start/stop controls; USB audio RMS is shown in dBFS.
 - Optional 5 fps preview can be toggled during preview, recording or streaming; capture and encoder frame rates are unaffected.

@@ -53,11 +53,13 @@ internal class UsbEncodedOutputFactory(
         }
     }
 
-    fun rtmp(url: String, bufferMs: Int = config.rtmpBufferMs): EncodedOutput<MediaFormat> {
+    fun rtmp(url: String, bufferMs: Int = config.rtmpBufferMs,
+             sendTimeoutSeconds: Int = config.rtmpSendTimeoutSeconds): EncodedOutput<MediaFormat> {
         require(url.startsWith("rtmp://", ignoreCase = true)) { "RTMP 地址必须以 rtmp:// 开头" }
         val streamConfig = config.copy(
             rtmpEnabled = true, rtmpUrl = url,
             rtmpBufferMs = bufferMs.coerceIn(100, 30_000),
+            rtmpSendTimeoutSeconds = sendTimeoutSeconds.coerceIn(3, 30),
             mode = if (hasAudio) RecordingMode.AUDIO_VIDEO else RecordingMode.VIDEO,
         )
         return RtmpOutput(RtmpStreamSink(streamConfig, onNotice, onRequestKeyFrame).also { it.start() })
@@ -91,6 +93,7 @@ internal class UsbEncodedOutputFactory(
 
     private class RtmpOutput(private val sink: RtmpStreamSink) : EncodedOutput<MediaFormat> {
         override val bytesStreamed: Long get() = sink.bytesSent
+        override val reconnectCount: Long get() = sink.reconnectCount
         override fun setVideoFormat(format: MediaFormat) = sink.setVideoFormat(format)
         override fun setAudioFormat(format: MediaFormat) = sink.setAudioFormat(format)
         override fun write(sample: EncodedSample) {

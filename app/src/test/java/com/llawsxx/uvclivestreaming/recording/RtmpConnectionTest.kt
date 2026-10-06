@@ -5,6 +5,7 @@ import java.io.IOException
 import java.io.File
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -157,6 +158,38 @@ class RtmpConnectionTest {
                     assertEquals(-1, peer.get(2, TimeUnit.SECONDS).toInt())
                 }
             } finally { executor.shutdownNow() }
+        }
+    }
+
+    @Test fun serverThatStopsReadingCannotBlockMediaSendingForever() {
+        ServerSocket(0).use { server ->
+            val executor = Executors.newSingleThreadExecutor()
+            val releaseServer = CountDownLatch(1)
+            try {
+                val peer = executor.submit<Boolean> {
+                    server.accept().use { socket ->
+                        val session = Peer(socket)
+                        session.acceptPublishing()
+                        session.publishStatus("NetStream.Publish.Start")
+                        // Keep TCP connected, but stop draining it so the sender's write blocks.
+                        releaseServer.await(10, TimeUnit.SECONDS)
+                    }
+                }
+                try {
+                    RtmpConnection("rtmp://127.0.0.1:${server.localPort}/live/stream",
+                        sendTimeoutMs = 500).use { client ->
+                        client.open()
+                        val payload = ByteArray(4 * 1024 * 1024)
+                        try {
+                            repeat(8) { client.send(9, it * 40L, payload, 6) }
+                            fail("Stalled TCP writes should time out")
+                        } catch (error: SocketTimeoutException) {
+                            assertTrue(error.message!!.contains("RTMP 发送超时"))
+                        }
+                    }
+                } finally { releaseServer.countDown() }
+                assertTrue(peer.get(2, TimeUnit.SECONDS))
+            } finally { releaseServer.countDown(); executor.shutdownNow() }
         }
     }
 

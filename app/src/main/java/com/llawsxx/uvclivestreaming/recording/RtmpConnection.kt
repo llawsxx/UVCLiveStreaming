@@ -14,10 +14,13 @@ import java.security.SecureRandom
 /** RTMP transport, independent of Android and media encoding. */
 internal class RtmpConnection(
     url: String,
+    private val sendTimeoutMs: Long = 10_000L,
     private val onStatus: (String) -> Unit = {},
 ) : Closeable {
     private val uri = URI(url)
     private val socket = Socket()
+    private val lifecycleLock = Any()
+    private var timedOutput: WriteTimeoutOutputStream? = null
     private lateinit var reader: RtmpChunkReader
     private lateinit var writer: RtmpChunkWriter
     private var receiver: Thread? = null
@@ -41,7 +44,15 @@ internal class RtmpConnection(
             socket.soTimeout = 10_000
             socket.connect(InetSocketAddress(host, if (uri.port > 0) uri.port else 1935), 10_000)
             val input = BufferedInputStream(socket.getInputStream(), 64 * 1024)
-            val output = BufferedOutputStream(socket.getOutputStream(), 64 * 1024)
+            val socketOutput = WriteTimeoutOutputStream(socket.getOutputStream(), sendTimeoutMs) { socket.close() }
+            synchronized(lifecycleLock) {
+                if (closed) {
+                    socketOutput.close()
+                    throw IOException("RTMP connection is closed")
+                }
+                timedOutput = socketOutput
+            }
+            val output = BufferedOutputStream(socketOutput, 64 * 1024)
             onStatus("handshake")
             val c1 = ByteArray(1536).also { SecureRandom().nextBytes(it) }
             ByteBuffer.wrap(c1).putInt((System.currentTimeMillis() / 1000L).toInt()).putInt(0)
@@ -188,8 +199,12 @@ internal class RtmpConnection(
     }
 
     override fun close() {
-        closed = true
+        val output = synchronized(lifecycleLock) {
+            closed = true
+            timedOutput.also { timedOutput = null }
+        }
         runCatching { socket.close() }
+        runCatching { output?.close() }
         if (Thread.currentThread() !== receiver) receiver?.join(1_000)
         receiver = null
     }

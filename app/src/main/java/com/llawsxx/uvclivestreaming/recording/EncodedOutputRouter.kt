@@ -17,12 +17,14 @@ internal interface EncodedOutput<F> : Closeable {
     val path: String? get() = null
     val segment: Int get() = 0
     val bytesStreamed: Long get() = 0L
+    val reconnectCount: Long get() = 0L
     fun setVideoFormat(format: F)
     fun setAudioFormat(format: F)
     fun write(sample: EncodedSample)
 }
 
-internal data class EncodedOutputInfo(val path: String?, val segment: Int, val bytesStreamed: Long)
+internal data class EncodedOutputInfo(val path: String?, val segment: Int, val bytesStreamed: Long,
+                                      val reconnectCount: Long = 0L)
 
 /** Serializes output changes with both encoder drain threads, without owning capture or codecs. */
 internal class EncodedOutputRouter<F>(
@@ -100,7 +102,8 @@ internal class EncodedOutputRouter<F>(
 
     fun snapshot(): Map<CaptureOutput, EncodedOutputInfo> = synchronized(lock) {
         entries.mapValues { (_, entry) ->
-            EncodedOutputInfo(entry.output.path, entry.output.segment, entry.output.bytesStreamed)
+            EncodedOutputInfo(entry.output.path, entry.output.segment, entry.output.bytesStreamed,
+                entry.output.reconnectCount)
         }
     }
 

@@ -377,6 +377,7 @@ data class RecordingConfig(
     val rtmpUrl: String = "",
     /** Send queue capacity expressed as milliseconds of the configured encoding bitrate. */
     val rtmpBufferMs: Int = 5_000,
+    val rtmpSendTimeoutSeconds: Int = 10,
     val rtmpReconnectDelaySeconds: Int = 3,
     /** Start without a file; a recording output can be attached to the same encoder later. */
     val httpServiceOnly: Boolean = false,
@@ -546,6 +547,8 @@ data class RecordingStats(
     val bytesStreamed: Long = 0L,
     val httpStreaming: Boolean = false,
     val rtmpStreaming: Boolean = false,
+    /** Actual RTMP retry attempts in the current output session, excluding its first connection. */
+    val rtmpReconnectCount: Long = 0L,
     val outputChangePending: Boolean = false,
     val streamBitrateBitsPerSecond: Double = 0.0,
     val audioLevelDb: Float = -60f,

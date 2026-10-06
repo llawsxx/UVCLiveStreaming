@@ -42,8 +42,10 @@ internal class RtmpStreamSink(
     private var worker: Thread? = null
     @Volatile private var connection: RtmpConnection? = null
     private val sentBytes = AtomicLong()
+    private val reconnectAttempts = AtomicLong()
 
     val bytesSent: Long get() = sentBytes.get()
+    val reconnectCount: Long get() = reconnectAttempts.get()
 
     fun start() {
         if (running) return
@@ -137,6 +139,7 @@ internal class RtmpStreamSink(
 
     private fun runLoop() {
         var nextRetryNs = 0L
+        var connectionAttempted = false
         while (running) {
             try {
                 if (connection == null) {
@@ -144,7 +147,11 @@ internal class RtmpStreamSink(
                         lock.withLock { changed.await(250, TimeUnit.MILLISECONDS) }
                         continue
                     }
-                    val session = RtmpConnection(config.rtmpUrl) { Log.i(TAG, it) }
+                    if (!running) break
+                    if (connectionAttempted) reconnectAttempts.incrementAndGet()
+                    connectionAttempted = true
+                    val session = RtmpConnection(config.rtmpUrl,
+                        sendTimeoutMs = config.rtmpSendTimeoutSeconds.coerceIn(3, 30) * 1_000L) { Log.i(TAG, it) }
                     connection = session // Also closes an in-progress handshake when stopping.
                     session.open()
                     if (!running) break

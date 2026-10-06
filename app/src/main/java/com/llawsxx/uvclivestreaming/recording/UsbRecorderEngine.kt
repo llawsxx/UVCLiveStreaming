@@ -533,8 +533,9 @@ class UsbRecorderEngine(
     fun stopRecording() = changeOutput(CaptureOutput.RECORDING, false)
     fun startHttp() = changeOutput(CaptureOutput.HTTP, true) { it.http() }
     fun stopHttp() = changeOutput(CaptureOutput.HTTP, false)
-    fun startRtmp(url: String, bufferMs: Int = config.rtmpBufferMs) =
-        changeOutput(CaptureOutput.RTMP, true) { it.rtmp(url, bufferMs) }
+    fun startRtmp(url: String, bufferMs: Int = config.rtmpBufferMs,
+                  sendTimeoutSeconds: Int = config.rtmpSendTimeoutSeconds) =
+        changeOutput(CaptureOutput.RTMP, true) { it.rtmp(url, bufferMs, sendTimeoutSeconds) }
     fun stopRtmp() = changeOutput(CaptureOutput.RTMP, false)
     fun hasActiveOutputs(): Boolean = outputChanges.get() > 0 || outputs.snapshot().isNotEmpty()
 
@@ -603,6 +604,7 @@ class UsbRecorderEngine(
             fileRecording = recording != null,
             httpStreaming = CaptureOutput.HTTP in active,
             rtmpStreaming = CaptureOutput.RTMP in active,
+            rtmpReconnectCount = active[CaptureOutput.RTMP]?.reconnectCount ?: 0L,
             outputChangePending = outputChanges.get() > 0,
             bytesStreamed = active.values.sumOf { it.bytesStreamed },
             streamBitrateBitsPerSecond = streamRate,

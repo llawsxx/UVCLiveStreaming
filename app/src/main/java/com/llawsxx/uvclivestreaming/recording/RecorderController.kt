@@ -63,19 +63,22 @@ object RecorderController {
     fun stopRecording(context: Context) = changeOutput(context, RecordingService.ACTION_STOP_RECORDING)
     fun startHttpOutput(context: Context) = changeOutput(context, RecordingService.ACTION_START_HTTP_OUTPUT)
     fun stopHttpOutput(context: Context) = changeOutput(context, RecordingService.ACTION_STOP_HTTP_OUTPUT)
-    fun startRtmpOutput(context: Context, url: String, bufferMs: Int = 5_000) = changeOutput(context,
+    fun startRtmpOutput(context: Context, url: String, bufferMs: Int = 5_000,
+                        sendTimeoutSeconds: Int = 10) = changeOutput(context,
         RecordingService.ACTION_START_RTMP_OUTPUT, RecordingService.EXTRA_RTMP_URL, url,
-        rtmpBufferMs = bufferMs)
+        rtmpBufferMs = bufferMs, rtmpSendTimeoutSeconds = sendTimeoutSeconds)
     fun stopRtmpOutput(context: Context) = changeOutput(context, RecordingService.ACTION_STOP_RTMP_OUTPUT)
 
     private fun changeOutput(context: Context, action: String, key: String? = null, value: String? = null,
-                             rtmpBufferMs: Int? = null) {
+                             rtmpBufferMs: Int? = null, rtmpSendTimeoutSeconds: Int? = null) {
         val current = mutableState.value as? RecorderState.Recording ?: return
         if (current.stats.outputChangePending) return
         mutableState.value = current.copy(stats = current.stats.copy(outputChangePending = true))
         val intent = Intent(context, RecordingService::class.java).setAction(action)
         if (key != null) intent.putExtra(key, value)
         if (rtmpBufferMs != null) intent.putExtra(RecordingService.EXTRA_RTMP_BUFFER_MS, rtmpBufferMs.coerceIn(100, 30_000))
+        if (rtmpSendTimeoutSeconds != null) intent.putExtra(RecordingService.EXTRA_RTMP_SEND_TIMEOUT_SECONDS,
+            rtmpSendTimeoutSeconds.coerceIn(3, 30))
         context.startService(intent)
     }
 
