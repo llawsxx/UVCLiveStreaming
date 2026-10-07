@@ -6,6 +6,25 @@ Android USB camera recorder and streamer.
 - MJPG, YUYV/UYVY, RGB/BGR, NV12, I420 and P010 conversion; H.264 USB modes are exposed for MediaCodec decode integration.
 - MediaCodec H.264/H.265 and AAC encoding, MP4 or MPEG-TS recording.
 - Multi-client HTTP MPEG-TS server and RTMP publishing.
+- Optional HTTP TS chunk publishing with memory-buffered retry and a C++17 delay relay.
+  Enable "HTTP 远程分块上传" in the USB Output tab; the HTTP button then uploads to
+  `http://server:8080/upload/live`. Players open `http://server:8080/live/live.ts`.
+  Default chunks are 1 second, pending cache is 60 seconds (256 MiB maximum), and
+  server playback delay is 10 seconds. Session changes append to the existing queue;
+  the relay forwards TS bytes unchanged, without timestamp or keyframe adjustment.
+  Live publishing retires old/expired blocks when its cache reaches a limit; missing
+  sequences are accepted. The relay uses `--max-pending-seconds` (default 20) to
+  jump all viewers forward to the 10-second delay target when pending reaches that maximum.
+  It refills to the delay target after its playback buffer empties. Cache bytes are
+  bounded by `--buffer-mb`; played/skipped history expires according to `--retention`.
+  Acknowledged blocks are removed from memory. Stopping cancels the active POST,
+  ends retrying, and clears pending blocks and the partial chunk. Restarting creates
+  a fresh publishing session. No cache files are written, and pending media is lost
+  when the sender process exits.
+  The Output tab shows the session ID, generated/in-flight/acknowledged sequences,
+  pending upload/retry counts, cache bytes/duration and chunk assembly progress.
+  The relay logs each upload and reports throughput/cache status every second.
+  Build, protocol and limitations: [HTTP TS relay](server/http-ts-relay/README.md).
 - Recording, HTTP streaming and RTMP publishing can be started/stopped independently during one capture session; they share the same H.264/HEVC + AAC encoder output. Newly added outputs begin at a keyframe with their own timestamp origin.
 - Stop buttons for recording, HTTP and RTMP ask for confirmation by default.
   The saved "Confirm before stopping" setting in the Output tab can disable it.

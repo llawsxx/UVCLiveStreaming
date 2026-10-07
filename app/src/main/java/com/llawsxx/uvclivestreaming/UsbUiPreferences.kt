@@ -42,6 +42,10 @@ internal data class UsbUiSettings(
     val lowFrameRatePreview: Boolean = false,
     val container: ContainerFormat = ContainerFormat.MP4,
     val confirmStopOutputs: Boolean = true,
+    val httpUploadEnabled: Boolean = false,
+    val httpUploadUrl: String = "",
+    val httpUploadChunkSeconds: Int = 1,
+    val httpUploadCacheSeconds: Int = 60,
     val rtmpUrl: String = "",
     val rtmpBufferMs: Int = 5_000,
     val rtmpSendTimeoutSeconds: Int = 10,
@@ -125,6 +129,10 @@ internal object UsbUiPreferences {
             lowFrameRatePreview = p.getBoolean("lowFrameRatePreview", false),
             container = enumValue(p.getString("container", null), ContainerFormat.MP4),
             confirmStopOutputs = p.getBoolean("confirmStopOutputs", true),
+            httpUploadEnabled = p.getBoolean("httpUploadEnabled", false),
+            httpUploadUrl = p.getString("httpUploadUrl", "").orEmpty(),
+            httpUploadChunkSeconds = p.getInt("httpUploadChunkSeconds", 1).coerceIn(1, 5),
+            httpUploadCacheSeconds = p.getInt("httpUploadCacheSeconds", 60).coerceIn(30, 300),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
             rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
             rtmpSendTimeoutSeconds = p.getInt("rtmpSendTimeoutSeconds", 10).coerceIn(3, 30),
@@ -204,6 +212,10 @@ internal object UsbUiPreferences {
             .putBoolean("lowFrameRatePreview", settings.lowFrameRatePreview)
             .putString("container", settings.container.name)
             .putBoolean("confirmStopOutputs", settings.confirmStopOutputs)
+            .putBoolean("httpUploadEnabled", settings.httpUploadEnabled)
+            .putString("httpUploadUrl", settings.httpUploadUrl)
+            .putInt("httpUploadChunkSeconds", settings.httpUploadChunkSeconds.coerceIn(1, 5))
+            .putInt("httpUploadCacheSeconds", settings.httpUploadCacheSeconds.coerceIn(30, 300))
             .putString("rtmpUrl", settings.rtmpUrl)
             .putInt("rtmpBufferMs", settings.rtmpBufferMs.coerceIn(100, 30_000))
             .putInt("rtmpSendTimeoutSeconds", settings.rtmpSendTimeoutSeconds.coerceIn(3, 30))

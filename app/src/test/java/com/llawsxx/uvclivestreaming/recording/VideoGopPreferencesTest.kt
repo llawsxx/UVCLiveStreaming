@@ -6,6 +6,23 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VideoGopPreferencesTest {
+    @Test fun httpUploadSettingsPersistAndClamp() {
+        val values = mutableMapOf<String, Any?>()
+        val prefs = preferences(values)
+        assertEquals(false, ConfigPreferences.load(prefs).httpUploadEnabled)
+        assertEquals(1, ConfigPreferences.load(prefs).httpUploadChunkSeconds)
+        assertEquals(60, ConfigPreferences.load(prefs).httpUploadCacheSeconds)
+        ConfigPreferences.save(prefs, RecordingConfig(httpUploadEnabled = true,
+            httpUploadUrl = "http://host:8080/upload/live", httpUploadChunkSeconds = 2, httpUploadCacheSeconds = 90))
+        val loaded = ConfigPreferences.load(prefs)
+        assertEquals(true, loaded.httpUploadEnabled)
+        assertEquals("http://host:8080/upload/live", loaded.httpUploadUrl)
+        assertEquals(2, loaded.httpUploadChunkSeconds)
+        assertEquals(90, loaded.httpUploadCacheSeconds)
+        values["httpUploadChunkSeconds"] = 99; values["httpUploadCacheSeconds"] = 1
+        assertEquals(5, ConfigPreferences.load(prefs).httpUploadChunkSeconds)
+        assertEquals(30, ConfigPreferences.load(prefs).httpUploadCacheSeconds)
+    }
     @Test fun audioDelayAndMuxingWindowPersistAndClampToTheirSupportedRanges() {
         val data = mutableMapOf<String, Any?>()
         val prefs = preferences(data)

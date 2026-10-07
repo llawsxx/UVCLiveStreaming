@@ -376,6 +376,11 @@ data class RecordingConfig(
     val httpStreamEnabled: Boolean = false,
     val httpStreamPort: Int = 8080,
     val httpBufferSeconds: Int = 30,
+    /** The HTTP output can publish TS chunks to a remote delay relay instead of serving locally. */
+    val httpUploadEnabled: Boolean = false,
+    val httpUploadUrl: String = "",
+    val httpUploadChunkSeconds: Int = 1,
+    val httpUploadCacheSeconds: Int = 60,
     /** RTMP is available for USB capture and uses H.264/HEVC + AAC messages. */
     val rtmpEnabled: Boolean = false,
     val rtmpUrl: String = "",
@@ -538,6 +543,30 @@ data class CameraInfo(
     val rawSensorInfo: RawSensorInfo?,
 )
 
+/** A snapshot of this HTTP publishing session. Counts include the unacknowledged in-flight block. */
+data class HttpUploadStats(
+    val sessionId: String,
+    val latestSequence: Long?,
+    val uploadingSequence: Long?,
+    val acknowledgedSequence: Long?,
+    val pendingUploadBlocks: Int,
+    val pendingRetryBlocks: Int,
+    val queuedBytes: Long,
+    val queuedDurationUs: Long,
+    val assemblingBytes: Int,
+    val assemblingCapacityBytes: Int,
+    val assemblingDurationUs: Long,
+    val cacheLimitSeconds: Int,
+    val cacheLimitBytes: Long,
+    val acknowledgedBytes: Long,
+    val droppedBlocks: Long = 0,
+) {
+    val cachedDataBytes: Long get() = queuedBytes + assemblingBytes
+    // Payload arrays and the chunk builder allocation; excludes object/socket overhead and transient copies.
+    val cacheAllocatedBytes: Long get() = queuedBytes + assemblingCapacityBytes
+    val cachedDurationUs: Long get() = queuedDurationUs + assemblingDurationUs
+}
+
 data class RecordingStats(
     val elapsedMs: Long = 0L,
     val averageFps: Double = 0.0,
@@ -553,6 +582,7 @@ data class RecordingStats(
     val rtmpStreaming: Boolean = false,
     /** Actual RTMP retry attempts in the current output session, excluding its first connection. */
     val rtmpReconnectCount: Long = 0L,
+    val httpUploadStats: HttpUploadStats? = null,
     val outputChangePending: Boolean = false,
     val streamBitrateBitsPerSecond: Double = 0.0,
     val audioLevelDb: Float = -60f,

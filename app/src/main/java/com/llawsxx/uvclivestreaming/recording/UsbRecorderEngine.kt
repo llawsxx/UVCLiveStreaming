@@ -617,6 +617,7 @@ class UsbRecorderEngine(
             httpStreaming = CaptureOutput.HTTP in active,
             rtmpStreaming = CaptureOutput.RTMP in active,
             rtmpReconnectCount = active[CaptureOutput.RTMP]?.reconnectCount ?: 0L,
+            httpUploadStats = active[CaptureOutput.HTTP]?.httpUploadStats,
             outputChangePending = outputChanges.get() > 0,
             bytesStreamed = active.values.sumOf { it.bytesStreamed },
             streamBitrateBitsPerSecond = streamRate,

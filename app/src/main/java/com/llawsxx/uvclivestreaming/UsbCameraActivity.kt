@@ -60,6 +60,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.llawsxx.uvclivestreaming.recording.ConfigPreferences
+import com.llawsxx.uvclivestreaming.recording.validHttpUploadUrl
 import com.llawsxx.uvclivestreaming.recording.ContainerFormat
 import com.llawsxx.uvclivestreaming.recording.NativeUsbCapture
 import com.llawsxx.uvclivestreaming.recording.MjpegDecodePool
@@ -249,6 +250,10 @@ private fun UsbCameraScreen() {
     var keepScreenOn by rememberSaveable { mutableStateOf(uiSettings.keepScreenOn) }
     var fullscreen by rememberSaveable { mutableStateOf(false) }
     var container by rememberSaveable { mutableStateOf(uiSettings.container) }
+    var httpUploadEnabled by rememberSaveable { mutableStateOf(uiSettings.httpUploadEnabled) }
+    var httpUploadUrl by rememberSaveable { mutableStateOf(uiSettings.httpUploadUrl) }
+    var httpUploadChunkSeconds by rememberSaveable { mutableStateOf(uiSettings.httpUploadChunkSeconds) }
+    var httpUploadCacheSeconds by rememberSaveable { mutableStateOf(uiSettings.httpUploadCacheSeconds) }
     var rtmpUrl by rememberSaveable { mutableStateOf(uiSettings.rtmpUrl) }
     var rtmpBufferMs by rememberSaveable { mutableStateOf(uiSettings.rtmpBufferMs) }
     var rtmpSendTimeoutSeconds by rememberSaveable { mutableStateOf(uiSettings.rtmpSendTimeoutSeconds) }
@@ -328,7 +333,8 @@ private fun UsbCameraScreen() {
     }
     LaunchedEffect(
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
-        container, confirmStopOutputs, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
+        container, confirmStopOutputs, httpUploadEnabled, httpUploadUrl, httpUploadChunkSeconds, httpUploadCacheSeconds,
+        rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
         bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
@@ -352,6 +358,10 @@ private fun UsbCameraScreen() {
             lowFrameRatePreview = lowFrameRatePreview,
             container = container,
             confirmStopOutputs = confirmStopOutputs,
+            httpUploadEnabled = httpUploadEnabled,
+            httpUploadUrl = httpUploadUrl.trim(),
+            httpUploadChunkSeconds = httpUploadChunkSeconds,
+            httpUploadCacheSeconds = httpUploadCacheSeconds,
             rtmpUrl = rtmpUrl,
             rtmpBufferMs = rtmpBufferMs,
             rtmpSendTimeoutSeconds = rtmpSendTimeoutSeconds,
@@ -697,7 +707,8 @@ private fun UsbCameraScreen() {
             idlePreview = null
             val config = usbRecordingConfig(
                 context, device, effectiveMode, testCardSettings, captureAudioEnabled, audioInput, systemAudioInput, captureUacDevice, uacBitDepth, audioRate, bufferFrames, receiveTransferCount, container,
-                requested == UsbAction.STREAM, requested == UsbAction.RTMP, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds,
+                requested == UsbAction.STREAM, httpUploadEnabled, httpUploadUrl.trim(), httpUploadChunkSeconds,
+                httpUploadCacheSeconds, requested == UsbAction.RTMP, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds,
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
                 (audioBitrateValue ?: 192) * 1_000,
@@ -839,9 +850,10 @@ private fun UsbCameraScreen() {
                     if (httpStreaming) requestStop(UsbStopAction.HTTP)
                     else if (recording) RecorderController.startHttpOutput(context)
                     else { previewRequested = false; pendingAction = UsbAction.STREAM }
-                }, enabled = hasVideoInput && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                }, enabled = hasVideoInput && (httpStreaming || !httpUploadEnabled || validHttpUploadUrl(httpUploadUrl.trim())) &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                     outputControlsEnabled, modifier = Modifier.weight(1f)) {
-                    Text(if (httpStreaming) "停止 HTTP" else "HTTP 串流")
+                    Text(if (httpStreaming) "停止 HTTP" else if (httpUploadEnabled) "HTTP 上传" else "HTTP 串流")
                 }
                 OutlinedButton(onClick = {
                     if (rtmpStreaming) requestStop(UsbStopAction.RTMP)
@@ -1082,6 +1094,29 @@ private fun UsbCameraScreen() {
                         }
                     }
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = httpUploadEnabled, onCheckedChange = { httpUploadEnabled = it },
+                        enabled = !recording && outputControlsEnabled)
+                    Text("HTTP 远程分块上传")
+                }
+                Text("勾选后 HTTP 按钮上传到延迟服务端；未勾选时仍提供本机 HTTP 串流。设置在下次启动采集时生效。",
+                    style = MaterialTheme.typography.bodySmall)
+                if (httpUploadEnabled) {
+                    OutlinedTextField(value = httpUploadUrl, onValueChange = { httpUploadUrl = it },
+                        enabled = !recording && outputControlsEnabled, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(), label = { Text("HTTP 上传地址") },
+                        placeholder = { Text("http://服务器:8080/upload/live") },
+                        isError = !validHttpUploadUrl(httpUploadUrl.trim()))
+                    UsbSettingChoice("上传分块时长", listOf(1, 2, 3, 5), httpUploadChunkSeconds,
+                        !recording && outputControlsEnabled, { "$it 秒" }) { httpUploadChunkSeconds = it }
+                    UsbSettingChoice("断线补传缓存", listOf(30, 60, 90, 120, 180, 300), httpUploadCacheSeconds,
+                        !recording && outputControlsEnabled, { "$it 秒" }) { httpUploadCacheSeconds = it }
+                    Text("默认 1 秒一块、60 秒内存缓存（最多 256 MiB）。缓存满或块过期时淘汰最旧块，继续串流；停止串流会立即取消上传并清空缓存。服务端默认延迟 10 秒、待播上限 20 秒，TS 原样透传。",
+                        style = MaterialTheme.typography.bodySmall)
+                    if (validHttpUploadUrl(httpUploadUrl.trim())) Text(
+                        "播放地址：${httpUploadUrl.trim().replace("/upload/", "/live/")}.ts",
+                        style = MaterialTheme.typography.bodySmall)
+                }
                 OutlinedTextField(
                     value = rtmpUrl,
                     onValueChange = { rtmpUrl = it },
@@ -1123,6 +1158,24 @@ private fun UsbCameraScreen() {
                         if (streaming) " · 串流 ${String.format(Locale.US, "%.0f", streamRate)} kbps" else "")
                     if (stats.rtmpStreaming) Text("RTMP 重连尝试：${stats.rtmpReconnectCount} 次（不含首次连接）",
                         style = MaterialTheme.typography.bodySmall)
+                    stats.httpUploadStats?.let { upload ->
+                        Text("HTTP 会话 ID：${upload.sessionId}", style = MaterialTheme.typography.bodySmall)
+                        Text("序号 · 最新生成：${upload.latestSequence ?: "—"} · 上传中：${upload.uploadingSequence ?: "—"} · 已确认：${upload.acknowledgedSequence ?: "—"}",
+                            style = MaterialTheme.typography.bodySmall)
+                        Text("待上传：${upload.pendingUploadBlocks} 块 · 待补传：${upload.pendingRetryBlocks} 块（含在途未确认块）",
+                            style = MaterialTheme.typography.bodySmall)
+                        Text("累计淘汰：${upload.droppedBlocks} 块", style = MaterialTheme.typography.bodySmall)
+                        Text(String.format(Locale.US, "缓存数据：%.1f KiB / %.2f 秒 · 缓存占用：%.1f KiB",
+                            upload.cachedDataBytes / 1024.0, upload.cachedDurationUs / 1_000_000.0,
+                            upload.cacheAllocatedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)
+                        Text(String.format(Locale.US, "已组块队列：%.1f KiB / %.2f 秒 · 上限 %d 秒 / %.0f MiB",
+                            upload.queuedBytes / 1024.0, upload.queuedDurationUs / 1_000_000.0,
+                            upload.cacheLimitSeconds, upload.cacheLimitBytes / (1024.0 * 1024.0)),
+                            style = MaterialTheme.typography.bodySmall)
+                        Text(String.format(Locale.US, "正在组块：%.1f KiB / %.2f 秒 · 累计确认：%.1f KiB",
+                            upload.assemblingBytes / 1024.0, upload.assemblingDurationUs / 1_000_000.0,
+                            upload.acknowledgedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)
+                    }
                     stats.outputPath?.let { Text("文件：$it", style = MaterialTheme.typography.bodySmall) }
                     if (stats.outputChangePending) Text("正在切换输出…", style = MaterialTheme.typography.bodySmall)
                 }
@@ -1201,7 +1254,9 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                audioInput: UsbAudioInput, systemAudioInput: SystemAudioInputSettings,
                                uacDevice: UsbAudioDevice?, uacBitDepth: UsbAudioBitDepth,
                                audioRate: Int, bufferFrames: Int, receiveTransferCount: Int, container: ContainerFormat,
-                               httpEnabled: Boolean, rtmpEnabled: Boolean, rtmpUrl: String, rtmpBufferMs: Int,
+                               httpEnabled: Boolean, httpUploadEnabled: Boolean, httpUploadUrl: String,
+                               httpUploadChunkSeconds: Int, httpUploadCacheSeconds: Int,
+                               rtmpEnabled: Boolean, rtmpUrl: String, rtmpBufferMs: Int,
                                rtmpSendTimeoutSeconds: Int, videoCodec: VideoCodec,
                                bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
                                audioDelayMs: Int, muxingQueueSize: Int,
@@ -1257,6 +1312,10 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         httpStreamPort = saved.httpStreamPort,
         httpBufferSeconds = saved.httpBufferSeconds,
         httpStreamEnabled = httpEnabled,
+        httpUploadEnabled = httpUploadEnabled,
+        httpUploadUrl = httpUploadUrl,
+        httpUploadChunkSeconds = httpUploadChunkSeconds.coerceIn(1, 5),
+        httpUploadCacheSeconds = httpUploadCacheSeconds.coerceIn(30, 300),
         httpServiceOnly = httpEnabled || rtmpEnabled,
         rtmpEnabled = rtmpEnabled,
         rtmpUrl = rtmpUrl,

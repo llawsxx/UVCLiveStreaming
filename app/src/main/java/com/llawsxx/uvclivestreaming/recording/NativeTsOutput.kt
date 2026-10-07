@@ -11,6 +11,7 @@ internal class NativeTsOutput(
     segmentMillis: Long,
     private val httpServer: HttpTsRingBufferServer? = null,
     private val writeToFile: Boolean = true,
+    private val uploadSink: HttpTsUploadSink? = null,
     private val onSegment: (Int, String) -> Unit,
 ) : Closeable {
     private val segmentUs = segmentMillis.coerceAtLeast(0L) * 1_000L
@@ -23,6 +24,8 @@ internal class NativeTsOutput(
     val bytesWritten = AtomicLong(0L)
     val currentPath: String? get() = handle?.displayPath
     val currentSegment: Int get() = segmentIndex
+    val bytesUploaded: Long? get() = uploadSink?.bytesSent
+    val httpUploadStats: HttpUploadStats? get() = uploadSink?.stats
 
     fun start(): String {
         check(!closed)
@@ -48,6 +51,7 @@ internal class NativeTsOutput(
             it.write(data, ptsUs, keyFrame)
             bytesStreamed.addAndGet(data.size.toLong())
         }
+        uploadSink?.write(data)
     }
 
     private fun openNextSegment() {
@@ -86,7 +90,7 @@ internal class NativeTsOutput(
             runCatching { output?.close() }; output = null
             handle?.discard(); handle = null
         }
-        httpServer?.close()
+        try { uploadSink?.close() } finally { httpServer?.close() }
     }
 
     private companion object {

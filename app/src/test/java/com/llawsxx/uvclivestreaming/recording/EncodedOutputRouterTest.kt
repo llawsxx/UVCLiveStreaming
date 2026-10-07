@@ -23,7 +23,7 @@ class EncodedOutputRouterTest {
         setVideoFormat("H264 CSD"); setAudioFormat("AAC CSD")
     }
 
-    @Test fun allOutputsInterleaveHeadsPreserveTrackOrderAndFlushTheirTails() {
+    @Test fun outputsPreserveTrackOrderAndHttpDiscardsItsTailOnClose() {
         val router = EncodedOutputRouter<String>(muxingQueueSize = 3) { _, error -> throw AssertionError(error) }
         router.setVideoFormat("H264 CSD"); router.setAudioFormat("AAC CSD")
         val outputs = CaptureOutput.entries.associateWith { Output() }
@@ -32,7 +32,12 @@ class EncodedOutputRouterTest {
         frames.forEach(router::write)
         outputs.values.forEach { assertEquals(listOf(0L), it.samples.map { sample -> sample.ptsUs }) }
         router.close()
-        outputs.values.forEach { output ->
+        outputs.forEach { (type, output) ->
+            if (type == CaptureOutput.HTTP) {
+                assertEquals(listOf(0L), output.samples.map { it.ptsUs })
+                assertTrue(output.closed)
+                return@forEach
+            }
             assertEquals(listOf(0L, 40_000L, 200_000L, 10_000L), output.samples.map { it.ptsUs })
             assertSame(frames[0].data, output.samples[0].data)
             assertSame(frames[2].data, output.samples[1].data)
@@ -40,6 +45,21 @@ class EncodedOutputRouterTest {
             assertSame(frames[3].data, output.samples[3].data)
             assertTrue(output.closed)
         }
+    }
+
+    @Test fun stoppingHttpDiscardsItsMuxingWindowAndRestartUsesFreshPackets() {
+        val router = EncodedOutputRouter<String>(muxingQueueSize = 3) { _, error -> throw AssertionError(error) }
+        router.setVideoFormat("video"); router.setAudioFormat("audio")
+        val old = Output(); val fresh = Output()
+        router.attach(CaptureOutput.HTTP, old, needsAudio = true)
+        router.write(video(0, true)); router.write(audio(20)); router.write(video(40))
+        router.detach(CaptureOutput.HTTP)
+        assertTrue(old.samples.isEmpty()); assertTrue(old.closed)
+        router.attach(CaptureOutput.HTTP, fresh, needsAudio = true)
+        router.write(video(1_000, true)); router.write(audio(1_020)); router.write(video(1_040)); router.write(audio(1_060))
+        assertEquals(listOf(0L), fresh.samples.map { it.ptsUs })
+        router.close()
+        assertEquals(listOf(0L), fresh.samples.map { it.ptsUs })
     }
 
     @Test fun recordingStopsFlushOnlyItsQueueAndRestartStartsWithAFreshKeyframe() {

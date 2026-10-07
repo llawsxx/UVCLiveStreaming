@@ -232,6 +232,10 @@ object ConfigPreferences {
             httpStreamEnabled = p.getBoolean("httpStreamEnabled", false),
             httpStreamPort = p.getInt("httpStreamPort", 8080).coerceIn(1, 65535),
             httpBufferSeconds = p.getInt("httpBufferSeconds", 30).coerceIn(1, 300),
+            httpUploadEnabled = p.getBoolean("httpUploadEnabled", false),
+            httpUploadUrl = p.getString("httpUploadUrl", "").orEmpty(),
+            httpUploadChunkSeconds = p.getInt("httpUploadChunkSeconds", 1).coerceIn(1, 5),
+            httpUploadCacheSeconds = p.getInt("httpUploadCacheSeconds", 60).coerceIn(30, 300),
             rtmpEnabled = p.getBoolean("rtmpEnabled", false),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
             rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
@@ -400,6 +404,10 @@ object ConfigPreferences {
             .putBoolean("httpStreamEnabled", c.httpStreamEnabled)
             .putInt("httpStreamPort", c.httpStreamPort.coerceIn(1, 65535))
             .putInt("httpBufferSeconds", c.httpBufferSeconds.coerceIn(1, 300))
+            .putBoolean("httpUploadEnabled", c.httpUploadEnabled)
+            .putString("httpUploadUrl", c.httpUploadUrl)
+            .putInt("httpUploadChunkSeconds", c.httpUploadChunkSeconds.coerceIn(1, 5))
+            .putInt("httpUploadCacheSeconds", c.httpUploadCacheSeconds.coerceIn(30, 300))
             .putBoolean("rtmpEnabled", c.rtmpEnabled)
             .putString("rtmpUrl", c.rtmpUrl)
             .putInt("rtmpBufferMs", c.rtmpBufferMs.coerceIn(100, 30_000))

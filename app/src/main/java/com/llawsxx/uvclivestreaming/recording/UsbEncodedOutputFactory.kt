@@ -33,18 +33,23 @@ internal class UsbEncodedOutputFactory(
     fun http(): EncodedOutput<MediaFormat> = ts("HTTP", record = false)
 
     private fun ts(baseName: String, record: Boolean): EncodedOutput<MediaFormat> {
-        val server = if (record) null else HttpTsRingBufferServer(
+        val upload = if (!record && config.httpUploadEnabled) HttpTsUploadSink(
+            config.httpUploadUrl, config.httpUploadChunkSeconds,
+            config.httpUploadCacheSeconds, onNotice,
+        ) else null
+        val server = if (record || upload != null) null else HttpTsRingBufferServer(
             port = config.httpStreamPort,
             maxBytes = ((config.videoBitrate.toLong() + if (hasAudio) config.audioBitrate else 0) / 8L) *
                 config.httpBufferSeconds.coerceIn(1, 300),
         )
         val output = NativeTsOutput(if (record) store else null, baseName, true,
             if (record) config.segmentMinutes.coerceAtLeast(0) * 60_000L else 0L,
-            httpServer = server, writeToFile = record, onSegment = { _, _ -> })
+            httpServer = server, writeToFile = record, uploadSink = upload, onSegment = { _, _ -> })
         var muxer: NativeMpegTsMuxer? = null
         try {
             output.start()
             muxer = NativeMpegTsMuxer(config.videoCodec, hasAudio, audioRate, audioChannels)
+            if (upload != null) onNotice("HTTP 分块上传：${config.httpUploadUrl}；服务端按配置延迟输出")
             return MuxOutput(NativeTsMuxCoordinator(muxer, output, hasAudio) {}, ts = output,
                 recording = record)
         } catch (error: Throwable) {
@@ -74,7 +79,8 @@ internal class UsbEncodedOutputFactory(
         private var wroteSamples = false
         override val path: String? get() = if (recording) handle?.displayPath ?: ts?.currentPath else null
         override val segment: Int get() = if (recording) ts?.currentSegment ?: 1 else 0
-        override val bytesStreamed: Long get() = ts?.bytesStreamed?.get() ?: 0L
+        override val bytesStreamed: Long get() = ts?.bytesUploaded ?: ts?.bytesStreamed?.get() ?: 0L
+        override val httpUploadStats: HttpUploadStats? get() = ts?.httpUploadStats
         override fun setVideoFormat(format: MediaFormat) = mux.setVideoFormat(format)
         override fun setAudioFormat(format: MediaFormat) = mux.setAudioFormat(format)
         override fun write(sample: EncodedSample) {
