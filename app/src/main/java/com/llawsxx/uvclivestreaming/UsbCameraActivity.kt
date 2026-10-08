@@ -944,7 +944,7 @@ private fun UsbCameraScreen() {
                     { it.label }) { sourceRange = it }
                 UsbSettingChoice("USB 接收队列", listOf(8, 16, 32, 64, 128, 256, 512), receiveTransferCount,
                     !recording && !previewRequested && !testCardSelected,
-                    { if (it == 64) "$it 个请求（默认）" else "$it 个请求" }) { receiveTransferCount = it }
+                    { if (it == 256) "$it 个请求（默认）" else "$it 个请求" }) { receiveTransferCount = it }
                 Text("如有丢帧可增大该值；用于 USB 视频接收（Bulk／ISO 共用）；停止采集后可修改，重新预览或录像／推流时生效。",
                     style = MaterialTheme.typography.bodySmall)
                 Row(verticalAlignment = Alignment.CenterVertically) {

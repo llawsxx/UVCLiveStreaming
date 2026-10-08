@@ -223,9 +223,9 @@ data class RecordingConfig(
     val usbAudioBitDepth: UsbAudioBitDepth = UsbAudioBitDepth.AUTO,
     val systemAudioInput: SystemAudioInputSettings = SystemAudioInputSettings(),
     /** Bounded queue of pending USB video frames, including MJPEG decode input. */
-    val usbVideoBufferFrames: Int = 2,
+    val usbVideoBufferFrames: Int = 15,
     /** Pending USB video receive requests (Bulk/ISO), separate from the frame queue. */
-    val usbReceiveTransferCount: Int = 64,
+    val usbReceiveTransferCount: Int = 256,
     val usbYuvMatrix: UsbYuvMatrix = UsbYuvMatrix.BT601,
     val usbSourceRange: UsbSourceRange = UsbSourceRange.AUTO,
     val usbYuvEncoderInput: Boolean = false,
