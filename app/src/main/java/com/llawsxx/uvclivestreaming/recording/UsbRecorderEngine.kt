@@ -38,7 +38,7 @@ class UsbRecorderEngine(
     private val released = AtomicBoolean(false)
     private val setupDone = CountDownLatch(1)
     private val releaseDone = CountDownLatch(1)
-    private data class VideoFrame(val bytes: ByteArray, val format: Int, val width: Int, val height: Int, val timestampNs: Long)
+    private data class VideoFrame(val bytes: CapturedVideoBuffer, val format: Int, val width: Int, val height: Int, val timestampNs: Long)
     private val videoQueue = ArrayBlockingQueue<VideoFrame>(config.usbVideoBufferFrames.coerceIn(1, 30))
     private val rawVideoConverter = RawVideoConverter()
     private val mjpegDecodePool = MjpegDecodePool(
@@ -302,8 +302,8 @@ class UsbRecorderEngine(
         }, "usb-record-stats").apply { start() }
     }
 
-    override fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) {
-        if (!running.get()) return
+    override fun onUsbVideoFrame(bytes: CapturedVideoBuffer, format: Int, width: Int, height: Int, timestampNs: Long) {
+        if (!running.get()) { bytes.close(); return }
         receivedVideoFrames.incrementAndGet()
         val smoothedTimestampNs = videoTimestampSmoother?.smooth(timestampNs) ?: timestampNs
         if (format == 1) {
@@ -312,8 +312,8 @@ class UsbRecorderEngine(
         }
         val frame = VideoFrame(bytes, format, width, height, smoothedTimestampNs)
         if (!videoQueue.offer(frame)) {
-            if (videoQueue.poll() != null) rawQueueDrops.incrementAndGet()
-            if (!videoQueue.offer(frame)) rawQueueDrops.incrementAndGet()
+            videoQueue.poll()?.let { it.bytes.close(); rawQueueDrops.incrementAndGet() }
+            if (!videoQueue.offer(frame)) { bytes.close(); rawQueueDrops.incrementAndGet() }
         }
     }
 
@@ -332,7 +332,9 @@ class UsbRecorderEngine(
                                 // Wait on the active format only; a 50-ms wait on
                                 // an empty raw queue previously made MJPEG burst.
                                 val raw = videoQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
-                                converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
+                                converted = raw.bytes.use {
+                                    rawVideoConverter.convert(it, raw.format, raw.width, raw.height, raw.timestampNs)
+                                }
                                 converted?.frame ?: run {
                                     rawConversionFailures.incrementAndGet()
                                     null
@@ -666,7 +668,7 @@ class UsbRecorderEngine(
         pipeline?.let { it.close(); it.awaitStopped() }
         val monitor = synchronized(audioMonitorLock) { audioMonitor.also { audioMonitor = null } }
         monitor?.let { it.close(); runCatching { it.awaitStopped(500) } }
-        videoQueue.clear()
+        while (true) (videoQueue.poll() ?: break).bytes.close()
         rawVideoConverter.close()
         videoRenderThread?.interrupt()
         runCatching { videoRenderThread?.join() }

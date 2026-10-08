@@ -1938,6 +1938,14 @@ fail:
   return ret;
 }
 
+uvc_error_t uvc_stream_enable_frame_buffer_handoff(uvc_stream_handle_t *strmh) {
+  if (!strmh || strmh->running || strmh->frame.data) return UVC_ERROR_INVALID_PARAM;
+  strmh->frame.data = malloc(strmh->cur_ctrl.dwMaxVideoFrameSize);
+  if (!strmh->frame.data) return UVC_ERROR_NO_MEM;
+  strmh->frame_buffer_handoff = 1;
+  return UVC_SUCCESS;
+}
+
 uvc_error_t uvc_stream_set_receive_transfer_count(uvc_stream_handle_t *strmh, int count) {
   if (!strmh || count < 8 || count > LIBUVC_NUM_TRANSFER_BUFS)
     return UVC_ERROR_INVALID_PARAM;
@@ -2049,12 +2057,20 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
   frame->sequence = strmh->hold_seq;
   frame->capture_time_finished = strmh->capture_time_finished;
 
-  /* copy the image data from the hold buffer to the frame (unnecessary extra buf?) */
-  if (frame->data_bytes < strmh->hold_bytes) {
-    frame->data = realloc(frame->data, strmh->hold_bytes);
+  if (strmh->frame_buffer_handoff) {
+    // cb_mutex is held. The event thread can reuse only the returned buffer;
+    // frame->data stays exclusively owned by the callback thread.
+    void *replacement = frame->data;
+    frame->data = strmh->holdbuf;
+    strmh->holdbuf = replacement;
+    frame->data_bytes = strmh->hold_bytes;
+  } else {
+    if (frame->data_bytes < strmh->hold_bytes) {
+      frame->data = realloc(frame->data, strmh->hold_bytes);
+    }
+    frame->data_bytes = strmh->hold_bytes;
+    memcpy(frame->data, strmh->holdbuf, frame->data_bytes);
   }
-  frame->data_bytes = strmh->hold_bytes;
-  memcpy(frame->data, strmh->holdbuf, frame->data_bytes);
 
   if (strmh->meta_hold_bytes > 0)
   {

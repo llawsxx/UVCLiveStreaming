@@ -39,7 +39,71 @@ static unsigned char *make_jpeg(int vertical_sampling, unsigned long *size) {
     return bytes;
 }
 
+extern uvc_error_t uvc_mjpeg2yuv_diagnostic(uvc_frame_t *, uvc_frame_t *, unsigned int, unsigned int,
+    long *, char *, size_t);
+#ifdef MJPEG_COMPARE_REFERENCE
+extern uvc_error_t reference_mjpeg2yuv_diagnostic(uvc_frame_t *, uvc_frame_t *, unsigned int, unsigned int,
+    long *, char *, size_t);
+static void test_direct_output(int width, int height, int horizontal, int vertical, int grayscale) {
+    struct jpeg_compress_struct jpeg = {0};
+    struct jpeg_error_mgr error;
+    unsigned char *encoded = NULL;
+    unsigned long length = 0;
+    jpeg.err = jpeg_std_error(&error);
+    jpeg_create_compress(&jpeg);
+    jpeg_mem_dest(&jpeg, &encoded, &length);
+    jpeg.image_width = width; jpeg.image_height = height;
+    jpeg.input_components = grayscale ? 1 : 3;
+    jpeg.in_color_space = grayscale ? JCS_GRAYSCALE : JCS_RGB;
+    jpeg_set_defaults(&jpeg);
+    jpeg.comp_info[0].h_samp_factor = horizontal;
+    jpeg.comp_info[0].v_samp_factor = vertical;
+    jpeg_set_quality(&jpeg, 90, TRUE);
+    jpeg_start_compress(&jpeg, TRUE);
+    unsigned char *row = malloc((size_t)width * jpeg.input_components);
+    assert(row);
+    while (jpeg.next_scanline < jpeg.image_height) {
+        for (int x = 0; x < width * jpeg.input_components; ++x)
+            row[x] = (unsigned char)(x * 37 + jpeg.next_scanline * 13);
+        JSAMPROW rows[] = {row};
+        jpeg_write_scanlines(&jpeg, rows, 1);
+    }
+    jpeg_finish_compress(&jpeg); jpeg_destroy_compress(&jpeg); free(row);
+    unsigned int cw = grayscale ? (width + 1) / 2 : (width + horizontal - 1) / horizontal;
+    unsigned int ch = grayscale ? (height + 1) / 2 : (height + vertical - 1) / vertical;
+    size_t size = (size_t)width * height + 2 * (size_t)cw * ch;
+    unsigned char *guarded = malloc(size + 32);
+    assert(guarded); memset(guarded, 0xa5, size + 32);
+    uvc_frame_t input = {.data = encoded, .data_bytes = length, .width = width, .height = height};
+    uvc_frame_t actual = {.data = guarded + 16, .data_bytes = size};
+    uvc_frame_t *expected = uvc_allocate_frame(0);
+    assert(expected);
+    long warnings = -1;
+    char detail[256];
+    assert(reference_mjpeg2yuv_diagnostic(&input, expected, cw, ch, &warnings, detail, sizeof(detail)) == UVC_SUCCESS);
+    assert(warnings == 0);
+    assert(uvc_mjpeg2yuv_diagnostic(&input, &actual, cw, ch, &warnings, detail, sizeof(detail)) == UVC_SUCCESS);
+    assert(warnings == 0);
+    assert(actual.data == guarded + 16 && actual.data_bytes == size);
+    assert(memcmp(actual.data, expected->data, size) == 0);
+    for (int i = 0; i < 16; ++i) assert(guarded[i] == 0xa5 && guarded[size + 16 + i] == 0xa5);
+    actual.data_bytes = size - 1;
+    assert(uvc_mjpeg2yuv_diagnostic(&input, &actual, cw, ch, &warnings, detail, sizeof(detail)) != UVC_SUCCESS);
+    for (int i = 0; i < 16; ++i) assert(guarded[i] == 0xa5 && guarded[size + 16 + i] == 0xa5);
+    uvc_free_frame(expected); free(guarded); free(encoded);
+}
+#endif
+
 int main(void) {
+#ifdef MJPEG_COMPARE_REFERENCE
+    const int sizes[][2] = {{64,48}, {64,49}, {63,47}, {1,1}, {1920,1080}, {3840,2160}};
+    for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        test_direct_output(sizes[i][0], sizes[i][1], 2, 2, 0);
+        test_direct_output(sizes[i][0], sizes[i][1], 2, 1, 0);
+        test_direct_output(sizes[i][0], sizes[i][1], 1, 1, 0);
+        test_direct_output(sizes[i][0], sizes[i][1], 1, 1, 1);
+    }
+#endif
     uvc_frame_t *out = uvc_allocate_frame(0);
     assert(out);
     for (int sampling = 1; sampling <= 2; ++sampling) {

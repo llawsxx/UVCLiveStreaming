@@ -277,6 +277,8 @@ struct uvc_stream_handle {
   uint8_t running;
   /** Bulk/ISO receive requests selected before start; zero defaults to 64. */
   int receive_transfer_count;
+  /** Opt-in callback delivery by exchanging full-capacity frame buffers. */
+  uint8_t frame_buffer_handoff;
   /** Current control block */
   struct uvc_stream_ctrl cur_ctrl;
 

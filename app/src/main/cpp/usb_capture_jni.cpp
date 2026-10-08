@@ -20,6 +20,8 @@
 #include <sys/ioctl.h>
 #include "mjpeg_repair.h"
 #include "usb_video_interval.h"
+#include "native_video_buffer.h"
+#include <new>
 
 extern "C" uvc_error_t uvc_mjpeg2i420(uvc_frame_t *in, uvc_frame_t *out);
 extern "C" uvc_error_t uvc_mjpeg2i420_diagnostic(uvc_frame_t *in, uvc_frame_t *out,
@@ -30,6 +32,16 @@ extern "C" uvc_error_t uvc_mjpeg2yuv_diagnostic(uvc_frame_t *in, uvc_frame_t *ou
 
 namespace {
 constexpr const char *TAG = "UVCLiveStreamingUsb";
+NativeVideoBufferPool video_buffers;
+struct CapturedVideoLease {
+    void *data;
+    size_t capacity;
+    bool reserved = false;
+    ~CapturedVideoLease() {
+        video_buffers.recycle(data, capacity);
+        if (reserved) video_buffers.releaseReservation(capacity);
+    }
+};
 
 int64_t monotonic_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -330,10 +342,18 @@ public:
         if (started_) throw std::runtime_error("USB capture already started");
         callback_ = env->NewGlobalRef(callback);
         auto klass = env->GetObjectClass(callback);
-        video_method_ = env->GetMethodID(klass, "onUsbVideoFrame", "([BIIIJ)V");
+        video_method_ = env->GetMethodID(klass, "onUsbVideoFrame",
+            "(Lcom/llawsxx/uvclivestreaming/recording/CapturedVideoBuffer;IIIJ)V");
+        auto buffer_class = env->FindClass("com/llawsxx/uvclivestreaming/recording/CapturedVideoBuffer");
+        if (buffer_class) {
+            video_buffer_class_ = static_cast<jclass>(env->NewGlobalRef(buffer_class));
+            video_buffer_ctor_ = env->GetMethodID(buffer_class, "<init>", "(Ljava/nio/ByteBuffer;J)V");
+            video_buffer_close_ = env->GetMethodID(buffer_class, "close", "()V");
+            env->DeleteLocalRef(buffer_class);
+        }
         audio_method_ = env->GetMethodID(klass, "onUsbAudioPcmRaw", "([BJI)V");
         env->DeleteLocalRef(klass);
-        if (!video_method_ || (audio_config_ && !audio_method_))
+        if (!video_method_ || !video_buffer_class_ || !video_buffer_ctor_ || !video_buffer_close_ || (audio_config_ && !audio_method_))
             throw std::runtime_error("USB callback methods unavailable");
         running_ = true;
         if (camera_) {
@@ -357,6 +377,7 @@ public:
             auto result = uvc_stream_open_ctrl(camera_, &stream, &video_ctrl_);
             if (result == UVC_SUCCESS)
                 result = uvc_stream_set_receive_transfer_count(stream, receive_transfer_count_);
+            if (result == UVC_SUCCESS) result = uvc_stream_enable_frame_buffer_handoff(stream);
             if (result == UVC_SUCCESS)
                 result = uvc_stream_start(stream, &UsbCapture::video_callback, this, 0);
             if (result != UVC_SUCCESS) {
@@ -399,6 +420,8 @@ public:
             if (attached) vm_->AttachCurrentThread(&env, nullptr);
             env->DeleteGlobalRef(callback_);
             callback_ = nullptr;
+            if (video_buffer_class_) env->DeleteGlobalRef(video_buffer_class_);
+            video_buffer_class_ = nullptr;
             if (attached) vm_->DetachCurrentThread();
         }
         started_ = false;
@@ -443,13 +466,30 @@ private:
         JNIEnv *env = nullptr;
         bool attached = vm_->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK;
         if (attached && vm_->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
-        auto bytes = env->NewByteArray(static_cast<jsize>(length));
-        if (bytes) {
-            env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(length),
-                reinterpret_cast<const jbyte *>(frame->data));
-            env->CallVoidMethod(callback_, video_method_, bytes, format,
-                static_cast<jint>(frame->width), static_cast<jint>(frame->height), static_cast<jlong>(timestamp_ns));
-            env->DeleteLocalRef(bytes);
+        const size_t capacity = video_ctrl_.dwMaxVideoFrameSize;
+        std::unique_ptr<CapturedVideoLease> lease(new (std::nothrow) CapturedVideoLease{nullptr, capacity});
+        if (lease) lease->reserved = video_buffers.reserve(capacity);
+        void *replacement = lease && lease->reserved ? video_buffers.acquire(capacity) : nullptr;
+        if (!replacement) ++video_buffer_drops_;
+        if (replacement) {
+            // frame storage is now detached from libuvc; a later frame cannot overwrite it.
+            lease->data = frame->data;
+            frame->data = replacement;
+            auto bytes = env->NewDirectByteBuffer(lease->data, static_cast<jlong>(length));
+            auto owned = bytes ? env->NewObject(video_buffer_class_, video_buffer_ctor_, bytes,
+                reinterpret_cast<jlong>(lease.get())) : nullptr;
+            if (owned) {
+                lease.release(); // Kotlin now owns this frame, including callback error cleanup.
+                env->CallVoidMethod(callback_, video_method_, owned, format,
+                    static_cast<jint>(frame->width), static_cast<jint>(frame->height), static_cast<jlong>(timestamp_ns));
+                if (env->ExceptionCheck()) {
+                    env->ExceptionDescribe(); env->ExceptionClear();
+                    // close is idempotent even if the callback already returned the frame.
+                    env->CallVoidMethod(owned, video_buffer_close_);
+                }
+                env->DeleteLocalRef(owned);
+            }
+            if (bytes) env->DeleteLocalRef(bytes);
         }
         if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
         if (attached) vm_->DetachCurrentThread();
@@ -460,11 +500,11 @@ private:
             video_last_log_frames_ = video_frames_;
         } else if (now - video_last_log_ns_ >= 5000000000LL) {
             __android_log_print(ANDROID_LOG_INFO, TAG,
-                "USB video callbacks: frames=%llu fps=%.3f sequenceGaps=%llu bytes=%llu callbackMaxMs=%.3f",
+                "USB video callbacks: frames=%llu fps=%.3f sequenceGaps=%llu bytes=%llu callbackMaxMs=%.3f bufferDrops=%llu",
                 (unsigned long long)video_frames_,
                 (video_frames_ - video_last_log_frames_) * 1000000000.0 / (now - video_last_log_ns_),
                 (unsigned long long)video_sequence_gaps_, (unsigned long long)video_bytes_,
-                video_callback_max_ns_ / 1000000.0);
+                video_callback_max_ns_ / 1000000.0, (unsigned long long)video_buffer_drops_);
             video_last_log_ns_ = now;
             video_last_log_frames_ = video_frames_;
             video_callback_max_ns_ = 0;
@@ -543,6 +583,7 @@ private:
     uint64_t audio_packets_ = 0;
     uint64_t video_frames_ = 0, video_bytes_ = 0, video_sequence_gaps_ = 0;
     uint64_t video_last_log_frames_ = 0;
+    uint64_t video_buffer_drops_ = 0;
     uint32_t video_last_sequence_ = 0;
     int64_t video_last_log_ns_ = 0, video_callback_max_ns_ = 0;
     uint64_t audio_bytes_ = 0;
@@ -555,6 +596,9 @@ private:
     std::thread event_thread_;
     jobject callback_ = nullptr;
     jmethodID video_method_ = nullptr;
+    jclass video_buffer_class_ = nullptr;
+    jmethodID video_buffer_ctor_ = nullptr;
+    jmethodID video_buffer_close_ = nullptr;
     jmethodID audio_method_ = nullptr;
 };
 }
@@ -781,6 +825,35 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegTo
     return decode_mjpeg_direct(env, encoded, width, height, chroma_width, chroma_height, destination);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeReleaseVideoFrame(
+    JNIEnv *, jobject, jlong handle) {
+    delete reinterpret_cast<CapturedVideoLease *>(handle);
+}
+
+static const uint8_t *readable_direct_input(JNIEnv *env, jobject buffer, jint length) {
+    if (!buffer || length <= 0 || env->GetDirectBufferCapacity(buffer) < length) return nullptr;
+    return static_cast<const uint8_t *>(env->GetDirectBufferAddress(buffer));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeDecodeMjpegBufferToYuv(
+    JNIEnv *env, jobject, jobject encoded, jint length, jint width, jint height,
+    jint chroma_width, jint chroma_height, jobject destination) {
+    if (width <= 0 || height <= 0 || width > 3840 || height > 2160 ||
+        chroma_width <= 0 || chroma_height <= 0 || chroma_width > width || chroma_height > height) return JNI_FALSE;
+    const auto *src = readable_direct_input(env, encoded, length);
+    const size_t size = static_cast<size_t>(width) * height + 2 * static_cast<size_t>(chroma_width) * chroma_height;
+    auto *dst = writable_direct_output(env, destination, size);
+    if (!src || !dst) return JNI_FALSE;
+    uvc_frame_t output{};
+    output.data = dst; output.data_bytes = size;
+    try {
+        return decode_mjpeg_i420(src, static_cast<size_t>(length), width, height, &output, chroma_width, chroma_height)
+            ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception &error) { throw_java(env, error.what()); return JNI_FALSE; }
+}
+
 // Source-preserving packing for GL. The legacy I420 helper below is only for explicit I420 callers.
 static void repack_raw_yuv(const uint8_t *src, int format, int width, int height, uint8_t *dst) {
     const size_t pixels = static_cast<size_t>(width) * height;
@@ -857,6 +930,24 @@ Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeConvertRawToG
     if (!elements) return JNI_FALSE;
     repack_raw_yuv(reinterpret_cast<const uint8_t *>(elements), format, width, height, dst);
     env->ReleaseByteArrayElements(encoded, elements, JNI_ABORT);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_llawsxx_uvclivestreaming_recording_NativeUsbCapture_nativeConvertRawBufferToGpuBuffer(
+    JNIEnv *env, jobject, jobject encoded, jint length, jint format, jint width, jint height, jobject destination) {
+    if (width <= 0 || height <= 0 || width > 3840 || height > 2160) return JNI_FALSE;
+    const bool rgb = format == 4 || format == 9;
+    if (!rgb && format != 2 && format != 3 && format != 5 && format != 6 && format != 7) return JNI_FALSE;
+    if (!rgb && format != 6 && ((width & 1) || (height & 1))) return JNI_FALSE;
+    const size_t pixels = static_cast<size_t>(width) * height;
+    const size_t size = rgb || format == 7 ? pixels * 3 :
+        format == 2 || format == 3 ? pixels * 2 : pixels + 2 * static_cast<size_t>((width + 1) / 2) * ((height + 1) / 2);
+    const auto *src = readable_direct_input(env, encoded, length);
+    auto *dst = static_cast<uint8_t *>(writable_direct_output(env, destination, size));
+    if (!src || !dst || static_cast<size_t>(length) < size) return JNI_FALSE;
+    if (rgb || format == 6) memcpy(dst, src, size);
+    else repack_raw_yuv(src, format, width, height, dst);
     return JNI_TRUE;
 }
 

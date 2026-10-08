@@ -292,6 +292,58 @@ static void test_receive_diagnostics(void) {
     free_bulk_stream(&stream);
 }
 
+extern void _uvc_populate_frame(uvc_stream_handle_t *);
+
+static void test_exclusive_frame_handoff(void) {
+    struct uvc_device_handle device = {0};
+    struct uvc_stream_handle stream;
+    init_bulk_stream(&stream, &device);
+    struct uvc_streaming_interface stream_if = {0};
+    uvc_format_desc_t format = {.bFormatIndex = 1};
+    uvc_frame_desc_t descriptor = {.bFrameIndex = 1, .wWidth = 64, .wHeight = 32};
+    format.frame_descs = &descriptor;
+    stream_if.format_descs = &format;
+    stream.stream_if = &stream_if;
+    stream.cur_ctrl.bFormatIndex = 1;
+    stream.cur_ctrl.bFrameIndex = 1;
+    assert(uvc_stream_enable_frame_buffer_handoff(NULL) == UVC_ERROR_INVALID_PARAM);
+    stream.running = 1;
+    assert(uvc_stream_enable_frame_buffer_handoff(&stream) == UVC_ERROR_INVALID_PARAM);
+    stream.running = 0;
+    assert(uvc_stream_enable_frame_buffer_handoff(&stream) == UVC_SUCCESS);
+    assert(uvc_stream_enable_frame_buffer_handoff(&stream) == UVC_ERROR_INVALID_PARAM);
+    uint8_t packet[] = {12, 0x8f, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0xff, 0xd8, 11, 0xff, 0xd9};
+    _uvc_process_payload(&stream, packet, sizeof(packet));
+    void *assembled = stream.holdbuf;
+    void *replacement = stream.frame.data;
+    pthread_mutex_lock(&stream.cb_mutex);
+    _uvc_populate_frame(&stream);
+    pthread_mutex_unlock(&stream.cb_mutex);
+    assert(stream.frame.data == assembled);
+    assert(stream.holdbuf == replacement);
+    assert(stream.frame.data_bytes == 5);
+    void *held = stream.frame.data;
+    stream.frame.data = malloc(8192);
+    assert(stream.frame.data);
+    for (int i = 0; i < 10; ++i) {
+        packet[1] = (i & 1) ? 0x8f : 0x8e;
+        packet[2] = (uint8_t)(i + 2);
+        packet[14] = (uint8_t)(20 + i);
+        _uvc_process_payload(&stream, packet, sizeof(packet));
+        assembled = stream.holdbuf;
+        pthread_mutex_lock(&stream.cb_mutex);
+        _uvc_populate_frame(&stream);
+        pthread_mutex_unlock(&stream.cb_mutex);
+        assert(stream.frame.data == assembled);
+        assert(((uint8_t *)stream.frame.data)[2] == 20 + i);
+        assert(((uint8_t *)held)[2] == 11);
+    }
+    free(stream.frame.data);
+    free_bulk_stream(&stream);
+    assert(((uint8_t *)held)[2] == 11);
+    free(held);
+}
+
 int main(void) {
     test_receive_diagnostics();
     struct uvc_device_handle device = {0};
@@ -434,6 +486,7 @@ int main(void) {
     test_raw_bulk_repair(UVC_FRAME_FORMAT_GRAY16, 4096, 0);
     test_raw_bulk_repair(UVC_FRAME_FORMAT_YUYV, 4096, 1);
     test_raw_sizes_and_false_boundaries();
+    test_exclusive_frame_handoff();
     puts("UVC payload assembly native tests passed");
     return 0;
 }

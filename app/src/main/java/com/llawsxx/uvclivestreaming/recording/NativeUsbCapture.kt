@@ -21,7 +21,7 @@ internal fun usbPcmLevelDb(bytes: ByteArray): Float {
 
 internal interface UsbCaptureCallback {
     /** Raw UVC frame: 1 MJPG, 2 YUYV, 3 UYVY, 4 RGB. */
-    fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long)
+    fun onUsbVideoFrame(bytes: CapturedVideoBuffer, format: Int, width: Int, height: Int, timestampNs: Long)
     /** Signed 16-bit little-endian, interleaved PCM at the rate reported by nativeFormat. */
     fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long)
     /** Signed LE PCM in 2/3/4-byte subslots; valid bits are left-aligned per UAC. */
@@ -55,6 +55,15 @@ internal object NativeUsbCapture {
     external fun nativeConvertRawToGpuBuffer(bytes: ByteArray, format: Int, width: Int, height: Int, destination: ByteBuffer): Boolean
     /** [video width, video height, audio sample rate, channels, valid bits, subslot bytes]. */
     external fun nativeFormat(handle: Long): IntArray
+    external fun nativeReleaseVideoFrame(handle: Long)
+    external fun nativeDecodeMjpegBufferToYuv(bytes: ByteBuffer, length: Int, width: Int, height: Int,
+        chromaWidth: Int, chromaHeight: Int, destination: ByteBuffer): Boolean
+    fun decodeMjpegToGpuBuffer(bytes: ByteBuffer, width: Int, height: Int, destination: ByteBuffer): Boolean {
+        val geometry = MjpegChromaGeometry.read(bytes, width, height) ?: ((width + 1) / 2 to (height + 1) / 2)
+        return nativeDecodeMjpegBufferToYuv(bytes, bytes.limit(), width, height, geometry.first, geometry.second, destination)
+    }
+    external fun nativeConvertRawBufferToGpuBuffer(bytes: ByteBuffer, length: Int, format: Int,
+        width: Int, height: Int, destination: ByteBuffer): Boolean
     external fun nativeStart(handle: Long, callback: UsbCaptureCallback)
     /** Received video endpoint bytes including UVC headers; excludes audio and bus overhead. */
     external fun nativeReceivedVideoBytes(handle: Long): Long

@@ -13,10 +13,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * latency cannot grow without bound when the USB source outruns the device.
  */
 internal class MjpegDecodePool(
-    private val decoder: (ByteArray, Int, Int, Int, ByteBuffer) -> Boolean,
+    private val decoder: (ByteBuffer, Int, Int, Int, ByteBuffer) -> Boolean,
     workerCount: Int = 4,
     capacity: Int = 10,
-    private val chromaGeometry: ((ByteArray, Int, Int) -> Pair<Int, Int>?)? = null,
+    private val chromaGeometry: ((ByteBuffer, Int, Int) -> Pair<Int, Int>?)? = null,
 ) {
     data class Diagnostics(
         val offered: Long,
@@ -44,7 +44,7 @@ internal class MjpegDecodePool(
 
     private data class InputFrame(
         val sequence: Long,
-        val bytes: ByteArray,
+        val bytes: CapturedVideoBuffer,
         val format: Int,
         val width: Int,
         val height: Int,
@@ -90,21 +90,26 @@ internal class MjpegDecodePool(
         }
     }
 
-    fun offer(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) {
-        if (!running.get()) return
+    // Legacy/test inputs; live capture always transfers a native buffer without copying.
+    fun offer(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) =
+        offer(CapturedVideoBuffer(ByteBuffer.wrap(bytes)), format, width, height, timestampNs)
+
+    fun offer(bytes: CapturedVideoBuffer, format: Int, width: Int, height: Int, timestampNs: Long) {
         synchronized(monitor) {
-            if (!running.get()) return
+            if (!running.get()) { bytes.close(); return }
             val frame = InputFrame(nextSequence++, bytes, format, width, height, timestampNs)
             if (!input.offer(frame)) {
                 // Drop the oldest queued frame, but publish a completion for
                 // its sequence so ordered output never waits forever.
                 input.poll()?.let { dropped ->
                     inputDrops++
+                    dropped.bytes.close()
                     addCompletedLocked(DecodedFrame(
                         dropped.width, dropped.height, dropped.timestampNs, null,
                     ), dropped.sequence)
                 }
                 if (!input.offer(frame)) {
+                    frame.bytes.close()
                     inputDrops++
                     addCompletedLocked(
                         DecodedFrame(frame.width, frame.height, frame.timestampNs, null),
@@ -136,9 +141,9 @@ internal class MjpegDecodePool(
     }
 
     fun close() {
-        if (!running.compareAndSet(true, false)) return
-        input.clear()
         synchronized(monitor) {
+            if (!running.compareAndSet(true, false)) return
+            while (true) (input.poll() ?: break).bytes.close()
             completed.values.forEach { it.close() }
             completed.clear()
             completedBytes = 0L
@@ -160,13 +165,13 @@ internal class MjpegDecodePool(
             var ch = (frame.height + 1) / 2
             try {
                 if (frame.width in 1..3840 && frame.height in 1..2160) {
-                    chromaGeometry?.invoke(frame.bytes, frame.width, frame.height)?.let { (w, h) ->
+                    chromaGeometry?.invoke(frame.bytes.buffer, frame.width, frame.height)?.let { (w, h) ->
                         require(w in 1..frame.width && h in 1..frame.height)
                         cw = w; ch = h
                     }
                     val size = frame.width * frame.height + 2 * cw * ch
                     yuv = buffers.acquire(size)
-                    if (yuv != null && !decoder(frame.bytes, frame.format, frame.width, frame.height, yuv.buffer)) {
+                    if (yuv != null && !decoder(frame.bytes.buffer, frame.format, frame.width, frame.height, yuv.buffer)) {
                         yuv.close()
                         yuv = null
                     }
@@ -174,6 +179,8 @@ internal class MjpegDecodePool(
             } catch (_: Throwable) {
                 yuv?.close()
                 yuv = null
+            } finally {
+                frame.bytes.close()
             }
             val decodeElapsedNs = System.nanoTime() - decodeStartNs
             synchronized(monitor) {

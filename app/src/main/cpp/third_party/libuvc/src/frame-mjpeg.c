@@ -128,8 +128,8 @@ static void insert_huff_tables(j_decompress_ptr dinfo) {
   COPY_HUFF_TABLE(dinfo, ac_huff_tbl_ptrs[1], ac_chromi);
 }
 
-/* Decode JPEG component planes without an intermediate RGB image. libjpeg's
-   memory pool owns all scratch planes, including on longjmp/error cleanup. */
+/* Decode matching component rows directly into caller-owned output. Only
+   padded edge rows and components needing resampling use libjpeg-owned scratch. */
 static uvc_error_t decode_yuv_planes(uvc_frame_t *in, uvc_frame_t *out,
     unsigned int source_cw, unsigned int source_ch,
     long *warnings, char *message, size_t message_size) {
@@ -137,6 +137,9 @@ static uvc_error_t decode_yuv_planes(uvc_frame_t *in, uvc_frame_t *out,
   struct error_mgr jerr = {0};
   JSAMPARRAY planes[3] = {0};
   JSAMPARRAY strip[3] = {0};
+  JSAMPARRAY edges[3] = {0};
+  int matching[3] = {0};
+  size_t strides[3] = {0};
   size_t pixels = (size_t)in->width * in->height;
   size_t cw = (in->width + 1) / 2, ch = (in->height + 1) / 2;
   dinfo.err = jpeg_std_error(&jerr.super);
@@ -174,29 +177,59 @@ static uvc_error_t decode_yuv_planes(uvc_frame_t *in, uvc_frame_t *out,
     }
     cw = source_cw; ch = source_ch;
   }
+  if (uvc_ensure_frame_size(out, pixels + 2 * cw * ch) < 0) goto fail_yuv;
   for (int c = 0; c < dinfo.num_components; ++c) {
     jpeg_component_info *comp = &dinfo.comp_info[c];
-    JDIMENSION rows = ((comp->height_in_blocks + comp->v_samp_factor - 1) /
-        comp->v_samp_factor) * comp->v_samp_factor * DCTSIZE;
-    planes[c] = (*dinfo.mem->alloc_sarray)((j_common_ptr)&dinfo, JPOOL_IMAGE,
-        comp->width_in_blocks * DCTSIZE, rows);
+    size_t dw = c == 0 ? in->width : cw, dh = c == 0 ? in->height : ch;
+    JDIMENSION strip_rows = comp->v_samp_factor * DCTSIZE;
+    strides[c] = comp->width_in_blocks * DCTSIZE;
+    matching[c] = comp->downsampled_width == dw && comp->downsampled_height == dh;
+    if (matching[c]) {
+      // JPEG may write complete DCT rows. Redirect padded rows/columns to a
+      // small MCU strip so tightly packed output never gets overrun.
+      edges[c] = (*dinfo.mem->alloc_sarray)((j_common_ptr)&dinfo, JPOOL_IMAGE,
+          strides[c], strip_rows);
+      strip[c] = (JSAMPARRAY)(*dinfo.mem->alloc_small)((j_common_ptr)&dinfo,
+          JPOOL_IMAGE, strip_rows * sizeof(JSAMPROW));
+    } else {
+      JDIMENSION rows = ((comp->height_in_blocks + comp->v_samp_factor - 1) /
+          comp->v_samp_factor) * strip_rows;
+      planes[c] = (*dinfo.mem->alloc_sarray)((j_common_ptr)&dinfo, JPOOL_IMAGE,
+          strides[c], rows);
+    }
   }
   while (dinfo.output_scanline < dinfo.output_height) {
     JDIMENSION mcu = dinfo.output_scanline / (dinfo.max_v_samp_factor * DCTSIZE);
-    for (int c = 0; c < dinfo.num_components; ++c)
-      strip[c] = planes[c] + mcu * dinfo.comp_info[c].v_samp_factor * DCTSIZE;
+    for (int c = 0; c < dinfo.num_components; ++c) {
+      size_t dw = c == 0 ? in->width : cw, dh = c == 0 ? in->height : ch;
+      JDIMENSION rows = dinfo.comp_info[c].v_samp_factor * DCTSIZE;
+      if (matching[c]) {
+        unsigned char *dst = (unsigned char *)out->data + (c == 0 ? 0 : pixels + (c - 1) * cw * ch);
+        for (JDIMENSION row = 0; row < rows; ++row) {
+          size_t y = (size_t)mcu * rows + row;
+          strip[c][row] = strides[c] == dw && y < dh ? dst + y * dw : edges[c][row];
+        }
+      } else strip[c] = planes[c] + mcu * rows;
+    }
     if (!jpeg_read_raw_data(&dinfo, strip, dinfo.max_v_samp_factor * DCTSIZE)) goto fail_yuv;
+    for (int c = 0; c < dinfo.num_components; ++c) {
+      size_t dw = c == 0 ? in->width : cw, dh = c == 0 ? in->height : ch;
+      if (matching[c] && strides[c] != dw) {
+        unsigned char *dst = (unsigned char *)out->data + (c == 0 ? 0 : pixels + (c - 1) * cw * ch);
+        JDIMENSION rows = dinfo.comp_info[c].v_samp_factor * DCTSIZE;
+        for (JDIMENSION row = 0; row < rows; ++row) {
+          size_t y = (size_t)mcu * rows + row;
+          if (y < dh) memcpy(dst + y * dw, edges[c][row], dw);
+        }
+      }
+    }
   }
-  if (uvc_ensure_frame_size(out, pixels + 2 * cw * ch) < 0) goto fail_yuv;
   for (int c = 0; c < 3; ++c) {
     size_t dw = c == 0 ? in->width : cw, dh = c == 0 ? in->height : ch;
     unsigned char *dst = (unsigned char *)out->data + (c == 0 ? 0 : pixels + (c - 1) * cw * ch);
     if (c >= dinfo.num_components) { memset(dst, 128, dw * dh); continue; }
+    if (matching[c]) continue;
     size_t sw = dinfo.comp_info[c].downsampled_width, sh = dinfo.comp_info[c].downsampled_height;
-    if (sw == dw && sh == dh) {
-      for (size_t y = 0; y < dh; ++y) memcpy(dst + y * dw, planes[c][y], dw);
-      continue;
-    }
     for (size_t y = 0; y < dh; ++y) {
       size_t y0 = y * sh / dh, y1 = (y + 1) * sh / dh;
       if (y1 <= y0) y1 = y0 + 1;

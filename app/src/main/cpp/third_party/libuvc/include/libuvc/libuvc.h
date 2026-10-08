@@ -653,6 +653,9 @@ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh, uvc_stream_handle_t 
 /** Select pending video receive requests before start, for both Bulk and ISO.
  * Valid range: 8 through the compiled slot limit (512 in this app). */
 uvc_error_t uvc_stream_set_receive_transfer_count(uvc_stream_handle_t *strmh, int count);
+/** Opt in before start. Callback may take frame->data only after replacing it
+ * with malloc-compatible storage of dwMaxVideoFrameSize bytes. */
+uvc_error_t uvc_stream_enable_frame_buffer_handoff(uvc_stream_handle_t *strmh);
 uvc_error_t uvc_stream_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_get_current_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_start(uvc_stream_handle_t *strmh,

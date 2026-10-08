@@ -17,7 +17,19 @@ internal class RawVideoConverter(
 
     private val buffers = DirectVideoBufferPool(1)
 
-    fun convert(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long): ConvertedFrame? {
+    fun convert(bytes: CapturedVideoBuffer, format: Int, width: Int, height: Int, timestampNs: Long): ConvertedFrame? {
+        return convertImpl(bytes.size, format, width, height, timestampNs) { destination ->
+            NativeUsbCapture.nativeConvertRawBufferToGpuBuffer(bytes.buffer, bytes.size, format, width, height, destination)
+        }
+    }
+
+    fun convert(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long): ConvertedFrame? =
+        convertImpl(bytes.size, format, width, height, timestampNs) { destination ->
+            converter(bytes, format, width, height, destination)
+        }
+
+    private inline fun convertImpl(inputBytes: Int, format: Int, width: Int, height: Int, timestampNs: Long,
+        convert: (ByteBuffer) -> Boolean): ConvertedFrame? {
         if (width !in 1..3840 || height !in 1..2160) return null
         val rgb = format == 4 || format == 9
         if (!rgb && format != 2 && format != 3 && format != 5 && format != 6 && format != 7) return null
@@ -31,10 +43,10 @@ internal class RawVideoConverter(
             4, 7, 9 -> pixels * 3
             else -> size
         }
-        if (bytes.size < inputSize) return null
+        if (inputBytes < inputSize) return null
         val lease = buffers.acquire(size) ?: return null
         try {
-            if (!converter(bytes, format, width, height, lease.buffer)) {
+            if (!convert(lease.buffer)) {
                 lease.close()
                 return null
             }

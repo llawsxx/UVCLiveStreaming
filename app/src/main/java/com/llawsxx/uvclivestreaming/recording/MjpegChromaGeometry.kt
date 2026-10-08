@@ -1,28 +1,33 @@
 package com.llawsxx.uvclivestreaming.recording
 
+import java.nio.ByteBuffer
+
 /** Reads only the bounded JPEG marker header, so decoded buffers keep the source sampling. */
 internal object MjpegChromaGeometry {
-    fun read(data: ByteArray, width: Int, height: Int): Pair<Int, Int>? {
-        fun u8(i: Int) = data[i].toInt() and 255
+    fun read(data: ByteArray, width: Int, height: Int): Pair<Int, Int>? = read(data.size, width, height) { data[it] }
+    fun read(data: ByteBuffer, width: Int, height: Int): Pair<Int, Int>? = read(data.limit(), width, height) { data.get(it) }
+
+    private fun read(size: Int, width: Int, height: Int, byteAt: (Int) -> Byte): Pair<Int, Int>? {
+        fun u8(i: Int) = byteAt(i).toInt() and 255
         fun u16(i: Int) = (u8(i) shl 8) or u8(i + 1)
         var pos = -1
-        for (i in 0 until data.size - 1) {
+        for (i in 0 until size - 1) {
             if (u8(i) == 255 && u8(i + 1) == 216) { pos = i + 2; break }
         }
         if (pos < 0) {
             // The native repair path may restore a missing SOI after a short transport prefix.
-            pos = (0..minOf(32, data.size - 2)).firstOrNull {
+            pos = (0..minOf(32, size - 2)).firstOrNull {
                 u8(it) == 255 && (u8(it + 1) in 224..239 || u8(it + 1) in listOf(219, 192, 196, 254))
             } ?: return null
         }
-        while (pos < data.size) {
+        while (pos < size) {
             if (u8(pos++) != 255) return null
-            while (pos < data.size && u8(pos) == 255) pos++
-            if (pos >= data.size) return null
+            while (pos < size && u8(pos) == 255) pos++
+            if (pos >= size) return null
             val marker = u8(pos++)
-            if (marker == 218 || marker == 217 || data.size - pos < 2) return null
+            if (marker == 218 || marker == 217 || size - pos < 2) return null
             val length = u16(pos)
-            if (length < 2 || length > data.size - pos) return null
+            if (length < 2 || length > size - pos) return null
             if (marker in listOf(192, 193, 194)) {
                 if (length < 8 || u8(pos + 2) != 8 || u16(pos + 3) != height || u16(pos + 5) != width) return null
                 val count = u8(pos + 7)

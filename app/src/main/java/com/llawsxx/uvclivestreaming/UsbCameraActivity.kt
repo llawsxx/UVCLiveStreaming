@@ -78,6 +78,7 @@ import com.llawsxx.uvclivestreaming.recording.VideoColorGradeSettings
 import com.llawsxx.uvclivestreaming.recording.UsbAudioPipeline
 import com.llawsxx.uvclivestreaming.recording.RecordingMode
 import com.llawsxx.uvclivestreaming.recording.UsbCaptureCallback
+import com.llawsxx.uvclivestreaming.recording.CapturedVideoBuffer
 import com.llawsxx.uvclivestreaming.recording.UsbYuvMatrix
 import com.llawsxx.uvclivestreaming.recording.UsbSourceRange
 import com.llawsxx.uvclivestreaming.recording.UsbRecorderEngine
@@ -1364,7 +1365,7 @@ private class UsbIdlePreview(
     @Volatile private var colorGradeSettings = initialColorGrade
     private val audioMonitorLock = Any()
     private data class Frame(
-        val bytes: ByteArray,
+        val bytes: CapturedVideoBuffer,
         val format: Int,
         val width: Int,
         val height: Int,
@@ -1462,7 +1463,7 @@ private class UsbIdlePreview(
                 val monitor = synchronized(audioMonitorLock) { audioMonitor.also { audioMonitor = null } }
                 monitor?.let { it.close(); runCatching { it.awaitStopped(500) } }
                 stopped.set(true)
-                frameQueue.clear()
+                while (true) (frameQueue.poll() ?: break).bytes.close()
                 rawVideoConverter.close()
                 mjpegDecodePool.close()
                 surface = null
@@ -1509,16 +1510,16 @@ private class UsbIdlePreview(
         }, "usb-preview-handoff").start()
     }
 
-    override fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) {
-        if (stopped.get() || surface?.isValid != true) return
+    override fun onUsbVideoFrame(bytes: CapturedVideoBuffer, format: Int, width: Int, height: Int, timestampNs: Long) {
+        if (stopped.get() || surface?.isValid != true) { bytes.close(); return }
         if (format == 1) {
             mjpegDecodePool.offer(bytes, format, width, height, timestampNs)
             return
         }
         val frame = Frame(bytes, format, width, height, timestampNs)
         if (!frameQueue.offer(frame)) {
-            frameQueue.poll()
-            frameQueue.offer(frame)
+            frameQueue.poll()?.bytes?.close()
+            if (!frameQueue.offer(frame)) bytes.close()
         }
     }
 
@@ -1545,7 +1546,9 @@ private class UsbIdlePreview(
                             GpuVideoFrame.fromDecoded(decoded) ?: continue
                         } else {
                             val raw = frameQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
-                            converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
+                            converted = raw.bytes.use {
+                                rawVideoConverter.convert(it, raw.format, raw.width, raw.height, raw.timestampNs)
+                            }
                             converted?.frame ?: continue
                         }
                         val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate)

@@ -230,5 +230,69 @@ class MjpegDecodePoolTest {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(1)
         assertTrue(condition())
+    }    @Test fun capturedInputsAreReleasedOnSuccessFailureAndRejectedOffer() {
+        val released = java.util.concurrent.atomic.AtomicInteger()
+        fun input(value: Int) = CapturedVideoBuffer(java.nio.ByteBuffer.allocateDirect(1).apply {
+            put(0, value.toByte())
+        }) { released.incrementAndGet() }
+        val pool = MjpegDecodePool(decoder = { bytes, _, _, _, _ ->
+            when (bytes.get(0).toInt()) { 0 -> true; 1 -> false; else -> error("decode error") }
+        }, workerCount = 1)
+        val rejected = input(0)
+        pool.offer(rejected, 1, 2, 2, 0)
+        rejected.close()
+        assertEquals(1, released.get())
+        pool.start()
+        try {
+            for (i in 0..2) {
+                pool.offer(input(i), 1, 2, 2, i.toLong())
+                pool.poll(2_000)!!.close()
+            }
+            assertEquals(4, released.get())
+            assertEquals(0, pool.diagnostics().outputBuffers.inUse)
+        } finally { pool.close() }
+        pool.offer(input(0), 1, 2, 2, 0)
+        assertEquals(5, released.get())
     }
+
+    @Test fun overflowAndStopReleaseQueuedInputsWithoutReleasingActiveDecode() {
+        val started = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
+        val finish = CountDownLatch(1)
+        val released = Array(3) { java.util.concurrent.atomic.AtomicInteger() }
+        fun input(index: Int) = CapturedVideoBuffer(java.nio.ByteBuffer.allocateDirect(1).apply {
+            put(0, index.toByte())
+        }) { released[index].incrementAndGet() }
+        val pool = MjpegDecodePool(decoder = { bytes, _, _, _, _ ->
+            if (bytes.get(0).toInt() == 0) {
+                started.countDown()
+                // Simulate native decode, which cannot be cancelled by Thread.interrupt().
+                while (finish.count > 0) {
+                    try { finish.await() } catch (_: InterruptedException) { interrupted.countDown() }
+                }
+            }
+            true
+        }, workerCount = 1, capacity = 1)
+        pool.start()
+        var closer: Thread? = null
+        try {
+            pool.offer(input(0), 1, 2, 2, 0)
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            pool.offer(input(1), 1, 2, 2, 1)
+            pool.offer(input(2), 1, 2, 2, 2)
+            assertEquals(1, released[1].get())
+            assertEquals(0, released[0].get())
+            closer = Thread { pool.close() }.apply { start() }
+            assertTrue(interrupted.await(2, TimeUnit.SECONDS))
+            assertEquals(1, released[2].get())
+            assertEquals(0, released[0].get())
+            finish.countDown()
+            closer.join(2_000)
+            assertFalse(closer.isAlive)
+            assertEquals(1, released[0].get())
+            assertEquals(0, pool.diagnostics().outputBuffers.inUse)
+        } finally { finish.countDown(); closer?.join(2_000); pool.close() }
+    }
+
+
 }
