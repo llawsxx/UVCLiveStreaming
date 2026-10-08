@@ -41,12 +41,14 @@ class UsbRecorderEngine(
     private data class VideoFrame(val bytes: CapturedVideoBuffer, val format: Int, val width: Int, val height: Int, val timestampNs: Long)
     private val videoQueue = ArrayBlockingQueue<VideoFrame>(config.usbVideoBufferFrames.coerceIn(1, 30))
     private val rawVideoConverter = RawVideoConverter()
+    private val videoWake = QueueWakeSignal()
     private val mjpegDecodePool = MjpegDecodePool(
         decoder = { bytes, format, width, height, destination ->
             format == 1 && NativeUsbCapture.decodeMjpegToGpuBuffer(bytes, width, height, destination)
         },
         capacity = config.usbVideoBufferFrames.coerceIn(1, 30),
         chromaGeometry = MjpegChromaGeometry::read,
+        onOutputReady = videoWake::signal,
     )
     private val frameCount = AtomicLong()
     private val receivedVideoFrames = AtomicLong()
@@ -315,6 +317,7 @@ class UsbRecorderEngine(
             videoQueue.poll()?.let { it.bytes.close(); rawQueueDrops.incrementAndGet() }
             if (!videoQueue.offer(frame)) { bytes.close(); rawQueueDrops.incrementAndGet() }
         }
+        videoWake.signal()
     }
 
     private fun startVideoRender() {
@@ -323,18 +326,19 @@ class UsbRecorderEngine(
                 GpuVideoRenderer(checkNotNull(encoderInputSurface), config.usbYuvMatrix, config.usbSourceRange,
                     initialColorGrade = colorGradeSettings).use { gpu ->
                     while (running.get()) {
-                        val decoded = mjpegDecodePool.poll(5)
+                        val revision = videoWake.snapshot()
+                        val decoded = mjpegDecodePool.poll(0)
                         var converted: RawVideoConverter.ConvertedFrame? = null
                         try {
                             val frame = if (decoded != null) {
                                 GpuVideoFrame.fromDecoded(decoded) ?: continue
                             } else {
-                                // Wait on the active format only; a 50-ms wait on
-                                // an empty raw queue previously made MJPEG burst.
-                                val raw = videoQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
-                                converted = raw.bytes.use {
-                                    rawVideoConverter.convert(it, raw.format, raw.width, raw.height, raw.timestampNs)
+                                val raw = videoQueue.poll()
+                                if (raw == null) {
+                                    if (!videoWake.awaitChange(revision)) break
+                                    continue
                                 }
+                                converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
                                 converted?.frame ?: run {
                                     rawConversionFailures.incrementAndGet()
                                     null
@@ -633,6 +637,7 @@ class UsbRecorderEngine(
 
     override fun stop(onComplete: () -> Unit) {
         running.set(false)
+        videoWake.close()
         Thread({
             try {
                 setupDone.await()
@@ -645,6 +650,7 @@ class UsbRecorderEngine(
 
     override fun forceRelease() {
         running.set(false)
+        videoWake.close()
         if (setupDone.count == 0L) releaseResources()
     }
 
@@ -654,6 +660,7 @@ class UsbRecorderEngine(
             return
         }
         try {
+        videoWake.close()
         mjpegDecodePool.close()
         systemAudioCapture?.close()
         systemAudioCapture = null

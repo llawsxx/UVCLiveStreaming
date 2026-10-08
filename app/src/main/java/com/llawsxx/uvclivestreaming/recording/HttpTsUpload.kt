@@ -241,7 +241,7 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                 while (!closed) {
                     queue.expire(cacheSeconds)
                     if (queue.first() != null) break
-                    wake.wait(1_000)
+                    wake.wait()
                 }
                 if (closed) return
                 checkNotNull(queue.first()).also { activeBlock = it; uploadingSequence = it.sequence }

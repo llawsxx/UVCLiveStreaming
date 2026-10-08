@@ -4,6 +4,8 @@ Android USB camera recorder and streamer.
 
 - UVC video and UAC microphone capture through libusb/libuvc/libuac.
 - MJPG, YUYV/UYVY, RGB/BGR, NV12, I420 and P010 conversion; H.264 USB modes are exposed for MediaCodec decode integration.
+- Live raw video uploads the captured direct buffer in its native layout; the GPU shader reads packed YUYV/UYVY and semiplanar NV12/P010 without CPU repacking. See `diagnostics/raw-gpu-upload/README.md` for validation and 720p/1080p/4K speed measurements.
+- Preview and recording wait only on the current input format's queue; raw frames no longer wait for an empty MJPEG queue. Empty input still blocks rather than busy-spinning.
 - MediaCodec H.264/H.265 and AAC encoding, MP4 or MPEG-TS recording.
 - Multi-client HTTP MPEG-TS server and RTMP publishing.
 - Optional HTTP TS chunk publishing with memory-buffered retry and a C++17 delay relay.

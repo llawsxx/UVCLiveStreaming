@@ -8,7 +8,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.util.ArrayDeque
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -111,7 +110,7 @@ internal class HttpTsRingBufferServer(
             while (!closed) {
                 val batch = lock.withLock {
                     while (!closed && (chunks.isEmpty() || (cursor != 0L && chunks.last().sequence < cursor))) {
-                        if (!changed.await(1, TimeUnit.SECONDS)) break
+                        changed.await()
                     }
                     if (closed || chunks.isEmpty()) emptyList()
                     else {

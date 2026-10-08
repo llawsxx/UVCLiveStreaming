@@ -66,6 +66,7 @@ import com.llawsxx.uvclivestreaming.recording.NativeUsbCapture
 import com.llawsxx.uvclivestreaming.recording.MjpegDecodePool
 import com.llawsxx.uvclivestreaming.recording.MjpegChromaGeometry
 import com.llawsxx.uvclivestreaming.recording.RawVideoConverter
+import com.llawsxx.uvclivestreaming.recording.QueueWakeSignal
 import com.llawsxx.uvclivestreaming.recording.encoderLabel
 import com.llawsxx.uvclivestreaming.recording.encoderTransferOptions
 import com.llawsxx.uvclivestreaming.recording.GpuVideoFrame
@@ -1373,6 +1374,7 @@ private class UsbIdlePreview(
     )
     private val frameQueue = ArrayBlockingQueue<Frame>(bufferFrames.coerceIn(1, 30))
     private val rawVideoConverter = RawVideoConverter()
+    private val videoWake = QueueWakeSignal()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stopped = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
@@ -1387,6 +1389,7 @@ private class UsbIdlePreview(
         },
         capacity = bufferFrames.coerceIn(1, 30),
         chromaGeometry = MjpegChromaGeometry::read,
+        onOutputReady = videoWake::signal,
     )
 
     fun start() {
@@ -1463,6 +1466,7 @@ private class UsbIdlePreview(
                 val monitor = synchronized(audioMonitorLock) { audioMonitor.also { audioMonitor = null } }
                 monitor?.let { it.close(); runCatching { it.awaitStopped(500) } }
                 stopped.set(true)
+                videoWake.close()
                 while (true) (frameQueue.poll() ?: break).bytes.close()
                 rawVideoConverter.close()
                 mjpegDecodePool.close()
@@ -1503,6 +1507,7 @@ private class UsbIdlePreview(
 
     fun stop(onStopped: (() -> Unit)? = null) {
         stopped.set(true)
+        videoWake.close()
         finished.countDown()
         if (onStopped != null) Thread({
             if (closed.await(10, TimeUnit.SECONDS)) mainHandler.post(onStopped)
@@ -1521,6 +1526,7 @@ private class UsbIdlePreview(
             frameQueue.poll()?.bytes?.close()
             if (!frameQueue.offer(frame)) bytes.close()
         }
+        videoWake.signal()
     }
 
     private fun renderFrames() {
@@ -1539,16 +1545,19 @@ private class UsbIdlePreview(
                     return@use
                 }
                 while (!stopped.get()) {
-                    val decoded = mjpegDecodePool.poll(5)
+                    val revision = videoWake.snapshot()
+                    val decoded = mjpegDecodePool.poll(0)
                     var converted: RawVideoConverter.ConvertedFrame? = null
                     try {
                         val frame = if (decoded != null) {
                             GpuVideoFrame.fromDecoded(decoded) ?: continue
                         } else {
-                            val raw = frameQueue.poll(5, TimeUnit.MILLISECONDS) ?: continue
-                            converted = raw.bytes.use {
-                                rawVideoConverter.convert(it, raw.format, raw.width, raw.height, raw.timestampNs)
+                            val raw = frameQueue.poll()
+                            if (raw == null) {
+                                if (!videoWake.awaitChange(revision)) break
+                                continue
                             }
+                            converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
                             converted?.frame ?: continue
                         }
                         val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate)

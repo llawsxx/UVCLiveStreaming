@@ -15,9 +15,14 @@ internal data class GpuVideoFrame(
     val testCard: TestCardFrame? = null,
 ) {
     val isRgb: Boolean get() = layout == RGB || layout == BGR
-    val sampleBytes: Int get() = if (layout == YUV10) 2 else 1
-    val byteSize: Int get() = if (isRgb) width * height * 3 else
-        (width * height + 2 * chromaWidth * chromaHeight) * sampleBytes
+    val sampleBytes: Int get() = if (layout == YUV10 || layout == P010) 2 else 1
+    val isPacked422: Boolean get() = layout == YUYV || layout == UYVY
+    val isSemiplanar: Boolean get() = layout == NV12 || layout == P010
+    val byteSize: Int get() = when {
+        isRgb -> width * height * 3
+        isPacked422 -> width * height * 2
+        else -> (width * height + 2 * chromaWidth * chromaHeight) * sampleBytes
+    }
 
     companion object {
         // Planar Y/U/V; chroma dimensions also describe 4:2:2, 4:4:4 and JPEG subsampling.
@@ -26,6 +31,31 @@ internal data class GpuVideoFrame(
         const val BGR = 2
         // Three little-endian 16-bit planes, preserving P010's ten MSBs.
         const val YUV10 = 3
+        const val YUYV = 4
+        const val UYVY = 5
+        const val NV12 = 6
+        const val P010 = 7
+
+        fun fromRaw(buffer: ByteBuffer, format: Int, width: Int, height: Int, timestampNs: Long): GpuVideoFrame? {
+            if (!buffer.isDirect || width !in 1..3840 || height !in 1..2160) return null
+            val layout = when (format) {
+                2 -> YUYV
+                3 -> UYVY
+                4 -> RGB
+                5 -> NV12
+                6 -> I420
+                7 -> P010
+                9 -> BGR
+                else -> return null
+            }
+            if (layout != I420 && layout != RGB && layout != BGR &&
+                ((width and 1) != 0 || (height and 1) != 0)) return null
+            val frame = GpuVideoFrame(null, width, height, timestampNs, layout,
+                fullRange = layout == RGB || layout == BGR,
+                chromaHeight = if (layout == YUYV || layout == UYVY) height else (height + 1) / 2)
+            if (buffer.limit() < frame.byteSize) return null
+            return frame.copy(directBuffer = buffer.duplicate().apply { position(0); limit(frame.byteSize) })
+        }
 
         /** The caller must hold the decoded frame's lease throughout render(). */
         fun fromDecoded(frame: MjpegDecodePool.DecodedFrame): GpuVideoFrame? = frame.yuv?.let {

@@ -82,7 +82,7 @@ internal class UsbAudioMonitor(
                         output = null
                         activeMode = beforePoll
                     }
-                    val chunk = queue.poll(20, TimeUnit.MILLISECONDS) ?: continue
+                    val chunk = queue.take()
                     val current = mode.get()
                     if (current !== activeMode) {
                         runCatching { output?.close() }

@@ -17,6 +17,7 @@ internal class MjpegDecodePool(
     workerCount: Int = 4,
     capacity: Int = 10,
     private val chromaGeometry: ((ByteBuffer, Int, Int) -> Pair<Int, Int>?)? = null,
+    private val onOutputReady: () -> Unit = {},
 ) {
     data class Diagnostics(
         val offered: Long,
@@ -157,8 +158,8 @@ internal class MjpegDecodePool(
 
     private fun decodeLoop() {
         while (running.get()) {
-            val frame = try { input.poll(100, TimeUnit.MILLISECONDS) }
-                catch (_: InterruptedException) { break } ?: continue
+            val frame = try { input.take() }
+                catch (_: InterruptedException) { break }
             val decodeStartNs = System.nanoTime()
             var yuv: DirectVideoBufferPool.Lease? = null
             var cw = (frame.width + 1) / 2
@@ -216,6 +217,7 @@ internal class MjpegDecodePool(
         completed[sequence] = bounded
         completedBytes += bounded.yuv?.size?.toLong() ?: 0L
         trimCompletedLocked()
+        onOutputReady()
     }
 
     private fun trimCompletedLocked() {

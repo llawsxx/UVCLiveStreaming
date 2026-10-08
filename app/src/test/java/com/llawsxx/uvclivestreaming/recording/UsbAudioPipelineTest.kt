@@ -8,6 +8,26 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class UsbAudioPipelineTest {
+    @Test fun immediateCloseAfterOfferAlwaysDrainsLastPacket() {
+        repeat(100) {
+            val output = Collections.synchronizedList(mutableListOf<Int>())
+            val pipeline = UsbAudioPipeline(48000, 1, AudioDspSettings(),
+                { bytes, _ -> output.add(bytes[0].toInt()) }, { fail(it) },
+                factory = { _, _, _ -> error("Bypass must not create DSP") })
+            pipeline.offer(pcm(1), 0)
+            finish(pipeline)
+            assertEquals(listOf(1), output.toList())
+        }
+    }
+
+    @Test fun emptyQueueCloseWakesWorkerWithoutPcm() {
+        val pipeline = UsbAudioPipeline(48000, 1, AudioDspSettings(),
+            { _, _ -> fail("Unexpected PCM") }, { fail(it) },
+            factory = { _, _, _ -> error("Idle worker must not create DSP") })
+        pipeline.close()
+        assertTrue(pipeline.awaitStopped(2_000))
+    }
+
     @Test fun wideInputReachesDspIntactAndSpanTimingUsesInputSampleWidth() {
         val output = Collections.synchronizedList(mutableListOf<Pair<ByteArray, Long>>())
         val raw = byteArrayOf(64,0,0, -64,-1,-1)

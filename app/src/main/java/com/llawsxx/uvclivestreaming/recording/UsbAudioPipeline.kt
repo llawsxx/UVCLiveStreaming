@@ -20,6 +20,7 @@ internal class UsbAudioPipeline(
     private data class Packet(val bytes: ByteArray, val timestampNs: Long, val sequence: Long, val sampleBytes: Int)
     private data class Span(val timestampNs: Long, val frames: Int, var offset: Int = 0)
     private val queue = ArrayBlockingQueue<Packet>(16)
+    private val queueWake = QueueWakeSignal()
     private val sequence = AtomicLong()
     private val closed = AtomicBoolean()
     private val stopped = CountDownLatch(1)
@@ -38,13 +39,14 @@ internal class UsbAudioPipeline(
         peakMeter.offer(bytes, timestampNs)
         onPcm(bytes, timestampNs)
     }
-    fun offer(bytes: ByteArray, timestampNs: Long, sampleBytes: Int = 2) {
+    fun offer(bytes: ByteArray, timestampNs: Long, sampleBytes: Int = 2) = synchronized(queueWake) {
         if (closed.get() || bytes.isEmpty() || sampleBytes !in 2..4 || bytes.size % (channels * sampleBytes) != 0) return
         val packet = Packet(bytes, timestampNs, sequence.getAndIncrement(), sampleBytes)
         if (!queue.offer(packet)) {
             if (queue.poll() != null) droppedPackets.incrementAndGet()
             if (!queue.offer(packet)) droppedPackets.incrementAndGet()
         }
+        queueWake.signal()
     }
 
     private fun run() {
@@ -83,7 +85,12 @@ internal class UsbAudioPipeline(
         }
         try {
             while (!closed.get() || queue.isNotEmpty()) {
-                val packet = queue.poll(10, TimeUnit.MILLISECONDS) ?: continue
+                val revision = queueWake.snapshot()
+                val packet = queue.poll()
+                if (packet == null) {
+                    queueWake.awaitChange(revision)
+                    continue
+                }
                 val next = settings
                 val discontinuity = lastSequence >= 0 && packet.sequence != lastSequence + 1
                 val changed = next != applied
@@ -111,6 +118,7 @@ internal class UsbAudioPipeline(
             onError(error.message ?: "音频 DSP 处理失败")
         } finally {
             closed.set(true)
+            queueWake.close()
             try {
                 processor?.close()
                 queue.clear()
@@ -121,7 +129,10 @@ internal class UsbAudioPipeline(
         }
     }
 
-    override fun close() { closed.set(true) }
+    override fun close() = synchronized(queueWake) {
+        closed.set(true)
+        queueWake.close()
+    }
     fun awaitStopped(timeoutMs: Long): Boolean = stopped.await(timeoutMs, TimeUnit.MILLISECONDS)
     fun awaitStopped() = stopped.await()
 }

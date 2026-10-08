@@ -2,7 +2,7 @@ package com.llawsxx.uvclivestreaming.recording
 
 import java.nio.ByteBuffer
 
-/** Converts on the render thread; a held result owns its buffer until GL upload finishes. */
+/** Captured buffers retain their native layout and ownership until GL upload finishes. */
 internal class RawVideoConverter(
     private val converter: (ByteArray, Int, Int, Int, ByteBuffer) -> Boolean = { bytes, format, width, height, destination ->
         NativeUsbCapture.nativeConvertRawToGpuBuffer(bytes, format, width, height, destination)
@@ -10,16 +10,25 @@ internal class RawVideoConverter(
 ) : AutoCloseable {
     class ConvertedFrame internal constructor(
         val frame: GpuVideoFrame,
-        private val lease: DirectVideoBufferPool.Lease,
+        private val lease: AutoCloseable,
     ) : AutoCloseable {
         override fun close() { lease.close() }
     }
 
     private val buffers = DirectVideoBufferPool(1)
+    @Volatile private var closed = false
 
     fun convert(bytes: CapturedVideoBuffer, format: Int, width: Int, height: Int, timestampNs: Long): ConvertedFrame? {
-        return convertImpl(bytes.size, format, width, height, timestampNs) { destination ->
-            NativeUsbCapture.nativeConvertRawBufferToGpuBuffer(bytes.buffer, bytes.size, format, width, height, destination)
+        try {
+            val frame = if (closed) null else GpuVideoFrame.fromRaw(bytes.buffer, format, width, height, timestampNs)
+            if (frame == null) {
+                bytes.close()
+                return null
+            }
+            return ConvertedFrame(frame, bytes)
+        } catch (error: Throwable) {
+            bytes.close()
+            throw error
         }
     }
 
@@ -60,5 +69,5 @@ internal class RawVideoConverter(
     }
 
     fun diagnostics() = buffers.diagnostics()
-    override fun close() { buffers.close() }
+    override fun close() { closed = true; buffers.close() }
 }

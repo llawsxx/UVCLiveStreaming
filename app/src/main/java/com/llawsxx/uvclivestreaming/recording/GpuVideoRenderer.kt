@@ -200,11 +200,11 @@ internal class GpuVideoRenderer(
         val cw = frame.chromaWidth
         val ch = frame.chromaHeight
         require(cw in 1..frame.width && ch in 1..frame.height)
-        require(frame.layout in GpuVideoFrame.I420..GpuVideoFrame.YUV10)
+        require(frame.layout in GpuVideoFrame.I420..GpuVideoFrame.P010)
         val required = frame.byteSize
         val buffer = frame.directBuffer?.let {
-            require(it.isDirect && it.capacity() >= required)
-            it.duplicate().apply { clear(); limit(required) }
+            require(it.isDirect && it.limit() >= required)
+            it.duplicate().apply { position(0); limit(required) }
         } ?: run {
             val bytes = requireNotNull(frame.bytes)
             require(bytes.size >= required)
@@ -213,14 +213,19 @@ internal class GpuVideoRenderer(
         }
         val changed = textureWidth != frame.width || textureHeight != frame.height || textureLayout != frame.layout ||
             textureChromaWidth != cw || textureChromaHeight != ch
-        val planes = if (frame.isRgb) 1 else 3
+        val planes = when { frame.isRgb || frame.isPacked422 -> 1; frame.isSemiplanar -> 2; else -> 3 }
         var offset = 0
         for (plane in 0 until planes) {
-            val w = if (plane == 0) frame.width else cw
+            val w = if (frame.isPacked422) cw else if (plane == 0) frame.width else cw
             val h = if (plane == 0) frame.height else ch
-            val pixelFormat = if (frame.isRgb) GLES20.GL_RGB else
-                if (frame.sampleBytes == 2) GLES20.GL_LUMINANCE_ALPHA else GLES20.GL_LUMINANCE
-            val size = w * h * if (frame.isRgb) 3 else frame.sampleBytes
+            val pixelFormat = when {
+                frame.isRgb -> GLES20.GL_RGB
+                frame.isPacked422 || (frame.layout == GpuVideoFrame.P010 && plane == 1) -> GLES20.GL_RGBA
+                frame.sampleBytes == 2 || (frame.layout == GpuVideoFrame.NV12 && plane == 1) -> GLES20.GL_LUMINANCE_ALPHA
+                else -> GLES20.GL_LUMINANCE
+            }
+            val channels = when (pixelFormat) { GLES20.GL_RGB -> 3; GLES20.GL_RGBA -> 4; GLES20.GL_LUMINANCE_ALPHA -> 2; else -> 1 }
+            val size = w * h * channels
             val pixels = buffer.duplicate().apply { position(offset); limit(offset + size) }.slice()
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + plane)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[plane])
@@ -273,8 +278,9 @@ internal class GpuVideoRenderer(
                 GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uPlane$plane"), plane)
             }
             GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uLayout"), frame.layout)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uSourceWidth"), frame.width.toFloat())
             val fullRange = sourceRange.isFullRange(frame.fullRange)
-            val tenBit = frame.layout == GpuVideoFrame.YUV10
+            val tenBit = frame.sampleBytes == 2
             GLES20.glUniformMatrix3fv(GLES20.glGetUniformLocation(program, "uYuvToRgb"), 1, false,
                 if (tenBit) { if (fullRange) fullRangeMatrix10 else tvRangeMatrix10 }
                 else { if (fullRange) fullRangeMatrix else tvRangeMatrix }, 0)
@@ -403,6 +409,7 @@ internal class GpuVideoRenderer(
             uniform sampler2D uPlane1;
             uniform sampler2D uPlane2;
             uniform int uLayout;
+            uniform float uSourceWidth;
             uniform mat3 uYuvToRgb;
             uniform vec3 uYuvOffset;
             uniform vec2 uRgbRange;
@@ -421,12 +428,31 @@ internal class GpuVideoRenderer(
                 vec2 uv1 = (tile1 * uLutInfo.x + p.rg + 0.5) / uLutInfo.zw;
                 return mix(texture2D(uColorLut, uv0).rgb, texture2D(uColorLut, uv1).rgb, fract(p.b));
             }
+            float packedLuma(float pixel) {
+                float index = clamp(pixel, 0.0, uSourceWidth - 1.0);
+                vec4 pair = texture2D(uPlane0, vec2((floor(index * 0.5) + 0.5) / (uSourceWidth * 0.5), vUv.y));
+                vec2 luma = uLayout == 4 ? pair.rb : pair.ga;
+                return mix(luma.x, luma.y, mod(index, 2.0));
+            }
             void main() {
                 vec3 rgb;
                 if (uLayout == 1 || uLayout == 2) {
                     rgb = texture2D(uPlane0, vUv).rgb;
                     rgb = uLayout == 2 ? rgb.bgr : rgb;
                     rgb = (rgb + uRgbRange.x) * uRgbRange.y;
+                } else if (uLayout == 4 || uLayout == 5) {
+                    float pixel = vUv.x * uSourceWidth - 0.5;
+                    float lower = floor(pixel);
+                    float y = mix(packedLuma(lower), packedLuma(lower + 1.0), fract(pixel));
+                    vec4 pair = texture2D(uPlane0, vUv);
+                    vec2 chroma = uLayout == 4 ? pair.ga : pair.rb;
+                    rgb = uYuvToRgb * (vec3(y, chroma) + uYuvOffset);
+                } else if (uLayout == 6 || uLayout == 7) {
+                    vec4 py = texture2D(uPlane0, vUv);
+                    vec4 uv = texture2D(uPlane1, vUv);
+                    vec2 weights = vec2(255.0 / 65472.0, 65280.0 / 65472.0);
+                    vec3 yuv = uLayout == 7 ? vec3(dot(py.ra, weights), dot(uv.rg, weights), dot(uv.ba, weights)) : vec3(py.r, uv.r, uv.a);
+                    rgb = uYuvToRgb * (yuv + uYuvOffset);
                 } else {
                     vec4 py = texture2D(uPlane0, vUv);
                     vec4 pu = texture2D(uPlane1, vUv);

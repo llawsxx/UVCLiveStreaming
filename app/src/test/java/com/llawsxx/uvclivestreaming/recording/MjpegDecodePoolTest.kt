@@ -6,6 +6,49 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class MjpegDecodePoolTest {
+    @Test fun completionAndDecodeFailureWakeEventConsumer() {
+        for (success in listOf(true, false)) {
+            val wake = QueueWakeSignal()
+            val completed = CountDownLatch(1)
+            val pool = MjpegDecodePool(decoder = { _, _, _, _, _ -> success }, workerCount = 1,
+                onOutputReady = { wake.signal(); completed.countDown() })
+            pool.start()
+            try {
+                val revision = wake.snapshot()
+                assertNull(pool.poll(0))
+                pool.offer(byteArrayOf(0), 1, 2, 2, 123)
+                assertTrue(completed.await(2, TimeUnit.SECONDS))
+                assertTrue(wake.awaitChange(revision))
+                val frame = pool.poll(0)
+                assertNotNull(frame)
+                assertEquals(success, frame!!.yuv != null)
+                frame.close()
+            } finally { wake.close(); pool.close() }
+        }
+    }
+
+    @Test fun droppedInputPublishesWakeWithoutWaitingForDecoder() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val wake = QueueWakeSignal()
+        val pool = MjpegDecodePool(decoder = { _, _, _, _, _ ->
+            entered.countDown()
+            check(release.await(2, TimeUnit.SECONDS))
+            true
+        }, workerCount = 1, capacity = 1, onOutputReady = wake::signal)
+        pool.start()
+        try {
+            pool.offer(byteArrayOf(0), 1, 2, 2, 0)
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            pool.offer(byteArrayOf(1), 1, 2, 2, 1)
+            val revision = wake.snapshot()
+            pool.offer(byteArrayOf(2), 1, 2, 2, 2)
+            assertTrue(wake.snapshot() > revision)
+            assertTrue(wake.awaitChange(revision))
+            assertEquals(1L, pool.diagnostics().inputDrops)
+        } finally { release.countDown(); wake.close(); pool.close() }
+    }
+
     @Test fun fullHeightChromaReachesRendererWithoutDownsampling() {
         val pool = MjpegDecodePool(decoder = { _, _, _, _, destination ->
             assertEquals(16, destination.capacity()) // 4x2 Y plus two 2x2 chroma planes.
