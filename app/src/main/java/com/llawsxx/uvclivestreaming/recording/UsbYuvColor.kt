@@ -21,6 +21,17 @@ enum class UsbYuvMatrix(val label: String, private val kr: Float, private val kb
             2f * (1f - kr) * cScale, -2f * kr * (1f - kr) / kg * cScale, 0f,
         )
     }
+
+    internal fun encodingMatrix(fullRange: Boolean): FloatArray {
+        val kg = 1f - kr - kb
+        val yScale = if (fullRange) 1f else 219f / 255f
+        val cScale = if (fullRange) 1f else 224f / 255f
+        return floatArrayOf(
+            kr * yScale, -kr / (2f * (1f - kb)) * cScale, 0.5f * cScale,
+            kg * yScale, -kg / (2f * (1f - kb)) * cScale, -kg / (2f * (1f - kr)) * cScale,
+            kb * yScale, 0.5f * cScale, -kb / (2f * (1f - kr)) * cScale,
+        )
+    }
 }
 
 enum class UsbSourceRange(val label: String) {

@@ -228,6 +228,7 @@ data class RecordingConfig(
     val usbReceiveTransferCount: Int = 64,
     val usbYuvMatrix: UsbYuvMatrix = UsbYuvMatrix.BT601,
     val usbSourceRange: UsbSourceRange = UsbSourceRange.AUTO,
+    val usbYuvEncoderInput: Boolean = false,
     val usbTimestampSmoothingEnabled: Boolean = true,
     /** Use 60000/1001 or 30000/1001 when smoothing nominal 60/30 fps USB video. */
     val usbTimestampSmoothingNtscEnabled: Boolean = false,

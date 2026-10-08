@@ -51,6 +51,7 @@ class UsbRecorderEngine(
         onOutputReady = videoWake::signal,
     )
     private val frameCount = AtomicLong()
+    private val videoDeliveryNs = AtomicLong()
     private val receivedVideoFrames = AtomicLong()
     private val renderedVideoFrames = AtomicLong()
     private val rawQueueDrops = AtomicLong()
@@ -88,6 +89,9 @@ class UsbRecorderEngine(
     private var audioThread: Thread? = null
     private var statsThread: Thread? = null
     private var encoderInputSurface: Surface? = null
+    private var directYuvInput = false
+    private var yuvCodecInput: YuvCodecInput? = null
+    private var externalVideoSource = false
     private var startedAtNs = 0L
     private var audioChannels = 0
     private var audioRate = 0
@@ -130,7 +134,7 @@ class UsbRecorderEngine(
     }
 
     private fun prepare() {
-        if (isTestCard) {
+        if (isTestCard || externalVideoSource) {
             videoWidth = config.width
             videoHeight = config.height
             require(config.testCard.copy(width = videoWidth, height = videoHeight, fps = config.fps).valid) { "测试卡参数无效" }
@@ -200,22 +204,17 @@ class UsbRecorderEngine(
 
         val videoMime = if (config.videoCodec == VideoCodec.H265) MediaFormat.MIMETYPE_VIDEO_HEVC
             else MediaFormat.MIMETYPE_VIDEO_AVC
-        val videoFormat = MediaFormat.createVideoFormat(videoMime, videoWidth, videoHeight).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, config.videoBitrate.coerceAtLeast(100_000))
-            // A nominal encoder rate hint; capture/PTS calculations retain fractional fps.
-            setInteger(MediaFormat.KEY_FRAME_RATE, config.fps.roundToInt().coerceIn(1, 240))
-            applyEncoderGopSettings(config)
-            config.videoBitrateMode.mediaFormatValue?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
-            applyEncoderColorSettings(config)
+        val rejection = YuvEncoderPolicy.rejection(config.copy(width = videoWidth, height = videoHeight),
+            isTestCard && !externalVideoSource, colorGradeSettings.active)
+        directYuvInput = config.usbYuvEncoderInput && rejection == null
+        if (config.usbYuvEncoderInput && rejection != null) onNotice("YUV 直送回退 Surface：$rejection")
+        videoCodec = try { configureVideoEncoder(videoMime, directYuvInput) }
+        catch (error: Exception) {
+            if (!directYuvInput) throw error
+            directYuvInput = false
+            onNotice("YUV 直送回退 Surface：${error.message}")
+            configureVideoEncoder(videoMime, false)
         }
-        Log.i("UsbVideoDiagnostics", "Encoder color request: standard=${config.colorStandard.label} " +
-            "transfer=${config.colorTransfer.encoderLabel()} range=${config.colorRange.label}")
-        videoCodec = MediaCodec.createEncoderByType(videoMime).apply {
-            configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        }
-        val inputSurface = checkNotNull(videoCodec).createInputSurface()
-        encoderInputSurface = inputSurface
         if (audioCaptureEnabled) {
             val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, audioRate, audioChannels).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
@@ -238,13 +237,28 @@ class UsbRecorderEngine(
         if (!running.get()) return
         startedAtNs = System.nanoTime()
         videoCodec?.start()
+        if (directYuvInput) {
+            val input = YuvCodecInput(checkNotNull(videoCodec), config.copy(width = videoWidth, height = videoHeight))
+            try {
+                input.prime()
+                yuvCodecInput = input
+                onNotice("编码输入：YUV 直送（实验）；已执行输入矩阵/范围转换，录制不经过 GPU")
+            } catch (error: Exception) {
+                input.close()
+                runCatching { videoCodec?.stop() }
+                videoCodec?.release()
+                directYuvInput = false
+                onNotice("YUV 直送回退 Surface：${error.message}")
+                videoCodec = configureVideoEncoder(videoMime, false).also { it.start() }
+            }
+        }
         audioCodec?.start()
         startVideoDrain()
         if (audioCaptureEnabled) startAudioDrain()
-        if (isTestCard) startTestCardRender() else {
+        if (isTestCard && !externalVideoSource) startTestCardRender() else {
             mjpegDecodePool.start()
             startVideoRender()
-            NativeUsbCapture.nativeStart(nativeHandle, this)
+            if (!externalVideoSource) NativeUsbCapture.nativeStart(nativeHandle, this)
         }
         systemAudioCapture?.start(onPcm = ::onUsbAudioPcm,
             onError = { onError("系统音频采集失败：$it") }, onNotice = onNotice)
@@ -256,6 +270,40 @@ class UsbRecorderEngine(
             }
         }, "usb-video-watchdog").start()
     }
+
+    private fun configureVideoEncoder(mime: String, direct: Boolean): MediaCodec {
+        val codec = MediaCodec.createEncoderByType(mime)
+        try {
+            if (direct) require(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible in
+                codec.codecInfo.getCapabilitiesForType(mime).colorFormats) { "Encoder does not support flexible YUV420" }
+            val colors = if (direct) config.copy(
+                colorStandard = if (config.colorStandard == VideoColorStandard.DEFAULT) VideoColorStandard.BT709 else config.colorStandard,
+                colorRange = if (config.colorRange == VideoColorRange.DEFAULT) VideoColorRange.LIMITED else config.colorRange,
+                colorTransfer = if (config.colorTransfer == VideoColorTransfer.DEFAULT) VideoColorTransfer.BT709 else config.colorTransfer)
+                else config
+            val format = MediaFormat.createVideoFormat(mime, videoWidth, videoHeight).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, if (direct) MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+                    else MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, config.videoBitrate.coerceAtLeast(100_000))
+                setInteger(MediaFormat.KEY_FRAME_RATE, config.fps.roundToInt().coerceIn(1, 240))
+                applyEncoderGopSettings(config)
+                config.videoBitrateMode.mediaFormatValue?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
+                applyEncoderColorSettings(colors)
+            }
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoderInputSurface = if (direct) null else codec.createInputSurface()
+            Log.i("UsbVideoDiagnostics", "Encoder input=${if (direct) "YUV" else "Surface"} codec=${codec.name} " +
+                "standard=${colors.colorStandard.label} range=${colors.colorRange.label}")
+            return codec
+        } catch (error: Throwable) { codec.release(); throw error }
+    }
+
+    internal fun videoInputDiagnostics() = yuvCodecInput?.diagnostics()
+
+    internal data class VideoOutputDiagnostics(val encoded: Long, val deliveryNs: Long, val codecName: String)
+
+    internal fun videoOutputDiagnostics() = VideoOutputDiagnostics(frameCount.get(), videoDeliveryNs.get(),
+        videoCodec?.name.orEmpty())
 
     private fun markStarted() {
         if (!running.get() || !videoFormatReady || (audioCaptureEnabled && !audioFormatReady) ||
@@ -323,7 +371,7 @@ class UsbRecorderEngine(
     private fun startVideoRender() {
         videoRenderThread = Thread({
             try {
-                GpuVideoRenderer(checkNotNull(encoderInputSurface), config.usbYuvMatrix, config.usbSourceRange,
+                GpuVideoRenderer(encoderInputSurface, config.usbYuvMatrix, config.usbSourceRange,
                     initialColorGrade = colorGradeSettings).use { gpu ->
                     while (running.get()) {
                         val revision = videoWake.snapshot()
@@ -349,10 +397,17 @@ class UsbRecorderEngine(
                                 RecorderController.previewLowFrameRate,
                             )
                             gpu.setColorGrade(colorGradeSettings)
-                            val encodedBefore = gpu.encodedFrameCount
-                            gpu.render(frame, target)
-                            if (gpu.encodedFrameCount == encodedBefore) videoTimestampSkips.incrementAndGet()
-                            renderedVideoFrames.set(gpu.encodedFrameCount)
+                            val accepted = yuvCodecInput?.let { input ->
+                                val submitted = input.submit(frame, running::get)
+                                gpu.render(frame, target)
+                                submitted
+                            } ?: run {
+                                val encodedBefore = gpu.encodedFrameCount
+                                gpu.render(frame, target)
+                                gpu.encodedFrameCount != encodedBefore
+                            }
+                            if (accepted) renderedVideoFrames.incrementAndGet()
+                            else videoTimestampSkips.incrementAndGet()
                         } finally {
                             converted?.close()
                             decoded?.close()
@@ -439,6 +494,7 @@ class UsbRecorderEngine(
                         }
                         index >= 0 -> {
                             if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                                videoDeliveryNs.addAndGet((System.nanoTime() - info.presentationTimeUs * 1_000).coerceAtLeast(0))
                                 if (config.videoKeyFrameIntervalSeconds == 0f &&
                                     info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME == 0 && !reportedNonKeyFrame) {
                                     reportedNonKeyFrame = true
@@ -679,7 +735,10 @@ class UsbRecorderEngine(
         rawVideoConverter.close()
         videoRenderThread?.interrupt()
         runCatching { videoRenderThread?.join() }
-        runCatching { videoCodec?.signalEndOfInputStream() }
+        runCatching {
+            yuvCodecInput?.endOfStream() ?: videoCodec?.signalEndOfInputStream()
+        }
+        yuvCodecInput?.close()
         runCatching { encoderInputSurface?.release() }
         runCatching { videoThread?.join(3_000) }
         runCatching { audioThread?.join(3_000) }
@@ -720,7 +779,14 @@ class UsbRecorderEngine(
         }
     }
     fun recentAudioPeakDb(): Float = audioPipeline?.recentPeakDb() ?: -60f
-    fun updateColorGrade(settings: VideoColorGradeSettings) { colorGradeSettings = settings.sanitized() }
+    fun updateColorGrade(settings: VideoColorGradeSettings) {
+        val next = settings.sanitized()
+        if (directYuvInput && next.active) {
+            onNotice("YUV 直送期间不能启用录制调色；请停止后切换 Surface 输入")
+            return
+        }
+        colorGradeSettings = next
+    }
 
     companion object {
         const val USB_CAMERA_PREFIX = "usb-host:"

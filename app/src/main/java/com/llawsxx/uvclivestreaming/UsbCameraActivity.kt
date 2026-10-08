@@ -273,6 +273,7 @@ private fun UsbCameraScreen() {
     var bitrateMode by rememberSaveable { mutableStateOf(uiSettings.bitrateMode) }
     var yuvMatrix by rememberSaveable { mutableStateOf(uiSettings.yuvMatrix) }
     var sourceRange by rememberSaveable { mutableStateOf(uiSettings.sourceRange) }
+    var yuvEncoderInput by rememberSaveable { mutableStateOf(uiSettings.yuvEncoderInput) }
     var encoderColorStandard by rememberSaveable { mutableStateOf(uiSettings.encoderColorStandard) }
     var encoderColorTransfer by rememberSaveable { mutableStateOf(uiSettings.encoderColorTransfer) }
     var encoderColorRange by rememberSaveable { mutableStateOf(uiSettings.encoderColorRange) }
@@ -337,7 +338,7 @@ private fun UsbCameraScreen() {
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, confirmStopOutputs, httpUploadEnabled, httpUploadUrl, httpUploadChunkSeconds, httpUploadCacheSeconds,
         rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
-        bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
+        bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, yuvEncoderInput, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
         forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
@@ -380,6 +381,7 @@ private fun UsbCameraScreen() {
             receiveTransferCount = receiveTransferCount,
             yuvMatrix = yuvMatrix,
             sourceRange = sourceRange,
+            yuvEncoderInput = yuvEncoderInput,
             encoderColorStandard = encoderColorStandard,
             encoderColorTransfer = encoderColorTransfer,
             encoderColorRange = encoderColorRange,
@@ -718,7 +720,7 @@ private fun UsbCameraScreen() {
                 gopSecondsValue,
                 if (gopSecondsValue == 0f) 0 else bFrames.toIntOrNull()?.coerceIn(0, 4) ?: 0,
                 timestampSmoothingEnabled, timestampSmoothingNtscEnabled, timestampSmoothingDelta ?: 0.1,
-                yuvMatrix, sourceRange,
+                yuvMatrix, sourceRange, yuvEncoderInput,
                 encoderColorStandard, encoderColorTransfer, encoderColorRange,
                 forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
             )
@@ -995,12 +997,20 @@ private fun UsbCameraScreen() {
                 )
             }
             UsbSettingsTab.COLOR -> {
-                VideoColorGradePanel(videoColorGrade) { videoColorGrade = it }
+                if (recording && yuvEncoderInput) Text("YUV 直送期间不支持录制调色，请停止后切换 Surface 输入。")
+                else VideoColorGradePanel(videoColorGrade) { videoColorGrade = it }
             }
             UsbSettingsTab.DSP -> {
                 AudioDspPanel(audioDsp, enabled = includeAudio, onChange = { audioDsp = it })
             }
             UsbSettingsTab.ENCODING -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = yuvEncoderInput, onCheckedChange = { yuvEncoderInput = it },
+                        enabled = !recording && !testCardSelected)
+                    Text("YUV 直接输入编码器（实验）")
+                }
+                Text("默认关闭；支持输入矩阵和范围转换，并且效率和清晰度可能更高。不支持录制调色或 HDR。设备不支持时回退 Surface。",
+                    style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Box(Modifier.weight(1f)) {
                         UsbSettingChoice("编码", VideoCodec.entries, videoCodec, !recording,
@@ -1265,7 +1275,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                gopSeconds: Float, bFrames: Int,
                                timestampSmoothingEnabled: Boolean, timestampSmoothingNtscEnabled: Boolean,
                                timestampSmoothingMaxDeltaSeconds: Double,
-                               yuvMatrix: UsbYuvMatrix, sourceRange: UsbSourceRange,
+                               yuvMatrix: UsbYuvMatrix, sourceRange: UsbSourceRange, yuvEncoderInput: Boolean,
                                encoderColorStandard: VideoColorStandard, encoderColorTransfer: VideoColorTransfer,
                                encoderColorRange: VideoColorRange,
                                forceSpsVui: Boolean, rewriteColorRange: VideoColorRange,
@@ -1290,6 +1300,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         usbReceiveTransferCount = receiveTransferCount,
         usbYuvMatrix = yuvMatrix,
         usbSourceRange = sourceRange,
+        usbYuvEncoderInput = yuvEncoderInput,
         colorStandard = encoderColorStandard,
         colorTransfer = encoderColorTransfer,
         colorRange = encoderColorRange,

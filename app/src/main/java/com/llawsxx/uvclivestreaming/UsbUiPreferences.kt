@@ -62,6 +62,7 @@ internal data class UsbUiSettings(
     val receiveTransferCount: Int = 64,
     val yuvMatrix: UsbYuvMatrix = UsbYuvMatrix.BT601,
     val sourceRange: UsbSourceRange = UsbSourceRange.AUTO,
+    val yuvEncoderInput: Boolean = false,
     val encoderColorStandard: VideoColorStandard = VideoColorStandard.DEFAULT,
     val encoderColorTransfer: VideoColorTransfer = VideoColorTransfer.DEFAULT,
     val encoderColorRange: VideoColorRange = VideoColorRange.DEFAULT,
@@ -152,6 +153,7 @@ internal object UsbUiPreferences {
                 p.getInt("bulkTransferCount", 64)).coerceIn(8, 512),
             yuvMatrix = enumValue(p.getString("yuvMatrix", null), UsbYuvMatrix.BT601),
             sourceRange = enumValue(p.getString("sourceRange", null), UsbSourceRange.AUTO),
+            yuvEncoderInput = p.getBoolean("yuvEncoderInput", false),
             encoderColorStandard = enumValue(p.getString("encoderColorStandard", null), VideoColorStandard.DEFAULT),
             encoderColorTransfer = enumValue(p.getString("encoderColorTransfer", null), VideoColorTransfer.DEFAULT),
             encoderColorRange = enumValue(p.getString("encoderColorRange", null), VideoColorRange.DEFAULT),
@@ -234,6 +236,7 @@ internal object UsbUiPreferences {
             .remove("bulkTransferCount")
             .putString("yuvMatrix", settings.yuvMatrix.name)
             .putString("sourceRange", settings.sourceRange.name)
+            .putBoolean("yuvEncoderInput", settings.yuvEncoderInput)
             .putString("encoderColorStandard", settings.encoderColorStandard.name)
             .putString("encoderColorTransfer", settings.encoderColorTransfer.name)
             .putString("encoderColorRange", settings.encoderColorRange.name)

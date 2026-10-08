@@ -7,6 +7,7 @@ Android USB camera recorder and streamer.
 - Live raw video uploads the captured direct buffer in its native layout; the GPU shader reads packed YUYV/UYVY and semiplanar NV12/P010 without CPU repacking. See `diagnostics/raw-gpu-upload/README.md` for validation and 720p/1080p/4K speed measurements.
 - Preview and recording wait only on the current input format's queue; raw frames no longer wait for an empty MJPEG queue. Empty input still blocks rather than busy-spinning.
 - MediaCodec H.264/H.265 and AAC encoding, MP4 or MPEG-TS recording.
+- Experimental saved "YUV 直接输入编码器（实验）" option sends YUV frames to writable MediaCodec YUV420 input planes without an RGB intermediate or encoder Surface. Preview still uses the GPU; unsupported encoders, HDR, test cards and active recording grading fall back to the Surface path. See `diagnostics/raw-gpu-upload/README.md` for paired speed measurements.
 - Multi-client HTTP MPEG-TS server and RTMP publishing.
 - Optional HTTP TS chunk publishing with memory-buffered retry and a C++17 delay relay.
   Enable "HTTP 远程分块上传" in the USB Output tab; the HTTP button then uploads to
@@ -72,7 +73,7 @@ Android USB camera recorder and streamer.
   Stopping a recording flushes its remaining packets. Both settings
   take effect at the next capture start. This is a continuous reorder window, not a
   direct implementation of FFmpeg's startup-only max_muxing_queue_size limit.
-- Selectable BT.601/BT.709/BT.2020 NCL/SMPTE 240M YUV-to-RGB conversion and automatic/TV/full source range, shared by preview and encoding.
+- Selectable BT.601/BT.709/BT.2020 NCL/SMPTE 240M source matrix and automatic/TV/full source range, shared by preview and encoding. Surface encoding converts through RGB; direct YUV encoding fuses source/output matrix and range conversion without an RGB frame.
 - Optional encoded H.264/HEVC SPS/VUI color rewriting with independent Range,
   Primaries, Transfer and Matrix selections; each field can preserve its original
   value. Codec configuration and in-band SPS are rewritten once before all

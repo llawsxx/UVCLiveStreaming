@@ -28,6 +28,7 @@ object ConfigPreferences {
             usbReceiveTransferCount = p.getInt("usbReceiveTransferCount", 64).coerceIn(8, 512),
             usbYuvMatrix = enumValue(p.getString("usbYuvMatrix", null), UsbYuvMatrix.BT601),
             usbSourceRange = enumValue(p.getString("usbSourceRange", null), UsbSourceRange.AUTO),
+            usbYuvEncoderInput = p.getBoolean("usbYuvEncoderInput", false),
             usbTimestampSmoothingEnabled = p.getBoolean("usbTimestampSmoothingEnabled", true),
             usbTimestampSmoothingNtscEnabled = p.getBoolean("usbTimestampSmoothingNtscEnabled", false),
             usbTimestampSmoothingMaxDeltaSeconds = p.getString("usbTimestampSmoothingMaxDeltaSeconds", "0.1")
@@ -266,6 +267,7 @@ object ConfigPreferences {
             .putInt("usbReceiveTransferCount", c.usbReceiveTransferCount.coerceIn(8, 512))
             .putString("usbYuvMatrix", c.usbYuvMatrix.name)
             .putString("usbSourceRange", c.usbSourceRange.name)
+            .putBoolean("usbYuvEncoderInput", c.usbYuvEncoderInput)
             .putBoolean("usbTimestampSmoothingEnabled", c.usbTimestampSmoothingEnabled)
             .putBoolean("usbTimestampSmoothingNtscEnabled", c.usbTimestampSmoothingNtscEnabled)
             .putString("usbTimestampSmoothingMaxDeltaSeconds", c.usbTimestampSmoothingMaxDeltaSeconds.toString())

@@ -15,7 +15,7 @@ ROOT = Path("build/perf-diagnostics/raw-pipeline")
 ADB = r"D:\AndroidSDK\platform-tools\adb.exe"
 FFMPEG = r"C:\WINDOWS\ffmpeg.exe"
 FFPROBE = r"C:\WINDOWS\ffprobe.exe"
-FORMATS = {2: "YUYV", 3: "UYVY", 4: "RGB", 5: "NV12", 6: "I420", 7: "P010", 9: "BGR"}
+FORMATS = {1: "MJPEG", 2: "YUYV", 3: "UYVY", 4: "RGB", 5: "NV12", 6: "I420", 7: "P010", 9: "BGR"}
 
 
 def adb(*args, check=True):
@@ -145,19 +145,28 @@ def inspect_video(path, first_id, expected_last):
     return result, ids
 
 
-def run_case(width, height, input_format, codec, fps, seconds, low_preview, cpu_repack=False):
-    label = f"{width}x{height}-f{input_format}-{codec}-{fps}fps-{'p5' if low_preview else 'p60'}-{seconds}s{'-cpu' if cpu_repack else ''}"
+def run_case(width, height, input_format, codec, fps, seconds, low_preview, cpu_repack=False, yuv_input=False):
+    label = f"{width}x{height}-f{input_format}-{codec}-{fps}fps-{'p5' if low_preview else 'p60'}-{seconds}s{'-cpu' if cpu_repack else ''}{'-yuv' if yuv_input else ''}"
     folder = ROOT / label
     folder.mkdir(parents=True, exist_ok=True)
     errors = []
     adb("shell", "am", "force-stop", PACKAGE)
+    if input_format == 1:
+        from prepare_mjpeg import generate
+        bundle = ROOT / f"synthetic-mjpeg-{width}x{height}-{fps}-{seconds}.bin"
+        if not bundle.exists():
+            print("Preparing real JPEG frames", width, height, flush=True)
+            generate(width, height, fps * (seconds + 1) + 90, bundle)
+        temporary = "/data/local/tmp/" + bundle.name
+        adb("push", str(bundle), temporary)
+        adb("shell", "run-as", PACKAGE, "cp", temporary, f"files/synthetic-mjpeg-{width}x{height}.bin")
     collector = threading.Thread(target=network_reader, args=(label, folder / "http-chunked.bin", errors), daemon=True)
     collector.start()
     command = [ADB, "-t", "1", "shell", "am", "instrument", "-w", "-r", "-e", "class",
                "com.llawsxx.uvclivestreaming.recording.SyntheticRawPipelineDeviceTest#rawFramesTraverseProductionPipeline"]
     for key, value in {"width": width, "height": height, "format": input_format, "codec": codec,
                        "fps": fps, "seconds": seconds, "lowPreview": str(low_preview).lower(),
-                       "cpuRepack": str(cpu_repack).lower()}.items():
+                       "cpuRepack": str(cpu_repack).lower(), "yuvInput": str(yuv_input).lower()}.items():
         command.extend(["-e", key, str(value)])
     command.append(PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner")
     print("BEGIN", label, FORMATS[input_format], flush=True)
@@ -216,7 +225,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", action="append", help="width,height,format,H264|H265,fps,seconds,p5|p60")
     parser.add_argument("--cpu-repack", action="store_true", help="Require the isolated CPU-repacking build")
+    parser.add_argument("--yuv-input", action="store_true", help="Require direct YUV encoder input without Surface fallback")
+    parser.add_argument("--tag", default="", help="Store pipeline evidence in a separate directory")
     arguments = parser.parse_args()
+    global ROOT
+    if arguments.tag:
+        ROOT = ROOT / arguments.tag
     ROOT.mkdir(parents=True, exist_ok=True)
     for package in (PACKAGE, PACKAGE + ".test"):
         installed = adb("shell", "pm", "path", package, check=False)
@@ -230,7 +244,8 @@ def main():
     try:
         for case in cases:
             width, height, input_format, codec, fps, seconds, preview = case.split(",")
-            results.append(run_case(int(width), int(height), int(input_format), codec, int(fps), int(seconds), preview == "p5", arguments.cpu_repack))
+            results.append(run_case(int(width), int(height), int(input_format), codec, int(fps), int(seconds),
+                                    preview == "p5", arguments.cpu_repack, arguments.yuv_input))
     finally:
         adb("forward", "--remove", "tcp:13419", check=False)
         (ROOT / ("summary-cpu.json" if arguments.cpu_repack else "summary.json")).write_text(json.dumps(results, indent=2), encoding="utf-8")

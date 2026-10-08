@@ -109,7 +109,8 @@ class SyntheticRawPipelineDeviceTest {
         val codec = VideoCodec.valueOf(arguments.getString("codec", "H264")!!)
         val lowPreview = arguments.getString("lowPreview", "false").toBoolean()
         val cpuRepack = arguments.getString("cpuRepack", "false").toBoolean()
-        val label = "${width}x$height-f$inputFormat-${codec.name}-${fps}fps-${if (lowPreview) "p5" else "p60"}-${seconds}s${if (cpuRepack) "-cpu" else ""}"
+        val yuvInput = arguments.getString("yuvInput", "false").toBoolean()
+        val label = "${width}x$height-f$inputFormat-${codec.name}-${fps}fps-${if (lowPreview) "p5" else "p60"}-${seconds}s${if (cpuRepack) "-cpu" else ""}${if (yuvInput) "-yuv" else ""}"
         File(context.filesDir, "rawpipeline-phases.log").delete()
         File(context.filesDir, "$label.json").delete()
         phase("test: started $label")
@@ -120,6 +121,11 @@ class SyntheticRawPipelineDeviceTest {
         val warmFrames = fps
         val requestedFrames = seconds * fps
         val postFrames = 90
+        val jpeg by lazy { SyntheticMjpegVideo(File(context.filesDir, "synthetic-mjpeg-${width}x$height.bin"),
+            width, height, warmFrames + requestedFrames + postFrames) }
+        val expectedColors = arrayOf(intArrayOf(255, 255, 255), intArrayOf(255, 255, 0),
+            intArrayOf(0, 255, 255), intArrayOf(0, 255, 0), intArrayOf(255, 0, 255),
+            intArrayOf(255, 0, 0), intArrayOf(0, 0, 255), intArrayOf(0, 0, 0))
         val previewErrors = CopyOnWriteArrayList<String>()
         val errors = CopyOnWriteArrayList<String>()
         val notices = CopyOnWriteArrayList<String>()
@@ -127,8 +133,6 @@ class SyntheticRawPipelineDeviceTest {
         val started = CountDownLatch(1)
         val releaseTimes = ConcurrentLinkedQueue<Double>()
         val prepareTimes = mutableListOf<Double>()
-        val muxTimes = ConcurrentLinkedQueue<Double>()
-        val firstMeasuredNs = AtomicLong()
         val periodNs = 1_000_000_000L / fps
         val snapshotFile = File(context.filesDir, "$label-preview.png")
         val displayPreview = AtomicReference<SurfaceView>()
@@ -162,7 +166,8 @@ class SyntheticRawPipelineDeviceTest {
         val config = RecordingConfig(cameraId = TestCardSettings.DEVICE_ID, mode = RecordingMode.VIDEO,
             width = width, height = height, fps = fps.toDouble(), videoCodec = codec,
             videoBitrate = if (width == 3840) 35_000_000 else 12_000_000,
-            usbYuvMatrix = UsbYuvMatrix.BT709, usbSourceRange = UsbSourceRange.AUTO,
+            usbYuvMatrix = if (inputFormat == 1) UsbYuvMatrix.BT601 else UsbYuvMatrix.BT709,
+            usbSourceRange = UsbSourceRange.AUTO, usbYuvEncoderInput = yuvInput,
             colorStandard = VideoColorStandard.BT709, colorTransfer = VideoColorTransfer.BT709,
             colorRange = VideoColorRange.LIMITED, usbTimestampSmoothingEnabled = false,
             usbVideoBufferFrames = 2, muxingQueueSize = 64, httpServiceOnly = true,
@@ -171,6 +176,8 @@ class SyntheticRawPipelineDeviceTest {
             onStarted = { stats.set(it); started.countDown() }, onStats = stats::set,
             onNotice = notices::add, onError = { errors.add(it); started.countDown() }, onOutputsEmpty = {})
         val pool = DirectVideoBufferPool(8, 256L * 1024 * 1024)
+        UsbRecorderEngine::class.java.getDeclaredField("externalVideoSource").apply { isAccessible = true }.setBoolean(engine, true)
+        engine.updateColorGrade(VideoColorGradeSettings())
         val oldLowPreview = RecorderController.previewLowFrameRate
         val readyFile = File(context.filesDir, "rawpipeline-ready")
         val clientFile = File(context.filesDir, "rawpipeline-client-ready")
@@ -181,7 +188,6 @@ class SyntheticRawPipelineDeviceTest {
         fun counter(name: String) = (field(engine, name) as AtomicLong).get()
         fun produce(firstId: Int, count: Int, measured: Boolean): Long {
             val startNs = System.nanoTime() + 50_000_000L
-            if (measured) firstMeasuredNs.set(startNs)
             var index = 0
             while (index < count) {
                 val targetNs = startNs + index * periodNs
@@ -195,9 +201,12 @@ class SyntheticRawPipelineDeviceTest {
                 }
                 val timestampNs = startNs + index * periodNs
                 val prepareStart = System.nanoTime()
-                val lease = checkNotNull(pool.acquire(source.size))
-                lease.buffer.order(ByteOrder.LITTLE_ENDIAN).put(source.template.duplicate()).flip()
-                source.mark(lease.buffer, firstId + index)
+                val lease = checkNotNull(pool.acquire(if (inputFormat == 1) jpeg.size else source.size))
+                if (inputFormat == 1) lease.buffer.put(jpeg.frames[firstId + index]).flip()
+                else {
+                    lease.buffer.order(ByteOrder.LITTLE_ENDIAN).put(source.template.duplicate()).flip()
+                    source.mark(lease.buffer, firstId + index)
+                }
                 val owned = CapturedVideoBuffer(lease.buffer) {
                     if (measured) releaseTimes.add((System.nanoTime() - timestampNs) / 1_000_000.0)
                     lease.close()
@@ -211,27 +220,30 @@ class SyntheticRawPipelineDeviceTest {
             return startNs
         }
         try {
-            source.template
-            RawVideoConverter().use { probe ->
-                probe.convert(CapturedVideoBuffer(source.template.duplicate()) {}, inputFormat, width, height, 1)!!.use {
-                    assertEquals("Wrong diagnostic upload path", cpuRepack, probe.diagnostics().allocations > 0)
+            if (inputFormat == 1) jpeg.frames else {
+                source.template
+                RawVideoConverter().use { probe ->
+                    probe.convert(CapturedVideoBuffer(source.template.duplicate()) {}, inputFormat, width, height, 1)!!.use {
+                        assertEquals("Wrong diagnostic upload path", cpuRepack, probe.diagnostics().allocations > 0)
+                    }
                 }
             }
             phase("engine: starting")
             engine.start(null, false, 0)
+            waitUntil {
+                UsbRecorderEngine::class.java.getDeclaredField("videoRenderThread").apply { isAccessible = true }.get(engine) != null
+            }
+            produce(0, fps, false)
             assertTrue("Bootstrap timeout $errors", started.await(15, TimeUnit.SECONDS))
             phase("engine: started")
             assertTrue(errors.toString(), errors.isEmpty())
-            val virtualThread = field(engine, "videoRenderThread") as Thread
-            virtualThread.interrupt(); virtualThread.join(3_000)
-            assertFalse("Virtual source did not stop", virtualThread.isAlive)
-            (field(engine, "mjpegDecodePool") as MjpegDecodePool).start()
-            invoke(engine, "startVideoRender")
+            assertEquals("Encoder fell back unexpectedly: $notices", yuvInput, engine.videoInputDiagnostics() != null)
             RecorderController.previewLowFrameRate = lowPreview
             engine.updatePreview(displayPreview.get().holder.surface, true, 0)
             phase("warmup: starting")
             produce(0, warmFrames, false)
             waitUntil { pool.diagnostics().inUse == 0 }
+            waitUntil { counter("frameCount") >= counter("renderedVideoFrames") }
             phase("warmup: drained")
             Thread.sleep(250)
             @Suppress("UNCHECKED_CAST")
@@ -241,13 +253,7 @@ class SyntheticRawPipelineDeviceTest {
             router.attach(CaptureOutput.HTTP, factory.http())
             val recording = factory.recording(ContainerFormat.MP4)
             recordingName = recording.path!!.substringAfterLast('/')
-            router.attach(CaptureOutput.RECORDING, object : EncodedOutput<MediaFormat> by recording {
-                override fun write(sample: EncodedSample) {
-                    if (sample.ptsUs < requestedFrames * periodNs / 1_000)
-                        muxTimes.add((System.nanoTime() - firstMeasuredNs.get() - sample.ptsUs * 1_000) / 1_000_000.0)
-                    recording.write(sample)
-                }
-            })
+            router.attach(CaptureOutput.RECORDING, recording)
             invoke(engine, "requestKeyFrame")
             clientFile.delete()
             readyFile.writeText(label)
@@ -258,15 +264,25 @@ class SyntheticRawPipelineDeviceTest {
             val renderedBefore = counter("renderedVideoFrames")
             val dropsBefore = counter("rawQueueDrops")
             val skippedBefore = counter("videoTimestampSkips")
+            val inputBefore = engine.videoInputDiagnostics()
+            val outputBefore = engine.videoOutputDiagnostics()
             val measuredStart = produce(warmFrames, requestedFrames, true)
             phase("measurement: source complete")
             waitUntil { pool.diagnostics().inUse == 0 }
+            if (inputFormat == 1) waitUntil {
+                val decoded = (field(engine, "mjpegDecodePool") as MjpegDecodePool).diagnostics()
+                decoded.inputQueued == 0 && decoded.outputQueued == 0 && decoded.outputBuffers.inUse == 0
+            }
             phase("measurement: buffers released")
+            waitUntil { counter("frameCount") >= counter("renderedVideoFrames") }
+            val outputAfter = engine.videoOutputDiagnostics()
             val encoded = counter("frameCount") - encodedBefore
             val rendered = counter("renderedVideoFrames") - renderedBefore
             val queueDrops = counter("rawQueueDrops") - dropsBefore
             val timestampSkips = counter("videoTimestampSkips") - skippedBefore
             val drainedNs = System.nanoTime()
+            val inputAfter = engine.videoInputDiagnostics()
+            val decodeDiagnostics = (field(engine, "mjpegDecodePool") as MjpegDecodePool).diagnostics()
             produce(warmFrames + requestedFrames, postFrames, false)
             waitUntil { pool.diagnostics().inUse == 0 }
             phase("postroll: drained")
@@ -286,7 +302,7 @@ class SyntheticRawPipelineDeviceTest {
                     for (bar in 0 until 8) {
                         val color = previewBitmap.getPixel((bar * 2 + 1) * previewBitmap.width / 16, previewBitmap.height / 4)
                         val actual = intArrayOf(Color.red(color), Color.green(color), Color.blue(color))
-                        val maximum = actual.indices.maxOf { component -> abs(actual[component] - source.colors[bar][component]) }
+                        val maximum = actual.indices.maxOf { component -> abs(actual[component] - expectedColors[bar][component]) }
                         if (maximum > 8) previewErrors.add("Display color bar=$bar error=$maximum")
                     }
                 } finally { previewBitmap.recycle() }
@@ -325,6 +341,11 @@ class SyntheticRawPipelineDeviceTest {
             val summary = JSONObject().put("label", label).put("width", width).put("height", height)
                 .put("format", inputFormat).put("codec", codec.name).put("fps", fps).put("seconds", seconds)
                 .put("cpu_repack", cpuRepack)
+                .put("yuv_input", yuvInput).put("release_scope", if (inputFormat == 1) "JPEG decode input lease" else "render completion")
+                .put("mjpeg_decode_failures", decodeDiagnostics.decodeFailures)
+                .put("mjpeg_input_drops", decodeDiagnostics.inputDrops)
+                .put("mjpeg_output_skips", decodeDiagnostics.outputSkippedSequences)
+                .put("mjpeg_decode_mean_ms", decodeDiagnostics.averageDecodeMs)
                 .put("preview_low", lowPreview).put("requested_frames", requestedFrames).put("source_skipped", sourceSkipped)
                 .put("injected_frames", injected).put("rendered_frames", rendered).put("encoded_frames", encoded)
                 .put("queue_drops", queueDrops).put("timestamp_skips", timestampSkips).put("mp4_frames", pts.size)
@@ -332,10 +353,21 @@ class SyntheticRawPipelineDeviceTest {
                 .put("wall_rendered_fps", rendered * 1_000_000_000.0 / (drainedNs - measuredStart))
                 .put("prepare_mean_ms", average(prepareTimes)).put("prepare_p95_ms", p95(prepareTimes))
                 .put("release_mean_ms", average(releaseTimes)).put("release_p95_ms", p95(releaseTimes))
-                .put("mux_mean_ms", average(muxTimes)).put("mux_p95_ms", p95(muxTimes))
+                .put("encoder_name", outputAfter.codecName)
+                .put("encoder_delivery_mean_ms", if (outputAfter.encoded == outputBefore.encoded) 0.0 else
+                    (outputAfter.deliveryNs - outputBefore.deliveryNs) / 1_000_000.0 / (outputAfter.encoded - outputBefore.encoded))
+                .put("encoder_delivery_scope", "source timestamp to codec output dequeue; includes decode, queueing and rendering")
                 .put("preview_errors", previewErrors.size).put("errors", errors.joinToString("; "))
                 .put("preview_backend", "display SurfaceView").put("preview_latency_measured", false)
                 .put("notices", notices.joinToString("; ")).put("pool_allocations", pool.diagnostics().allocations)
+            if (inputBefore != null && inputAfter != null) {
+                val count = inputAfter.submitted - inputBefore.submitted
+                fun measured(before: Double, after: Double) = if (count == 0L) 0.0 else
+                    (after * inputAfter.submitted - before * inputBefore.submitted) / count
+                summary.put("yuv_input_wait_mean_ms", measured(inputBefore.averageInputWaitMs, inputAfter.averageInputWaitMs))
+                    .put("yuv_conversion_mean_ms", measured(inputBefore.averageConversionMs, inputAfter.averageConversionMs))
+                    .put("yuv_queue_mean_ms", measured(inputBefore.averageQueueMs, inputAfter.averageQueueMs))
+            }
             File(context.filesDir, "$label.json").writeText(summary.toString(2))
             println("RAW_PIPELINE $summary")
             assertTrue(errors.toString(), errors.isEmpty())

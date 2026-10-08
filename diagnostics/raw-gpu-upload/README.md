@@ -625,3 +625,118 @@ Evidence: `build/perf-diagnostics/raw-pipeline/event-wait-pipeline/` contains ea
 case's validated JSON, MP4, TS, preview PNG and instrumentation log. The normal
 application-ID Debug APK build was restored after installing the isolated test
 package; the formal app was neither overwritten nor stopped (PID 16630 unchanged).
+
+## Direct YUV encoder input (2026-10-08)
+
+The saved, default-off `YUV 直接输入编码器（实验）` setting selects a real
+`COLOR_FormatYUV420Flexible` MediaCodec input image rather than an encoder
+Surface. Native code writes the encoder's own Y/U/V planes using their reported
+row/pixel strides; input images and captured/decoded leases are released after
+submission. EOS uses an input-buffer flag, not Surface EOS.
+
+The recording path is `capture/JPEG decode -> native YUV420 packing and fused
+matrix/range conversion -> MediaCodec`. It never allocates an RGB intermediate
+for a YUV source. Preview remains independent and still converts YUV to RGB for
+display. Matching-matrix/range I420/NV12 use copy paths; matching YUYV/UYVY use
+NEON deinterleaving and vertical chroma averaging on arm64. Planar 420 matrix/range
+conversion also uses NEON, with scalar tails and fallback for other layouts.
+MJPEG full-range BT.601 can therefore feed limited-range BT.709 without ignoring
+either the input interpretation or the output color request.
+
+YUYV/UYVY, NV12, I420, decoded JPEG YUV and P010/YUV10 are accepted; ten-bit input
+currently converts to **8-bit SDR** encoder input. RGB/BGR cameras can use the
+same input-plane writer, but naturally already have RGB source pixels. Test
+cards, active recording grading, odd dimensions, HDR, BT.2020 output and
+non-SDR transfer requests fall back with a notice. Unsupported codecs/input
+images also fall back at startup. Enabling recording grading during an active
+direct-YUV session is rejected with a notice rather than silently bypassed.
+
+### Reproduction and validation
+
+Build isolated APKs without replacing the production application:
+
+```powershell
+.\gradlew.bat :app:assembleDebug :app:assembleDebugAndroidTest '-Pandroid.injected.build.abi=arm64-v8a' -I diagnostics/raw-gpu-upload/pipeline.gradle
+& 'D:\AndroidSDK\platform-tools\adb.exe' -t 1 install -r -t app/build/intermediates/apk/debug/app-debug.apk
+& 'D:\AndroidSDK\platform-tools\adb.exe' -t 1 install -r -t app/build/intermediates/apk/androidTest/debug/app-debug-androidTest.apk
+python -u diagnostics/raw-gpu-upload/compare_yuv.py --rounds 2 --seconds 6 --tag yuv-direct-neon-final
+```
+
+The paired runner alternates Surface-first and YUV-first between rounds. The
+defaults cover MJPEG, YUYV, NV12 and I420 at 1920x1080 AVC and 3840x2160 HEVC,
+with a real displayed 60-fps preview, the same codec/bitrate/color settings,
+warmup, six seconds of measured 60-fps input, MP4 and live HTTP MPEG-TS output.
+Use `--formats` to select other inputs or `--low-preview` for 5-fps display.
+`--start-round 2 --rounds 1` appends the reversed-order round to existing evidence.
+The existing single-case runner also supports `--yuv-input` and explicitly fails
+if the encoder silently falls back to Surface.
+
+`encoder_delivery_mean_ms` measures monotonic source timestamp to codec output
+dequeue, before MP4 timestamp rebasing, mux reordering or HTTP buffering. It
+includes source scheduling/copy, JPEG decoding when applicable, render/input
+queueing and hardware encoding; it is **not pure codec execution time** or
+remote-playback latency. The old normalized-output-PTS `mux_mean_ms` measurement
+is removed because output attachment/keyframe rebasing introduced a false offset.
+Input wait, native conversion and queue submission are separately measured for
+the direct path. Raw capture-buffer release includes preview/render submission;
+MJPEG capture-buffer release ends at JPEG decoding and does **not** measure the
+encoding path. Host-decoded measured frame IDs, rather than a counter read before
+asynchronous drain, determine the final encoded frame rate.
+
+The runner checks MP4 and HTTP frame IDs, top/bottom tearing, duplicates/order,
+color bars, gray samples and decoder warnings. It records instrumented preview
+checks, source skips, queue drops, timestamp skips and JPEG decode errors. A
+pair is marked failed if either path loses any measured frame or fails these
+checks. HTTP may omit trailing postroll packets because it is live output, not
+reliable archival upload. This synthetic video-only test does not cover real
+USB transport, camera-specific JPEGs, audio, complex motion or maximum unpaced
+encoder throughput; 60 fps is a paced target, not a throughput ceiling discovery.
+
+Focused tests are `YuvEncoderTransformTest` (matrix/range/10-bit/policy) and
+`YuvEncoderConverterDeviceTest` (padded/strided planes, scalar-reference matching,
+NV12/NV21 chroma order, NEON tails, packed 422 vertical averaging, undersized
+buffers and full-height JPEG chroma). Neither test uses RGB conversion as a
+substitute for the YUV encoding path.
+
+### Paired device results
+
+On device model V2338A, both paths used `c2.qti.avc.encoder` for 1080p and
+`c2.qti.hevc.encoder` for 4K. Each case was repeated twice, with reversed path
+order in the second round. Values below are arithmetic means of the two runs.
+All **32 pipeline executions** preserved all **360 measured frames** per run
+at 60 fps: 11,520 measured MP4 frames in total, with all measured IDs also present
+in HTTP output. There were no source skips, raw queue drops, timestamp skips,
+JPEG decode failures/drops/sequence skips, preview errors, tearing or reordered
+IDs. Decoded color error was at most three and gray error at most two.
+
+| Input | Encoder | RGB/Surface delivery mean | Direct YUV delivery mean | Delivery reduction | YUV conversion mean |
+| --- | --- | ---: | ---: | ---: | ---: |
+| MJPEG | 1080p AVC | 29.821 ms | 26.605 ms | 10.8% | 1.203 ms |
+| YUYV | 1080p AVC | 28.710 ms | 24.938 ms | 13.1% | 0.766 ms |
+| NV12 | 1080p AVC | 29.295 ms | 24.989 ms | 14.7% | 0.322 ms |
+| I420 | 1080p AVC | 29.405 ms | 25.044 ms | 14.8% | 0.351 ms |
+| MJPEG | 4K HEVC | 29.806 ms | 26.929 ms | 9.7% | 4.399 ms |
+| YUYV | 4K HEVC | 23.510 ms | 18.777 ms | 20.1% | 2.650 ms |
+| NV12 | 4K HEVC | 22.154 ms | 16.648 ms | 24.9% | 1.104 ms |
+| I420 | 4K HEVC | 22.538 ms | 16.574 ms | 26.5% | 1.145 ms |
+
+The benefit here is lower source-to-encoded-output latency, **not increased
+measured FPS**: both pipelines meet the fixed 60-fps target. Nor is direct YUV
+zero-copy or universally faster in every stage. Raw capture-buffer release gets
+slower because CPU packing, input-buffer submission and preview still hold the
+source lease. For example, 4K I420 release mean rises from 4.899 to 7.487 ms even
+though encoded delivery improves from 22.538 to 16.574 ms. JPEG input leases end
+at decoding, so their release timing is not an encoding-speed comparison.
+
+CPU/GPU frequencies were not locked; the device thermal status moved from 0 at
+the beginning to 1 at the end. These are observations for this device and simple
+synthetic content, not a universal speed guarantee. Native converter device
+tests pass all six tests; the complete JVM suite passes 177 tests across 29 suites.
+The normal application-ID Debug APK is rebuilt after diagnostic installation;
+the production app is not overwritten/stopped (PID 16630 remains unchanged).
+
+Evidence: `build/perf-diagnostics/raw-pipeline/yuv-direct-neon-final/` contains
+`comparison.json`, two rounds of per-case validated JSON, MP4, HTTP TS, preview
+PNG and instrumentation logs, plus thermal/battery snapshots. Build/test logs
+are `build/perf-diagnostics/raw-pipeline/yuv-formal-build.log` and
+`build/perf-diagnostics/raw-pipeline/yuv-native-final.log`.
