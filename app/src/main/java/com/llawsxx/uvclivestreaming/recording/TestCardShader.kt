@@ -22,6 +22,7 @@ internal object TestCardShader {
         uniform int uTestPattern;
         uniform vec4 uTestMode; // width, height, fps, frame modulo 1,000,000
         uniform float uTestSeconds;
+        uniform float uTestNoise;
         uniform bool uGradeEnabled;
         uniform sampler2D uColorLut;
         uniform vec4 uLutInfo;
@@ -139,6 +140,12 @@ internal object TestCardShader {
             if(abs(r-0.43)<1.5/activeHeight || abs(p.x)<1.0/activeHeight || abs(p.y)<1.0/activeHeight) rgb=vec3(1.0);
             return rgb;
         }
+        // Source pixels and frame number keep the noise identical in preview and encoder draws.
+        vec3 noise(vec3 p) {
+            p=fract(p*vec3(0.1031,0.1030,0.0973));
+            p+=dot(p,p.yxz+33.33);
+            return fract((p.xxy+p.yxx)*p.zyx);
+        }
         void main() {
             // Reserve a footer for source dimensions, fps, frame number and seconds.
             float scale=max(1.0,floor(min(uTestMode.x/250.0,uTestMode.y/180.0)));
@@ -160,6 +167,8 @@ internal object TestCardShader {
                 else if(uTestPattern==4) rgb=resolution(vUv);
                 else if(uTestPattern==5) rgb=motion(vUv);
                 else rgb=composite(uv,uTestMode.y*(1.0-footer));
+                if(uTestNoise>0.0) rgb=mix(clamp(rgb,0.0,1.0),
+                    noise(vec3(floor(vUv*uTestMode.xy),mod(uTestMode.w,4096.0))),uTestNoise);
             }
             rgb=clamp(rgb,0.0,1.0);
             if(uGradeEnabled) rgb=grade(rgb);

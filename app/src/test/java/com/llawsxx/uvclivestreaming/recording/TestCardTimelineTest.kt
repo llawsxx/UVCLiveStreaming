@@ -29,10 +29,11 @@ class TestCardTimelineTest {
 
     @Test fun rejectsInvalidSettingsAndRates() {
         assertTrue(TestCardSettings().valid)
-        assertTrue(TestCardSettings(width = 3840, height = 2160, fps = 240.0).valid)
+        assertTrue(TestCardSettings(width = 3840, height = 2160, fps = 240.0, noisePercent = 100).valid)
         for (settings in listOf(TestCardSettings(width = 0), TestCardSettings(width = 3841),
             TestCardSettings(height = 0), TestCardSettings(height = 2161),
-            TestCardSettings(fps = Double.NaN), TestCardSettings(fps = 0.0), TestCardSettings(fps = 240.01))) {
+            TestCardSettings(fps = Double.NaN), TestCardSettings(fps = 0.0), TestCardSettings(fps = 240.01),
+            TestCardSettings(noisePercent = -1), TestCardSettings(noisePercent = 101))) {
             assertFalse(settings.valid)
         }
         for (fps in listOf(Double.NaN, Double.POSITIVE_INFINITY, 0.0, 241.0)) {

@@ -2,7 +2,8 @@
 public final class TestCardSmoke {
     public static void main(String[] args) throws Exception {
         String[][] tests = {
-            {"TestCardGpuTest", "cardsHaveExpectedColorsPixelStripesMotionAndHud", "virtualFramesReachAvcAndHevcWithFractionalPts"},
+            {"TestCardGpuTest", "cardsHaveExpectedColorsPixelStripesMotionAndHud", "noiseChangesEachFrameForEveryCardAndKeepsHudClean",
+                "virtualFramesReachAvcAndHevcWithFractionalPts", "dynamicNoiseRaisesActualAvcAndHevcBitrate"},
             {"GpuVideoPipelineTest", "gpuUsesCorrectRangeOrientationAndBgrOrder", "selectableMatricesProduceReferenceRgbPixels"},
             {"VideoColorLutGpuTest", "disablingAndNeutralSettingsBypassExactlyAndBgrUsesRgbLut"}
         };

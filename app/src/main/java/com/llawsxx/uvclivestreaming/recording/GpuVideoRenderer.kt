@@ -283,6 +283,7 @@ internal class GpuVideoRenderer(
             GLES20.glUniform4f(GLES20.glGetUniformLocation(shader, "uTestMode"), frame.width.toFloat(), frame.height.toFloat(),
                 card.fps.toFloat(), (card.index % 1_000_000).toFloat())
             GLES20.glUniform1f(GLES20.glGetUniformLocation(shader, "uTestSeconds"), ((card.index / card.fps) % 10_000).toFloat())
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(shader, "uTestNoise"), card.noisePercent.coerceIn(0, 100) / 100f)
         } else {
             for (plane in 0..2) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + plane)

@@ -65,7 +65,7 @@ class VideoGopPreferencesTest {
 
     @Test fun virtualDevicePatternAndFractionalModeSurviveRestart() {
         val prefs = preferences(mutableMapOf())
-        val card = TestCardSettings(TestCardPattern.RESOLUTION, 720, 480, 60000.0 / 1001)
+        val card = TestCardSettings(TestCardPattern.RESOLUTION, 720, 480, 60000.0 / 1001, noisePercent = 35)
         ConfigPreferences.save(prefs, RecordingConfig(cameraId = TestCardSettings.DEVICE_ID, testCard = card))
         val loaded = ConfigPreferences.load(prefs)
         assertEquals(TestCardSettings.DEVICE_ID, loaded.cameraId)

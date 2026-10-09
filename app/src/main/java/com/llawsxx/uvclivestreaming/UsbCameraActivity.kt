@@ -911,7 +911,7 @@ private fun UsbCameraScreen() {
                     }
                     DropdownMenu(expanded = modesExpanded, onDismissRequest = { modesExpanded = false }) {
                         DropdownMenuItem(text = { Text(if (testCardSelected) "默认 · 1920×1080 · 60 fps" else "自动 · 1280×720 · 30 fps") }, onClick = {
-                            if (testCardSelected) testCardSettings = TestCardSettings(pattern = testCardSettings.pattern) else selectedMode = null
+                            if (testCardSelected) testCardSettings = testCardSettings.copy(width = 1920, height = 1080, fps = 60.0) else selectedMode = null
                             modesExpanded = false
                         })
                         DropdownMenuItem(text = { Text(if (testCardSelected) "自定义分辨率／帧率…" else "自定义分辨率／帧率／格式…") }, onClick = {
@@ -935,6 +935,10 @@ private fun UsbCameraScreen() {
                 if (testCardSelected) {
                     UsbSettingChoice("测试卡样式", TestCardPattern.entries, testCardSettings.pattern, !recording,
                         { it.label }) { testCardSettings = testCardSettings.copy(pattern = it) }
+                    UsbSettingChoice("测试卡噪点", listOf(0, 5, 10, 20, 35, 50, 75, 100), testCardSettings.noisePercent,
+                        !recording, { if (it == 0) "关闭" else "$it%" }) { testCardSettings = testCardSettings.copy(noisePercent = it) }
+                    Text("动态彩色噪点增加画面复杂度；强度越高，越容易达到设定码率。可先试 20%～50%。",
+                        style = MaterialTheme.typography.bodySmall)
                     Text("GPU 生成 RGB；W/H 为像素尺寸，FPS 为源帧率，F 为帧号，T 为秒表。",
                         style = MaterialTheme.typography.bodySmall)
                     if (includeAudio && audioInput == UsbAudioInput.USB && uacDevice == null) Text("测试卡只提供视频；如需音频请选择 USB 音频设备或系统麦克风。")

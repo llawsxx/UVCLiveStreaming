@@ -18,8 +18,9 @@ data class TestCardSettings(
     val width: Int = 1920,
     val height: Int = 1080,
     val fps: Double = 60.0,
+    val noisePercent: Int = 0,
 ) : Serializable {
-    val valid: Boolean get() = width in 1..3840 && height in 1..2160 && fps.isFinite() && fps in 1.0..240.0
+    val valid: Boolean get() = width in 1..3840 && height in 1..2160 && fps.isFinite() && fps in 1.0..240.0 && noisePercent in 0..100
     companion object { const val DEVICE_ID = "virtual:test-card" }
 }
 
@@ -30,18 +31,20 @@ internal class TestCardTimeline(val fps: Double, val startNs: Long) {
     fun latestIndex(nowNs: Long): Long = floor(((nowNs - startNs).coerceAtLeast(0) + 0.5) * fps / 1_000_000_000.0).toLong()
 }
 
-internal data class TestCardFrame(val pattern: TestCardPattern, val fps: Double, val index: Long)
+internal data class TestCardFrame(val pattern: TestCardPattern, val fps: Double, val index: Long, val noisePercent: Int = 0)
 
 internal object TestCardPreferences {
     fun load(p: SharedPreferences): TestCardSettings = TestCardSettings(
         runCatching { TestCardPattern.valueOf(p.getString("testCardPattern", "SMPTE").orEmpty()) }.getOrDefault(TestCardPattern.SMPTE),
         p.getInt("testCardWidth", 1920), p.getInt("testCardHeight", 1080),
         p.getString("testCardFps", "60")?.toDoubleOrNull() ?: 60.0,
+        p.getInt("testCardNoisePercent", 0).coerceIn(0, 100),
     ).takeIf { it.valid } ?: TestCardSettings()
 
     fun save(editor: SharedPreferences.Editor, settings: TestCardSettings): SharedPreferences.Editor = editor
         .putString("testCardPattern", settings.pattern.name).putInt("testCardWidth", settings.width)
         .putInt("testCardHeight", settings.height).putString("testCardFps", settings.fps.toString())
+        .putInt("testCardNoisePercent", settings.noisePercent)
 }
 
 internal fun runTestCardFrames(settings: TestCardSettings, startNs: Long, running: () -> Boolean,
@@ -54,7 +57,8 @@ internal fun runTestCardFrames(settings: TestCardSettings, startNs: Long, runnin
         if (remaining > 0) { LockSupport.parkNanos(remaining); continue }
         val index = maxOf(nextIndex, timeline.latestIndex(System.nanoTime()))
         render(GpuVideoFrame(null, settings.width, settings.height, timeline.timestamp(index),
-            layout = GpuVideoFrame.RGB, fullRange = true, testCard = TestCardFrame(settings.pattern, settings.fps, index)))
+            layout = GpuVideoFrame.RGB, fullRange = true,
+            testCard = TestCardFrame(settings.pattern, settings.fps, index, settings.noisePercent)))
         nextIndex = index + 1
     }
 }
