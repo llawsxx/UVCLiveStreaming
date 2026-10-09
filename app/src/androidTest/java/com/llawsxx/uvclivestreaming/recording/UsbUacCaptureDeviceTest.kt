@@ -59,7 +59,8 @@ class UsbUacCaptureDeviceTest {
                     }, onError = failures::add)
                 try {
                     capture.start(object : UsbCaptureCallback {
-                        override fun onUsbVideoFrame(bytes: ByteArray, format: Int, width: Int, height: Int, timestampNs: Long) {
+                        override fun onUsbVideoFrame(bytes: CapturedVideoBuffer, format: Int, width: Int, height: Int, timestampNs: Long) {
+                            bytes.close()
                             failures.add("UAC-only capture emitted video")
                         }
                         override fun onUsbAudioPcm(bytes: ByteArray, timestampNs: Long) { failures.add("Raw PCM precision lost") }

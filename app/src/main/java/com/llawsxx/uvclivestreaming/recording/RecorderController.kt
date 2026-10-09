@@ -29,6 +29,7 @@ object RecorderController {
     @Volatile internal var previewHeight = 0
     @Volatile internal var previewEnabled = false
     @Volatile internal var previewLowFrameRate = false
+    @Volatile internal var previewZoom = PreviewZoom()
     @Volatile internal var previewRotationDegrees = 0
     @Volatile internal var previewUpdater: ((Surface?, Boolean, Int) -> Unit)? = null
     @Volatile internal var usbAudioPreviewEnabled = false

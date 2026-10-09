@@ -61,6 +61,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.llawsxx.uvclivestreaming.recording.ConfigPreferences
 import com.llawsxx.uvclivestreaming.recording.validHttpUploadUrl
+import com.llawsxx.uvclivestreaming.recording.httpUploadUrls
 import com.llawsxx.uvclivestreaming.recording.ContainerFormat
 import com.llawsxx.uvclivestreaming.recording.NativeUsbCapture
 import com.llawsxx.uvclivestreaming.recording.MjpegDecodePool
@@ -776,10 +777,10 @@ private fun UsbCameraScreen() {
         onExitFullscreen = { fullscreen = false; activity?.exitUsbFullscreen() },
         lowFrameRatePreview = lowFrameRatePreview,
         onLowFrameRatePreviewChange = { lowFrameRatePreview = it },
-        preview = { modifier, onTap ->
+        onPreviewZoomChange = { RecorderController.previewZoom = it },
+        preview = { modifier ->
             AndroidView(
                 factory = { viewContext -> SurfaceView(viewContext).apply {
-                    setOnClickListener { onTap() }
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) { surface = holder.surface; surfaceRevision++ }
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -1115,8 +1116,8 @@ private fun UsbCameraScreen() {
                     style = MaterialTheme.typography.bodySmall)
                 if (httpUploadEnabled) {
                     OutlinedTextField(value = httpUploadUrl, onValueChange = { httpUploadUrl = it },
-                        enabled = !recording && outputControlsEnabled, singleLine = true,
-                        modifier = Modifier.fillMaxWidth(), label = { Text("HTTP 上传地址") },
+                        enabled = !recording && outputControlsEnabled, minLines = 1, maxLines = 8,
+                        modifier = Modifier.fillMaxWidth(), label = { Text("HTTP 上传地址（多服务器每行一个）") },
                         placeholder = { Text("http://服务器:8080/upload/live") },
                         isError = !validHttpUploadUrl(httpUploadUrl.trim()))
                     UsbSettingChoice("上传分块时长", listOf(1, 2, 3, 5), httpUploadChunkSeconds,
@@ -1125,8 +1126,11 @@ private fun UsbCameraScreen() {
                         !recording && outputControlsEnabled, { "$it 秒" }) { httpUploadCacheSeconds = it }
                     Text("默认 1 秒一块、60 秒内存缓存（最多 256 MiB）。缓存满或块过期时淘汰最旧块，继续串流；停止串流会立即取消上传并清空缓存。服务端默认延迟 10 秒、待播上限 20 秒，TS 原样透传。",
                         style = MaterialTheme.typography.bodySmall)
-                    if (validHttpUploadUrl(httpUploadUrl.trim())) Text(
-                        "播放地址：${httpUploadUrl.trim().replace("/upload/", "/live/")}.ts",
+                    if (httpUploadUrls(httpUploadUrl).size > 1) Text(
+                        "多服务器自动分流：根据接收速度分配，慢块自动转投。所有地址使用相同流名称；服务器启用 store 模式，接收端启用 merge 模式后打开其播放地址。",
+                        style = MaterialTheme.typography.bodySmall)
+                    else if (validHttpUploadUrl(httpUploadUrl.trim())) Text(
+                        "relay 模式播放地址：${httpUploadUrl.trim().replace("/upload/", "/live/")}.ts；若服务器使用 store 模式，请在接收端启动 merge 并打开其播放地址。",
                         style = MaterialTheme.typography.bodySmall)
                 }
                 OutlinedTextField(
@@ -1177,6 +1181,16 @@ private fun UsbCameraScreen() {
                         Text("待上传：${upload.pendingUploadBlocks} 块 · 待补传：${upload.pendingRetryBlocks} 块（含在途未确认块）",
                             style = MaterialTheme.typography.bodySmall)
                         Text("累计淘汰：${upload.droppedBlocks} 块", style = MaterialTheme.typography.bodySmall)
+                        upload.servers.forEachIndexed { index, server ->
+                            val bandwidth = server.estimatedBitsPerSecond?.let {
+                                String.format(Locale.US, "%.2f Mbps", it / 1_000_000.0)
+                            } ?: "待评估"
+                            val status = if (server.consecutiveFailures > 0) "重试 / 暂缓分配" else if (server.uploading) "上传中" else "待分配"
+                            Text("服务器 ${index + 1}：$bandwidth · $status",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (upload.servers.isNotEmpty()) Text(String.format(Locale.US, "已确认分块保留：%.1f KiB（供慢块转投）",
+                            upload.retainedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)
                         Text(String.format(Locale.US, "缓存数据：%.1f KiB / %.2f 秒 · 缓存占用：%.1f KiB",
                             upload.cachedDataBytes / 1024.0, upload.cachedDurationUs / 1_000_000.0,
                             upload.cacheAllocatedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)
@@ -1551,7 +1565,8 @@ private class UsbIdlePreview(
                 if (testCard != null) {
                     runTestCardFrames(testCard, System.nanoTime(), { !stopped.get() }) { frame ->
                         gpu.setColorGrade(colorGradeSettings)
-                        gpu.render(frame, GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate))
+                        gpu.render(frame, GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate,
+                            RecorderController.previewZoom))
                     }
                     return@use
                 }
@@ -1571,7 +1586,8 @@ private class UsbIdlePreview(
                             converted = rawVideoConverter.convert(raw.bytes, raw.format, raw.width, raw.height, raw.timestampNs)
                             converted?.frame ?: continue
                         }
-                        val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate)
+                        val target = GpuVideoRenderer.PreviewTarget(surface, previewRevision.get(), lowFrameRate,
+                            RecorderController.previewZoom)
                         val settings = colorSettings
                         gpu.setColorSettings(settings.first, settings.second)
                         gpu.setColorGrade(colorGradeSettings)

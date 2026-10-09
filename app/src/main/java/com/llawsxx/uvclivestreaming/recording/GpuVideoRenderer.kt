@@ -19,7 +19,8 @@ internal class GpuVideoRenderer(
     private val previewClockNs: () -> Long = System::nanoTime,
     initialColorGrade: VideoColorGradeSettings = VideoColorGradeSettings(),
 ) : AutoCloseable {
-    data class PreviewTarget(val surface: Surface?, val revision: Long, val lowFrameRate: Boolean = false)
+    data class PreviewTarget(val surface: Surface?, val revision: Long, val lowFrameRate: Boolean = false,
+        val zoom: PreviewZoom = PreviewZoom())
 
     private val ownerThread = Thread.currentThread()
     private val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -159,7 +160,7 @@ internal class GpuVideoRenderer(
             val h = IntArray(1)
             check(EGL14.eglQuerySurface(display, previewWindow, EGL14.EGL_WIDTH, w, 0))
             check(EGL14.eglQuerySurface(display, previewWindow, EGL14.EGL_HEIGHT, h, 0))
-            draw(frame, w[0], h[0])
+            draw(frame, w[0], h[0], target?.zoom ?: PreviewZoom())
             check(EGL14.eglSwapBuffers(display, previewWindow))
             true
         } catch (error: RuntimeException) {
@@ -240,15 +241,16 @@ internal class GpuVideoRenderer(
         textureChromaWidth = cw; textureChromaHeight = ch
     }
 
-    private fun draw(frame: GpuVideoFrame, width: Int, height: Int) {
+    private fun draw(frame: GpuVideoFrame, width: Int, height: Int, zoom: PreviewZoom = PreviewZoom()) {
         check(width > 0 && height > 0)
         GLES20.glViewport(0, 0, width, height)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         val scale = minOf(width.toFloat() / frame.width, height.toFloat() / frame.height)
-        val dw = (frame.width * scale).toInt().coerceAtLeast(1)
-        val dh = (frame.height * scale).toInt().coerceAtLeast(1)
-        GLES20.glViewport((width - dw) / 2, (height - dh) / 2, dw, dh)
+        val viewport = PreviewViewport.forAspectRatio(frame.width.toFloat() / frame.height, width.toFloat() / height)
+        val viewZoom = zoom.constrained(viewport)
+        val horizontal = frame.width * scale * viewZoom.scale / width
+        val vertical = frame.height * scale * viewZoom.scale / height
         val card = frame.testCard
         if (card != null && testProgram == 0) {
             testProgram = createProgram(TestCardShader.fragment)
@@ -258,6 +260,16 @@ internal class GpuVideoRenderer(
         }
         val shader = if (card != null) testProgram else program
         GLES20.glUseProgram(shader)
+        // Expand the image into the full surface, including former black bars. GL clips at screen edges.
+        // Encoder draws restore the fitted image at 1x on every frame.
+        val left = -2f * viewZoom.centerX * horizontal
+        val right = 2f * (1f - viewZoom.centerX) * horizontal
+        val top = 2f * viewZoom.centerY * vertical
+        val bottom = -2f * (1f - viewZoom.centerY) * vertical
+        vertices.put(0, left); vertices.put(1, bottom)
+        vertices.put(4, right); vertices.put(5, bottom)
+        vertices.put(8, left); vertices.put(9, top)
+        vertices.put(12, right); vertices.put(13, top)
         val position = GLES20.glGetAttribLocation(shader, "aPosition")
         val uv = GLES20.glGetAttribLocation(shader, "aUv")
         vertices.position(0)
@@ -310,7 +322,9 @@ internal class GpuVideoRenderer(
     }
 
     private fun updatePreview(target: PreviewTarget?) {
-        if (target == boundPreview && previewWindow != EGL14.EGL_NO_SURFACE) return
+        // Gesture updates must not recreate the EGL surface or reset the preview frame limiter.
+        if (target?.surface === boundPreview?.surface && target?.revision == boundPreview?.revision &&
+            previewWindow != EGL14.EGL_NO_SURFACE) return
         destroyPreview()
         if (target?.surface?.isValid != true) return
         previewWindow = createWindow(target.surface)

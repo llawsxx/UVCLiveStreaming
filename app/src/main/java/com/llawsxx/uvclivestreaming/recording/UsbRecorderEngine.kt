@@ -395,6 +395,7 @@ class UsbRecorderEngine(
                             val target = GpuVideoRenderer.PreviewTarget(
                                 preview.takeIf { previewEnabled }, previewRevision.get(),
                                 RecorderController.previewLowFrameRate,
+                                RecorderController.previewZoom,
                             )
                             gpu.setColorGrade(colorGradeSettings)
                             val accepted = yuvCodecInput?.let { input ->
@@ -434,7 +435,7 @@ class UsbRecorderEngine(
                         receivedVideoFrames.incrementAndGet()
                         gpu.setColorGrade(colorGradeSettings)
                         gpu.render(frame, GpuVideoRenderer.PreviewTarget(preview.takeIf { previewEnabled },
-                            previewRevision.get(), RecorderController.previewLowFrameRate))
+                            previewRevision.get(), RecorderController.previewLowFrameRate, RecorderController.previewZoom))
                         renderedVideoFrames.set(gpu.encodedFrameCount)
                     }
                 }

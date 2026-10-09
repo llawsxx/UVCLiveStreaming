@@ -15,8 +15,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.llawsxx.uvclivestreaming.recording.PreviewZoom
+import com.llawsxx.uvclivestreaming.recording.PreviewViewport
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -35,7 +38,8 @@ internal fun UsbCameraWorkspace(
     onExitFullscreen: () -> Unit,
     lowFrameRatePreview: Boolean,
     onLowFrameRatePreviewChange: (Boolean) -> Unit,
-    preview: @Composable (Modifier, () -> Unit) -> Unit,
+    onPreviewZoomChange: (PreviewZoom) -> Unit,
+    preview: @Composable (Modifier) -> Unit,
     fullscreenControls: @Composable () -> Unit,
     audioMeter: @Composable () -> Unit,
     actions: @Composable () -> Unit,
@@ -44,6 +48,11 @@ internal fun UsbCameraWorkspace(
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var selectedTab by rememberSaveable { mutableStateOf(UsbSettingsTab.DEVICE) }
     var showPreviewControls by remember { mutableStateOf(false) }
+    var previewZoom by rememberSaveable(aspectRatio) { mutableStateOf(PreviewZoom()) }
+    LaunchedEffect(fullscreen) { if (!fullscreen) previewZoom = PreviewZoom() }
+    val appliedZoom = if (fullscreen) previewZoom else PreviewZoom()
+    SideEffect { onPreviewZoomChange(appliedZoom) }
+    DisposableEffect(Unit) { onDispose { onPreviewZoomChange(PreviewZoom()) } }
     val scrollStates = UsbSettingsTab.entries.map { rememberScrollState() }
     Layout(
         modifier = if (fullscreen) Modifier.fillMaxSize() else
@@ -51,12 +60,22 @@ internal fun UsbCameraWorkspace(
         content = {
             Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 BoxWithConstraints(
-                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(8.dp)).background(Color.Black),
+                    Modifier.fillMaxWidth().weight(1f).testTag("preview-region")
+                        .clip(RoundedCornerShape(if (fullscreen) 0.dp else 8.dp)).background(Color.Black),
                     contentAlignment = Alignment.Center,
                 ) {
                     val width = minOf(maxWidth, maxHeight * aspectRatio)
-                    Box(Modifier.width(width).height(width / aspectRatio)) {
-                        preview(Modifier.fillMaxSize()) { showPreviewControls = !showPreviewControls }
+                    val viewport = PreviewViewport.forAspectRatio(aspectRatio,
+                        if (fullscreen) maxWidth / maxHeight else aspectRatio)
+                    LaunchedEffect(viewport) { previewZoom = previewZoom.constrained(viewport) }
+                    Box(if (fullscreen) Modifier.fillMaxSize() else Modifier.width(width).height(width / aspectRatio)) {
+                        preview(Modifier.fillMaxSize())
+                        UsbPreviewGestures(fullscreen, aspectRatio, { previewZoom }, { previewZoom = it },
+                            onTap = { showPreviewControls = !showPreviewControls }, modifier = Modifier.fillMaxSize())
+                        if (fullscreen && previewZoom.scale > 1f) {
+                            UsbPreviewZoomIndicator(previewZoom, aspectRatio, viewport,
+                                Modifier.align(Alignment.BottomEnd).padding(12.dp))
+                        }
                         if (showPreviewControls) {
                             Column(Modifier.align(Alignment.TopEnd).padding(4.dp),
                                 horizontalAlignment = Alignment.End,

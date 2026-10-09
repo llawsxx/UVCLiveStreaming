@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -31,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
@@ -75,16 +77,17 @@ static void nonblocking(Socket socket) {
 #endif
 }
 
-static bool ready(Socket socket, bool write, Time deadline) {
+static bool ready(Socket socket, bool write, Time deadline, [[maybe_unused]] bool connecting = false) {
     while (true) {
         const auto left = std::chrono::duration_cast<Us>(deadline - Clock::now()).count();
         if (left <= 0) return false;
 #ifdef _WIN32
-        fd_set descriptors;
+        fd_set descriptors, errors;
         FD_ZERO(&descriptors); FD_SET(socket, &descriptors);
+        FD_ZERO(&errors); FD_SET(socket, &errors);
         timeval timeout{static_cast<long>(left / 1000000), static_cast<long>(left % 1000000)};
         const int result = select(0, write ? nullptr : &descriptors,
-                                  write ? &descriptors : nullptr, nullptr, &timeout);
+                                  write ? &descriptors : nullptr, connecting ? &errors : nullptr, &timeout);
 #else
         pollfd descriptor{socket, static_cast<short>(write ? POLLOUT : POLLIN), 0};
         const int result = poll(&descriptor, 1, static_cast<int>((left + 999) / 1000));
@@ -201,9 +204,10 @@ static Request read_request(Socket socket) {
     return request;
 }
 
-static void response(Socket socket, int status, const std::string& body, const std::string& headers = {}) {
+static void response(Socket socket, int status, const std::string& body, const std::string& headers = {}, bool keep_alive = false) {
+    if (socket == invalid_socket) return; // Internal merge ingestion does not have an HTTP client.
     send_all(socket, "HTTP/1.1 " + std::to_string(status) + (status == 200 ? " OK\r\n" : " Error\r\n") +
-        "Content-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: " +
+        "Content-Type: text/plain; charset=utf-8\r\nConnection: " + (keep_alive ? "keep-alive" : "close") + "\r\nContent-Length: " +
         std::to_string(body.size()) + "\r\n" + headers + "\r\n" + body);
 }
 
@@ -388,7 +392,7 @@ class Relay {
             if (old != active_session) receipts.erase(old);
         }
     }
-    void accept_upload(Socket socket, Request request) {
+    void accept_upload(Socket socket, Request request, bool keep_alive = false) {
         auto required = [&](const std::string& key) -> std::string {
             const auto found = request.headers.find(key);
             if (found == request.headers.end()) throw HttpError(400, "Missing " + key);
@@ -408,7 +412,7 @@ class Relay {
         std::unique_lock<std::mutex> lock(mutex);
         auto reply = [&](int status, const std::string& result, const std::string& body, const std::string& headers = std::string{}) {
             lock.unlock();
-            response(socket, status, body, headers);
+            response(socket, status, body, headers, keep_alive);
             log_upload(session, std::to_string(sequence), status, result, received, request.receive_seconds);
         };
         const auto now = Clock::now();
@@ -459,7 +463,9 @@ public:
         reporter([this] { report(); }) {}
     ~Relay() { reporting_stopped = true; if (reporter.joinable()) reporter.join(); }
 
-    void upload(Socket socket, Request request) {
+    void ingest(Request request) { accept_upload(invalid_socket, std::move(request)); }
+
+    void upload(Socket socket, Request request, bool keep_alive = false) {
         // Only log validated identifiers/numbers, keeping user input from injecting log lines.
         const auto session_header = request.headers.find("x-session-id");
         const auto sequence_header = request.headers.find("x-sequence");
@@ -472,7 +478,7 @@ public:
         }
         const auto received = request.body.size();
         const auto seconds = request.receive_seconds;
-        try { accept_upload(socket, std::move(request)); }
+        try { accept_upload(socket, std::move(request), keep_alive); }
         catch (const HttpError& error) {
             log_upload(session, sequence, error.code, "invalid-block", received, seconds);
             throw;
@@ -545,23 +551,32 @@ public:
 
 };
 
+#include "distributed.h"
+
 int main(int argc, char** argv) {
     try {
         int port = 8080;
         std::string bind_address = "0.0.0.0", stream = "live";
+        std::string mode = "relay";
+        std::vector<Upstream> upstreams;
+        double gap_timeout = 10;
         double delay = 10, retention = 120, max_pending = 20;
         size_t memory_mb = 256;
         for (int i = 1; i < argc; ++i) {
             const std::string option = argv[i];
             if (option == "--help") {
                 std::cout << "http-ts-relay [--bind 0.0.0.0] [--port 8080] [--stream live] "
-                             "[--delay 10] [--max-pending-seconds 20] [--retention 120] [--buffer-mb 256]\n"; return 0;
+                             "[--delay 10] [--max-pending-seconds 20] [--retention 120] [--buffer-mb 256] "
+                             "[--mode relay|store|merge] [--upstream http://host:port] [--gap-timeout 10]\n"; return 0;
             }
             if (++i >= argc) throw std::runtime_error("Missing option value");
             const std::string value = argv[i];
             if (option == "--port") port = static_cast<int>(number(value, 65535));
             else if (option == "--bind") bind_address = value;
             else if (option == "--stream") stream = value;
+            else if (option == "--mode") mode = value;
+            else if (option == "--upstream") upstreams.push_back(Upstream::parse(value));
+            else if (option == "--gap-timeout") { size_t used; gap_timeout = std::stod(value, &used); if (used != value.size()) throw std::runtime_error("Invalid gap timeout"); }
             else if (option == "--delay") { size_t used; delay = std::stod(value, &used); if (used != value.size()) throw std::runtime_error("Invalid delay"); }
             else if (option == "--retention") { size_t used; retention = std::stod(value, &used); if (used != value.size()) throw std::runtime_error("Invalid retention"); }
             else if (option == "--max-pending-seconds") { size_t used; max_pending = std::stod(value, &used); if (used != value.size()) throw std::runtime_error("Invalid max pending seconds"); }
@@ -569,7 +584,10 @@ int main(int argc, char** argv) {
             else throw std::runtime_error("Unknown option " + option);
         }
         if (port < 1 || !(delay >= 0 && delay <= 300) || !(max_pending >= 0.001 && max_pending >= delay && max_pending <= 3600) || !(retention >= 1 && retention <= 3600) ||
-            memory_mb < 16 || !identifier(stream)) throw std::runtime_error("Invalid relay options");
+            memory_mb < 16 || !identifier(stream) || (mode != "relay" && mode != "store" && mode != "merge") ||
+            !(gap_timeout >= .1 && gap_timeout <= 300) ||
+            (mode == "merge" && (upstreams.empty() || upstreams.size() > 8)) ||
+            (mode != "merge" && !upstreams.empty())) throw std::runtime_error("Invalid relay options");
 #ifdef _WIN32
         WSADATA wsa;
         if (WSAStartup(MAKEWORD(2, 2), &wsa)) throw std::runtime_error("WSAStartup failed");
@@ -584,10 +602,16 @@ int main(int argc, char** argv) {
         if (bind(listener.socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) || listen(listener.socket, 64))
             throw std::runtime_error("bind/listen failed");
         Relay relay(Us(static_cast<int64_t>(delay * 1000000)), Us(static_cast<int64_t>(retention * 1000000)),
-                    Us(static_cast<int64_t>(max_pending * 1000000)), memory_mb * 1024 * 1024);
+                    Us(static_cast<int64_t>(max_pending * 1000000)), memory_mb * 1024 * 1024 / (mode == "merge" ? 2 : 1));
+        ChunkStore store(memory_mb * 1024 * 1024, Us(static_cast<int64_t>(retention * 1000000)));
+        std::unique_ptr<ChunkMerger> merger;
+        if (mode == "merge") merger = std::make_unique<ChunkMerger>(relay, upstreams, stream,
+            memory_mb * 1024 * 1024 / 2, gap_timeout, delay, max_pending);
         std::atomic<int> clients{0};
         const auto upload = "/upload/" + stream, playback = "/live/" + stream + ".ts";
-        std::cout << "Listening on " << bind_address << ':' << port << ", delay=" << delay << "s, max-pending=" << max_pending << "s\n"
+        const auto index_path = "/index/" + stream, chunk_prefix = "/chunks/" + stream + '/', status_path = "/status/" + stream,
+            feedback_path = "/feedback/" + stream;
+        std::cout << "Listening on " << bind_address << ':' << port << ", delay=" << delay << "s, max-pending=" << max_pending << "s, mode=" << mode << "\n"
                   << "POST " << upload << "\nGET " << playback << std::endl;
         while (true) {
             const Socket client = accept(listener.socket, nullptr, nullptr);
@@ -595,21 +619,38 @@ int main(int argc, char** argv) {
             if (clients.fetch_add(1) >= 64) { clients--; close_socket(client); continue; }
             try {
                 nonblocking(client);
-                std::thread([client, &relay, &clients, upload, playback] {
+                std::thread([client, &relay, &store, &clients, upload, playback, mode, index_path, chunk_prefix, status_path, feedback_path] {
                     SocketOwner owner(client);
                     struct CountGuard { std::atomic<int>& count; ~CountGuard() { count--; } } count{clients};
                     bool streaming = false;
-                    try {
+                    while (true) try {
                         auto request = read_request(client);
-                        if (request.method == "POST" && request.path == upload) relay.upload(client, std::move(request));
-                        else if (request.method == "GET" && request.path == playback) { streaming = true; relay.play(client); }
-                        else if (request.method == "GET" && request.path == "/health") response(client, 200, "OK\n");
-                        else response(client, 404, "Not found\n");
+                        const auto connection = request.headers.find("connection");
+                        bool keep_alive = mode != "merge" && connection != request.headers.end() && connection->second == "keep-alive";
+                        if (request.method == "POST" && request.path == upload && mode != "merge") {
+                            if (mode == "store") store.upload(client, std::move(request), keep_alive);
+                            else relay.upload(client, std::move(request), keep_alive);
+                        }
+                        else if (request.method == "GET" && request.path == playback && mode != "store") { streaming = true; relay.play(client); keep_alive = false; }
+                        else if (request.method == "GET" && request.path == index_path && mode == "store") store.index(client, request, true, keep_alive);
+                        else if (request.method == "GET" && request.path == feedback_path && mode == "store") store.index(client, request, false, keep_alive);
+                        else if (request.method == "GET" && request.path == status_path && mode == "store") store.status(client, keep_alive);
+                        else if (request.method == "GET" && request.path.rfind(chunk_prefix, 0) == 0 && mode == "store") {
+                            const auto key = request.path.substr(chunk_prefix.size());
+                            const auto slash = key.find('/');
+                            if (slash == std::string::npos) throw HttpError(400, "Missing chunk sequence");
+                            if (!store.download(client, key.substr(0, slash), key.substr(slash + 1), keep_alive)) keep_alive = false;
+                        }
+                        else if (request.method == "GET" && request.path == "/health") response(client, 200, "OK\n", "", keep_alive);
+                        else { response(client, 404, "Not found\n"); keep_alive = false; }
+                        if (!keep_alive) break;
                     } catch (const HttpError& error) {
                         if (!streaming) response(client, error.code, std::string(error.what()) + "\n");
+                        break;
                     } catch (const std::exception& error) {
                         if (!streaming) response(client, 500, "Internal error\n");
                         std::cerr << error.what() << std::endl;
+                        break;
                     }
                 }).detach();
             } catch (...) { clients--; close_socket(client); }

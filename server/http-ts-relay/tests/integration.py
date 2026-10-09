@@ -24,7 +24,7 @@ def ts(tag, packets=128):
 
 
 @contextlib.contextmanager
-def relay(binary, delay=0.4, retention=120, logs=None, maximum=60, buffer_mb=256):
+def relay(binary, delay=0.4, retention=120, logs=None, maximum=60, buffer_mb=256, extra_args=None):
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
         port = reserved.getsockname()[1]
@@ -34,6 +34,7 @@ def relay(binary, delay=0.4, retention=120, logs=None, maximum=60, buffer_mb=256
         arguments += ["--delay", str(delay)]
     if maximum is not None:
         arguments += ["--max-pending-seconds", str(maximum)]
+    arguments += extra_args or []
     process = subprocess.Popen(
         arguments,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

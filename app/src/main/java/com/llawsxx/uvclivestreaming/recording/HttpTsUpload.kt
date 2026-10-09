@@ -3,18 +3,22 @@ package com.llawsxx.uvclivestreaming.recording
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.net.URI
 import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 
-internal fun validHttpUploadUrl(value: String): Boolean = runCatching {
+internal fun httpUploadUrls(value: String): List<String> = value.split(Regex("[\\s,]+"))
+    .filter { it.isNotBlank() }.distinct()
+
+internal fun validHttpUploadUrl(value: String): Boolean {
+    val urls = httpUploadUrls(value)
+    return urls.size in 1..8 && urls.all(::validSingleHttpUploadUrl) &&
+        urls.map { URI(it).rawPath }.distinct().size == 1
+}
+
+private fun validSingleHttpUploadUrl(value: String): Boolean = runCatching {
     val uri = URI(value)
     uri.scheme in listOf("http", "https") && !uri.host.isNullOrBlank() &&
         uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
@@ -25,6 +29,8 @@ internal data class TsUploadBlock(
     val session: String, val sequence: Long, val durationUs: Long,
     val final: Boolean, val data: ByteArray,
     val createdNs: Long = System.nanoTime(),
+    val startUs: Long = 0,
+    val sessionStartedMs: Long = System.currentTimeMillis(),
 )
 
 /** Splits complete TS packet batches by elapsed monotonic time; never edits the TS bytes. */
@@ -40,6 +46,8 @@ internal class TsUploadChunker(
     private val intervalNs = seconds.coerceIn(1, 5) * 1_000_000_000L
     private var bytes = Buffer()
     private var startNs: Long? = null
+    private var originNs: Long? = null
+    private val sessionStartedMs = System.currentTimeMillis()
     private var sequence = 0L
     private var closed = false
     val latestSequence: Long? get() = (sequence - 1).takeIf { it >= 0 }
@@ -52,6 +60,7 @@ internal class TsUploadChunker(
         require(data.size % 188 == 0 && data.size <= MAX_BLOCK_BYTES)
         if (data.isEmpty()) return
         val now = clockNs()
+        if (originNs == null) originNs = now
         val start = startNs
         if (start != null && bytes.size() > 0 &&
             (now - start >= intervalNs || bytes.size() + data.size > MAX_BLOCK_BYTES)) {
@@ -63,8 +72,10 @@ internal class TsUploadChunker(
 
     private fun flush(now: Long, final: Boolean) {
         val data = bytes.toByteArray()
-        val duration = if (data.isEmpty()) 0L else ((now - checkNotNull(startNs)) / 1_000).coerceAtLeast(1L)
-        emit(TsUploadBlock(session, sequence, duration, final, data, startNs ?: now))
+        val startUs = ((startNs ?: now) - (originNs ?: now)) / 1_000
+        val endUs = (now - (originNs ?: now)) / 1_000
+        val duration = if (data.isEmpty()) 0L else (endUs - startUs).coerceAtLeast(1L)
+        emit(TsUploadBlock(session, sequence, duration, final, data, startNs ?: now, startUs, sessionStartedMs))
         sequence++
         bytes = Buffer()
         startNs = null
@@ -161,7 +172,9 @@ internal class HttpTsUploadSink(
     url: String, seconds: Int, private val cacheSeconds: Int,
     private val onNotice: (String) -> Unit,
 ) : Closeable {
-    private val worker = HttpTsUploadWorker(url, cacheSeconds, onNotice)
+    private val worker: HttpUploadTransport = if (httpUploadUrls(url).size > 1)
+        DistributedHttpTsUploadWorker(httpUploadUrls(url), cacheSeconds, onNotice)
+        else HttpTsUploadWorker(url.trim(), cacheSeconds, onNotice)
     private val chunker = TsUploadChunker(seconds, { worker.enqueue(it, cacheSeconds) })
     val bytesSent: Long get() = worker.bytesAcknowledged.get()
     internal val pendingBlocks: Int get() = worker.pendingBlocks
@@ -177,6 +190,8 @@ internal class HttpTsUploadSink(
                 cacheLimitSeconds = cacheSeconds.coerceIn(30, 300), cacheLimitBytes = 256L * 1024 * 1024,
                 acknowledgedBytes = state.acknowledgedBytes,
                 droppedBlocks = state.queue.droppedBlocks,
+                servers = state.servers,
+                retainedBytes = state.retainedBytes,
             )
         }
 
@@ -186,22 +201,33 @@ internal class HttpTsUploadSink(
     }
 }
 
+internal interface HttpUploadTransport : Closeable {
+    val bytesAcknowledged: AtomicLong
+    val pendingBlocks: Int
+    fun enqueue(block: TsUploadBlock, cacheSeconds: Int)
+    fun snapshot(): HttpTsUploadWorker.Stats
+}
+
 internal class HttpTsUploadWorker(private val url: String, private val cacheSeconds: Int,
                                   private val onNotice: (String) -> Unit,
-                                  private val queue: TsUploadQueue = TsUploadQueue()) : Closeable {
+                                  private val queue: TsUploadQueue = TsUploadQueue()) : HttpUploadTransport {
     private val wake = Object()
-    val bytesAcknowledged = AtomicLong()
+    override val bytesAcknowledged = AtomicLong()
     @Volatile private var closed = false
-    private var activeSocket: Socket? = null
+    private val watchdog = Executors.newSingleThreadScheduledExecutor { task ->
+        Thread(task, "http-upload-timeout").apply { isDaemon = true }
+    }
+    private val connection = PersistentHttpConnection(url, watchdog)
     private var activeBlock: TsUploadBlock? = null
     private var failing = false
     private var uploadingSequence: Long? = null
     private var acknowledgedSequence: Long? = null
     private val thread: Thread
-    val pendingBlocks: Int get() = queue.size
+    override val pendingBlocks: Int get() = queue.size
     data class Stats(val queue: TsUploadQueue.Stats, val uploadingSequence: Long?,
-                     val acknowledgedSequence: Long?, val acknowledgedBytes: Long)
-    fun snapshot(): Stats = synchronized(wake) {
+                     val acknowledgedSequence: Long?, val acknowledgedBytes: Long,
+                     val servers: List<HttpUploadServerStats> = emptyList(), val retainedBytes: Long = 0)
+    override fun snapshot(): Stats = synchronized(wake) {
         Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get())
     }
 
@@ -210,12 +236,12 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
         thread = Thread(::run, "http-ts-upload").apply { isDaemon = true; start() }
     }
 
-    fun enqueue(block: TsUploadBlock, cacheSeconds: Int) {
+    override fun enqueue(block: TsUploadBlock, cacheSeconds: Int) {
         synchronized(wake) {
             check(!closed) { "HTTP upload is stopped" }
             queue.append(block, cacheSeconds, retry = failing)
             if (activeBlock != null && queue.first() !== activeBlock) {
-                runCatching { activeSocket?.close() }
+                connection.invalidate()
                 uploadingSequence = null
             }
             wake.notifyAll()
@@ -223,15 +249,15 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     }
 
     override fun close() {
-        val socket = synchronized(wake) {
+        synchronized(wake) {
             if (closed) return
             closed = true
             queue.clear()
             uploadingSequence = null
             wake.notifyAll()
-            activeSocket.also { activeSocket = null }
         }
-        runCatching { socket?.close() }
+        connection.close()
+        watchdog.shutdownNow()
         if (Thread.currentThread() != thread) thread.join(1_000)
     }
 
@@ -276,73 +302,21 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     }
 
     private fun upload(block: TsUploadBlock) {
-        val uri = URI(url)
-        val tls = uri.scheme == "https"
-        val port = if (uri.port >= 0) uri.port else if (tls) 443 else 80
-        val transport = Socket()
-        synchronized(wake) {
-            if (closed || queue.first() !== block) { transport.close(); throw IOException("HTTP block was retired") }
-            activeSocket = transport
+        val generation = synchronized(wake) {
+            if (closed || queue.first() !== block) throw IOException("HTTP block was retired")
+            connection.generation()
         }
-        val watchdog = Executors.newSingleThreadScheduledExecutor { task ->
-            Thread(task, "http-upload-timeout").apply { isDaemon = true }
-        }
-        // Close the underlying socket directly, so even a blocked request-body
-        // write is unblocked. The deadline also covers TLS and acknowledgement.
-        val remainingNs = cacheSeconds.coerceIn(30, 300) * 1_000_000_000L - (System.nanoTime() - block.createdNs)
-        val deadline = watchdog.schedule({ runCatching { transport.close() } },
-            remainingNs.coerceIn(0, 15_000_000_000L), TimeUnit.NANOSECONDS)
+        val now = System.nanoTime()
+        val remainingNs = cacheSeconds.coerceIn(30, 300) * 1_000_000_000L - (now - block.createdNs)
         try {
-            transport.connect(InetSocketAddress(uri.host, port), 5_000)
-            transport.soTimeout = 10_000
-            val socket = if (tls) {
-                ((SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket(transport, uri.host, port, true) as SSLSocket).apply {
-                    sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
-                    soTimeout = 10_000
-                    startHandshake()
-                }
-            } else transport
-            socket.use {
-                val headers = "POST ${uri.rawPath} HTTP/1.1\r\nHost: ${uri.host}:$port\r\n" +
-                    "Connection: close\r\nContent-Type: video/mp2t\r\nContent-Length: ${block.data.size}\r\n" +
-                    "X-Session-ID: ${block.session}\r\nX-Sequence: ${block.sequence}\r\n" +
-                    "X-Duration-Us: ${block.durationUs}\r\nX-Final: ${if (block.final) 1 else 0}\r\n\r\n"
-                socket.getOutputStream().apply { write(headers.toByteArray(Charsets.US_ASCII)); write(block.data); flush() }
-                val input = socket.getInputStream().buffered()
-                var headerBytes = 0
-                fun line(): String {
-                    val bytes = ByteArrayOutputStream()
-                    while (true) {
-                        val value = input.read()
-                        check(value >= 0) { "服务器在确认前断开连接" }
-                        check(++headerBytes <= 16_384) { "HTTP 响应头过大" }
-                        if (value == 10) return bytes.toString("US-ASCII").trimEnd('\r')
-                        bytes.write(value)
-                    }
-                }
-                var status: Int?
-                var ack: String?
-                do {
-                    status = line().split(' ').getOrNull(1)?.toIntOrNull()
-                    ack = null
-                    while (true) {
-                        val header = line()
-                        if (header.isEmpty()) break
-                        if (header.substringBefore(':').equals("X-Ack-Sequence", ignoreCase = true)) {
-                            check(ack == null) { "重复的 HTTP 确认头" }
-                            ack = header.substringAfter(':').trim()
-                        }
-                    }
-                } while (status == 100)
-                check(status == 200 && ack == block.sequence.toString()) {
-                    "HTTP $status，服务器未确认块 ${block.sequence}"
-                }
+            val response = connection.request("POST", block.httpHeaders(), block.data,
+                now + remainingNs.coerceIn(0, 15_000_000_000L), readTimeoutMs = 10_000, expectedGeneration = generation)
+            check(response.status == 200 && response.headers["x-ack-sequence"] == block.sequence.toString()) {
+                "HTTP ${response.status}，服务器未确认块 ${block.sequence}"
             }
-        } finally {
-            deadline.cancel(false)
-            watchdog.shutdownNow()
-            transport.close()
-            synchronized(wake) { if (activeSocket === transport) activeSocket = null }
+        } catch (error: Exception) {
+            connection.invalidate()
+            throw error
         }
     }
 }

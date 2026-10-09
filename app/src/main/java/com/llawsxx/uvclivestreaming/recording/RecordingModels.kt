@@ -545,6 +545,9 @@ data class CameraInfo(
 )
 
 /** A snapshot of this HTTP publishing session. Counts include the unacknowledged in-flight block. */
+data class HttpUploadServerStats(val url: String, val estimatedBitsPerSecond: Long?,
+    val uploading: Boolean, val consecutiveFailures: Int)
+
 data class HttpUploadStats(
     val sessionId: String,
     val latestSequence: Long?,
@@ -561,10 +564,12 @@ data class HttpUploadStats(
     val cacheLimitBytes: Long,
     val acknowledgedBytes: Long,
     val droppedBlocks: Long = 0,
+    val servers: List<HttpUploadServerStats> = emptyList(),
+    val retainedBytes: Long = 0,
 ) {
-    val cachedDataBytes: Long get() = queuedBytes + assemblingBytes
+    val cachedDataBytes: Long get() = queuedBytes + assemblingBytes + retainedBytes
     // Payload arrays and the chunk builder allocation; excludes object/socket overhead and transient copies.
-    val cacheAllocatedBytes: Long get() = queuedBytes + assemblingCapacityBytes
+    val cacheAllocatedBytes: Long get() = queuedBytes + assemblingCapacityBytes + retainedBytes
     val cachedDurationUs: Long get() = queuedDurationUs + assemblingDurationUs
 }
 

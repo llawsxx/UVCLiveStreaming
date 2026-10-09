@@ -318,6 +318,32 @@ class HttpTsUploadTest {
         }
     }
 
+    @Test fun multipleDestinationsRequireTheSameStreamAndHaveABoundedCount() {
+        assertTrue(validHttpUploadUrl("http://a:8080/upload/live\nhttps://b/upload/live"))
+        assertTrue(validHttpUploadUrl("http://a/upload/live, http://b/upload/live"))
+        assertFalse(validHttpUploadUrl("http://a/upload/live\nhttp://b/upload/other"))
+        assertFalse(validHttpUploadUrl((1..9).joinToString("\n") { "http://host$it/upload/live" }))
+        assertEquals(listOf("http://a/upload/live", "http://b/upload/live"),
+            httpUploadUrls("http://a/upload/live\nhttp://b/upload/live\nhttp://a/upload/live"))
+    }
+
+    @Test fun distributedTimelineHasContiguousAbsoluteMicrosecondBoundaries() {
+        var now = 0L
+        val blocks = mutableListOf<TsUploadBlock>()
+        val chunker = TsUploadChunker(1, blocks::add, { now }, "timeline")
+        repeat(100) {
+            chunker.write(ts(1))
+            now += 1_000_000_400L
+        }
+        chunker.close()
+        assertEquals(100, blocks.size)
+        blocks.zipWithNext().forEach { (before, after) ->
+            assertEquals(before.startUs + before.durationUs, after.startUs)
+            assertEquals(before.sessionStartedMs, after.sessionStartedMs)
+        }
+        assertEquals(now / 1_000, blocks.sumOf { it.durationUs })
+    }
+
     @Test fun retiringInFlightBlockCancelsSocketAndUploadsNextSequence() {
         val accepted = CountDownLatch(1)
         val done = CountDownLatch(1)
