@@ -548,6 +548,15 @@ data class CameraInfo(
 data class HttpUploadServerStats(val url: String, val estimatedBitsPerSecond: Long?,
     val uploading: Boolean, val consecutiveFailures: Int)
 
+enum class HttpUploadRedirectReason(val label: String, val wireValue: String) {
+    UPLOAD_FAILURE("上传失败", "upload-failed"), SLOW_DOWNLOAD("接收端下载慢", "download-slow")
+}
+enum class HttpUploadRedirectState(val label: String) {
+    UPLOADING("上传中"), ACKNOWLEDGED("已确认"), FAILED("失败"), EXPIRED("已淘汰"), CANCELLED("已停止")
+}
+data class HttpUploadRedirectStats(val attempt: Long, val sequence: Long, val fromUrl: String, val toUrl: String,
+    val reason: HttpUploadRedirectReason, val state: HttpUploadRedirectState = HttpUploadRedirectState.UPLOADING)
+
 data class HttpUploadStats(
     val sessionId: String,
     val latestSequence: Long?,
@@ -566,6 +575,9 @@ data class HttpUploadStats(
     val droppedBlocks: Long = 0,
     val servers: List<HttpUploadServerStats> = emptyList(),
     val retainedBytes: Long = 0,
+    val redirectAttempts: Long = 0,
+    val redirectAcknowledged: Long = 0,
+    val recentRedirects: List<HttpUploadRedirectStats> = emptyList(),
 ) {
     val cachedDataBytes: Long get() = queuedBytes + assemblingBytes + retainedBytes
     // Payload arrays and the chunk builder allocation; excludes object/socket overhead and transient copies.

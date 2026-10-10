@@ -192,6 +192,9 @@ internal class HttpTsUploadSink(
                 droppedBlocks = state.queue.droppedBlocks,
                 servers = state.servers,
                 retainedBytes = state.retainedBytes,
+                redirectAttempts = state.redirectAttempts,
+                redirectAcknowledged = state.redirectAcknowledged,
+                recentRedirects = state.recentRedirects,
             )
         }
 
@@ -226,7 +229,9 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     override val pendingBlocks: Int get() = queue.size
     data class Stats(val queue: TsUploadQueue.Stats, val uploadingSequence: Long?,
                      val acknowledgedSequence: Long?, val acknowledgedBytes: Long,
-                     val servers: List<HttpUploadServerStats> = emptyList(), val retainedBytes: Long = 0)
+                     val servers: List<HttpUploadServerStats> = emptyList(), val retainedBytes: Long = 0,
+                     val redirectAttempts: Long = 0, val redirectAcknowledged: Long = 0,
+                     val recentRedirects: List<HttpUploadRedirectStats> = emptyList())
     override fun snapshot(): Stats = synchronized(wake) {
         Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get())
     }

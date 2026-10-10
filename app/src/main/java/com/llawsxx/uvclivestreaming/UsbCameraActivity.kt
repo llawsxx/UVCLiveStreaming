@@ -1195,6 +1195,16 @@ private fun UsbCameraScreen() {
                         }
                         if (upload.servers.isNotEmpty()) Text(String.format(Locale.US, "已确认分块保留：%.1f KiB（供慢块转投）",
                             upload.retainedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)
+                        if (upload.servers.isNotEmpty()) {
+                            Text("转投尝试：${upload.redirectAttempts} 次 · 已确认：${upload.redirectAcknowledged} 次",
+                                style = MaterialTheme.typography.bodySmall)
+                            upload.recentRedirects.forEach { redirect ->
+                                val from = upload.servers.indexOfFirst { it.url == redirect.fromUrl } + 1
+                                val to = upload.servers.indexOfFirst { it.url == redirect.toUrl } + 1
+                                Text("分段 ${redirect.sequence} · 服务器 $from → $to · ${redirect.reason.label} · ${redirect.state.label}",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                         Text(String.format(Locale.US, "缓存数据：%.1f KiB / %.2f 秒 · 缓存占用：%.1f KiB",
                             upload.cachedDataBytes / 1024.0, upload.cachedDurationUs / 1_000_000.0,
                             upload.cacheAllocatedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)

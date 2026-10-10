@@ -18,6 +18,7 @@ class DistributedHttpTsUploadTest {
         val server = ServerSocket(0)
         val url = "http://127.0.0.1:${server.localPort}/upload/live"
         val received = CopyOnWriteArrayList<Long>()
+        val uploads = CopyOnWriteArrayList<Map<String, String>>()
         val requests = CopyOnWriteArrayList<String>()
         val connections = AtomicLong()
         val accepted = CountDownLatch(1)
@@ -57,6 +58,7 @@ class DistributedHttpTsUploadTest {
                                 if (post) {
                                     DataInputStream(input).readFully(ByteArray(checkNotNull(headers["content-length"]).toInt()))
                                     received += checkNotNull(sequence).toLong()
+                                    uploads += headers.toMap()
                                     accepted.countDown()
                                     if (withholdAck) { while (input.read() >= 0) Unit; disconnected.countDown(); return@execute }
                                     if (ackDelayMs > 0) Thread.sleep(ackDelayMs)
@@ -96,6 +98,8 @@ class DistributedHttpTsUploadTest {
                 assertTrue(first.received.size >= 2 && second.received.size >= 2)
                 assertEquals("One upload socket and one feedback socket per destination", 2L, first.connections.get())
                 assertEquals(2L, second.connections.get())
+                assertEquals(0L, worker.snapshot().redirectAttempts)
+                assertTrue(worker.snapshot().recentRedirects.isEmpty())
             }
         } }
     }
@@ -158,6 +162,18 @@ class DistributedHttpTsUploadTest {
                 await { worker.bytesAcknowledged.get() == 376L }
                 assertTrue(fast.received.contains(0L))
                 assertEquals(376L, worker.snapshot().retainedBytes)
+                val stats = worker.snapshot()
+                assertEquals(1L, stats.redirectAttempts)
+                assertEquals(1L, stats.redirectAcknowledged)
+                val redirect = stats.recentRedirects.single()
+                assertEquals(0L, redirect.sequence)
+                assertEquals(slow.url, redirect.fromUrl)
+                assertEquals(fast.url, redirect.toUrl)
+                assertEquals(HttpUploadRedirectReason.UPLOAD_FAILURE, redirect.reason)
+                assertEquals(HttpUploadRedirectState.ACKNOWLEDGED, redirect.state)
+                val headers = fast.uploads.single { it["x-sequence"] == "0" }
+                assertEquals(slow.url, headers["x-redirect-from"])
+                assertEquals("upload-failed", headers["x-redirect-reason"])
             }
         } }
     }
@@ -199,6 +215,15 @@ class DistributedHttpTsUploadTest {
                 assertEquals(listOf(0L), original.received.toList())
                 assertEquals(376L, worker.bytesAcknowledged.get())
                 assertEquals(376L, worker.snapshot().retainedBytes)
+                val stats = worker.snapshot()
+                assertEquals(1L, stats.redirectAttempts)
+                assertEquals(1L, stats.redirectAcknowledged)
+                val redirect = stats.recentRedirects.single()
+                assertEquals(original.url, redirect.fromUrl)
+                assertEquals(alternative.url, redirect.toUrl)
+                assertEquals(HttpUploadRedirectReason.SLOW_DOWNLOAD, redirect.reason)
+                assertEquals(HttpUploadRedirectState.ACKNOWLEDGED, redirect.state)
+                assertEquals("download-slow", alternative.uploads.single { it["x-sequence"] == "0" }["x-redirect-reason"])
             }
         } }
     }

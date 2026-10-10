@@ -37,6 +37,27 @@ def merge_args(a, b=None, gap=2):
 def protocol(binary):
     empty = subprocess.run([str(binary), "--mode", "merge"], capture_output=True, text=True, timeout=5)
     assert empty.returncode != 0 and "Invalid relay options" in empty.stdout + empty.stderr
+    with relay(binary, logs=(store_logs := []), extra_args=["--mode", "store"]) as source:
+        headers = {"X-Session-Started-Ms": "1000", "X-Start-Us": "0",
+                   "X-Redirect-From": "http://other-store:8080/upload/live", "X-Redirect-Reason": "upload-failed"}
+        logs = []
+        with relay(binary, delay=.1, logs=logs, extra_args=merge_args(source)) as output:
+            viewer = Playback(output, len(ts(1)))
+            assert upload(source, "redirected", 0, ts(1), extra=headers)[0] == 200
+            assert upload(source, "redirected", 0, ts(1), extra=headers)[0] == 200
+            data = get(source, "/chunks/live/redirected/0")
+            assert data[2] == ts(1) and data[1]["X-Redirect-From"] == headers["X-Redirect-From"]
+            assert data[1]["X-Redirect-Reason"] == "upload-failed"
+            assert viewer.finish() == ts(1)
+            deadline = time.monotonic() + 3
+            while not any("redirect_received=1" in line for line in logs) and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert any("[redirect] phase=received session=redirected seq=0" in line and "reason=upload-failed count=1" in line for line in logs), logs
+            assert any("redirect_received=1" in line for line in logs), logs
+        events = [line for line in store_logs if "[redirect] phase=stored" in line]
+        assert len(events) == 2 and all("count=1" in line for line in events), store_logs
+        assert "result=accepted" in events[0] and "result=duplicate" in events[1], events
+    print("PASS: redirected uploads carry source/reason to store and merge logs, duplicate ACKs do not inflate store count", flush=True)
     with relay(binary, extra_args=["--mode", "store"]) as source:
         with relay(binary, delay=.3, extra_args=merge_args(source)) as output:
             viewer = Playback(output, len(ts(1)) * 4, timeout=10)
@@ -316,7 +337,9 @@ def production(binary, classes, stdlib, slow, java, javac):
         pa, sa = stack.enter_context(capped_proxy(a, slow_first=slow))
         pb, sb = stack.enter_context(capped_proxy(b))
         sa["keep_alive"] = sb["keep_alive"] = True
-        output = stack.enter_context(relay(binary, delay=3, extra_args=merge_args(pa, pb, 12)))
+        merge_logs = []
+        # Keep merge logs to verify that requesting a rescue is distinct from receiving it.
+        output = stack.enter_context(relay(binary, delay=3, logs=merge_logs, extra_args=merge_args(pa, pb, 12)))
         build = Path(__file__).resolve().parents[1] / "build"
         build.mkdir(exist_ok=True)
         temporary = stack.enter_context(tempfile.TemporaryDirectory(dir=build))
@@ -340,6 +363,8 @@ def production(binary, classes, stdlib, slow, java, javac):
                 assert len(sa["clients"]) == len(sb["clients"]) == 4, (sa, sb)  # Upload/status/index+data/feedback.
             if slow:
                 assert sb["rescued"], "Slow downloaded block was never copied to the other store"
+                assert any("[redirect] phase=requested" in line and "seq=0 " in line for line in merge_logs), merge_logs
+                assert any("[redirect] phase=received" in line and "reason=download-slow" in line for line in merge_logs), merge_logs
                 first_playback = viewer.times[0] - started
                 assert first_playback < 9, f"First playback took {first_playback:.2f}s; slow original needs at least 9.83s"
         finally:

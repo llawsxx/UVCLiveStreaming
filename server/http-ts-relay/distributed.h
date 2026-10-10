@@ -1,12 +1,23 @@
 // Included after Relay: uses the existing bounded HTTP parser, socket helpers and TS playback clock.
 struct StoredChunk {
     std::string session;
+    std::string redirect_from, redirect_reason;
     uint64_t epoch = 0, sequence = 0, start = 0, duration = 0, hash = 0;
     bool final = false;
     size_t size = 0;
     Time created = Clock::now();
     std::vector<char> data;
 };
+static std::pair<std::string, std::string> redirect_metadata(const std::map<std::string, std::string>& headers) {
+    const auto from = headers.find("x-redirect-from"), reason = headers.find("x-redirect-reason");
+    if (from == headers.end() && reason == headers.end()) return {};
+    if (from == headers.end() || reason == headers.end() || from->second.size() > 2048 ||
+        (from->second.substr(0, 7) != "http://" && from->second.substr(0, 8) != "https://") ||
+        std::any_of(from->second.begin(), from->second.end(), [](unsigned char c) { return c <= 32 || c == 127; }) ||
+        (reason->second != "upload-failed" && reason->second != "download-slow"))
+        throw HttpError(400, "Invalid redirect metadata");
+    return {from->second, reason->second};
+}
 static StoredChunk chunk_metadata(const Request& request) {
     auto required = [&](const std::string& key) -> const std::string& {
         const auto found = request.headers.find(key);
@@ -28,6 +39,7 @@ static StoredChunk chunk_metadata(const Request& request) {
     for (size_t i = 0; i < chunk.size; i += 188)
         if (static_cast<unsigned char>(request.body[i]) != 0x47) throw HttpError(400, "Invalid TS sync byte");
     chunk.hash = hash_bytes(request.body);
+    std::tie(chunk.redirect_from, chunk.redirect_reason) = redirect_metadata(request.headers);
     return chunk;
 }
 static Request chunk_request(StoredChunk chunk) {
@@ -47,6 +59,7 @@ class ChunkStore {
     double download_rate = 0;
     std::string rescue_session;
     std::optional<uint64_t> rescue_sequence;
+    uint64_t redirect_received = 0;
     Time feedback_time = Clock::now(), rescue_time = Clock::now();
     void prune() {
         const auto oldest = Clock::now() - retention;
@@ -69,12 +82,16 @@ public:
     void upload(Socket socket, Request request, bool keep_alive = false) {
         auto chunk = chunk_metadata(request);
         const auto key = Key{chunk.session, chunk.sequence};
+        const auto redirect_from = chunk.redirect_from, redirect_reason = chunk.redirect_reason;
+        bool duplicate = false;
+        uint64_t redirect_count = 0;
         std::string headers;
         {
             std::lock_guard<std::mutex> lock(mutex);
             prune();
             const auto previous = chunks.find(key);
             if (previous != chunks.end()) {
+                duplicate = true;
                 const auto& old = *previous->second;
                 if (old.hash != chunk.hash || old.start != chunk.start || old.duration != chunk.duration ||
                     old.epoch != chunk.epoch || old.final != chunk.final || old.size != chunk.size)
@@ -88,13 +105,18 @@ public:
                     bytes -= oldest->second->size; chunks.erase(oldest);
                 }
                 bytes += chunk.size;
+                if (!redirect_from.empty()) ++redirect_received;
                 chunk.data = std::move(request.body);
                 chunks.emplace(key, std::make_shared<StoredChunk>(std::move(chunk)));
             }
             headers = status_headers() + "X-Ack-Sequence: " + std::to_string(key.second) + "\r\n";
+            redirect_count = redirect_received;
         }
         response(socket, 200, "Stored\n", headers, keep_alive);
         log_line("[store] session=" + key.first + " seq=" + std::to_string(key.second));
+        if (!redirect_from.empty()) log_line("[redirect] phase=stored session=" + key.first + " seq=" + std::to_string(key.second) +
+            " from=" + redirect_from + " to=local-store reason=" + redirect_reason +
+            " result=" + (duplicate ? "duplicate" : "accepted") + " count=" + std::to_string(redirect_count));
     }
     void index(Socket socket, const Request& request, bool list_chunks = true, bool keep_alive = false) {
         std::string body, headers;
@@ -154,7 +176,9 @@ public:
         }
         return send_all(socket, "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: " +
             std::string(keep_alive ? "keep-alive" : "close") + "\r\nContent-Length: " +
-            std::to_string(chunk->size) + "\r\nX-Chunk-Hash: " + std::to_string(chunk->hash) + "\r\n\r\n")
+            std::to_string(chunk->size) + "\r\nX-Chunk-Hash: " + std::to_string(chunk->hash) + "\r\n" +
+            (chunk->redirect_from.empty() ? "" : "X-Redirect-From: " + chunk->redirect_from +
+                "\r\nX-Redirect-Reason: " + chunk->redirect_reason + "\r\n") + "\r\n")
             && send_all(socket, chunk->data.data(), chunk->size);
     }
 };
@@ -309,6 +333,7 @@ class ChunkMerger {
     std::vector<bool> indexed;
     Time waiting_since = Clock::now();
     bool selected = false, finished = false, priming = false;
+    std::optional<std::pair<std::string, uint64_t>> last_rescue;
 
     std::string feedback_headers(size_t index) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -326,8 +351,18 @@ class ChunkMerger {
             const auto rate = rates[source] > 0 ? rates[source] : initial_rate;
             rescue_after = std::max(2.0, head->second.metadata.size / rate * 1.5 + .5);
         }
-        if (selected && !priming && !finished && std::chrono::duration<double>(Clock::now() - waiting_since).count() > rescue_after)
+        if (selected && !priming && !finished && std::chrono::duration<double>(Clock::now() - waiting_since).count() > rescue_after) {
             headers += "X-Rescue-Session: " + session + "\r\nX-Rescue-Sequence: " + std::to_string(next) + "\r\n";
+            const auto key = std::make_pair(session, next);
+            if (!last_rescue || *last_rescue != key) {
+                last_rescue = key;
+                const auto count = relay.record_redirect(true);
+                const auto source = head != entries.end() && !head->second.claims.empty()
+                    ? std::to_string(head->second.claims.begin()->first) : "unknown";
+                log_line("[redirect] phase=requested session=" + session + " seq=" + std::to_string(next) +
+                    " from_source=" + source + " reason=download-slow count=" + std::to_string(count));
+            }
+        }
         return headers;
     }
     void feedback(size_t index) {
@@ -448,6 +483,7 @@ class ChunkMerger {
                     const auto begin = Clock::now();
                     auto payload = fetch(upstreams[index], "/chunks/" + stream + '/' + chosen->session + '/' + std::to_string(chosen->sequence),
                         "", 16 * 1024 * 1024, std::min(15.0, std::max(3.0, chosen->size / rate * 2 + 2)), connection.socket);
+                    const auto redirect = redirect_metadata(payload.headers);
                     if (payload.body.size() != chosen->size || hash_bytes(payload.body) != chosen->hash)
                         throw std::runtime_error("Block size/hash mismatch");
                     for (size_t offset = 0; offset < payload.body.size(); offset += 188)
@@ -465,6 +501,13 @@ class ChunkMerger {
                         if (found != entries.end() && found->second.claims.erase(index)) {
                             bytes -= chosen->size;
                             if (!found->second.downloaded) {
+                                if (!redirect.first.empty()) {
+                                    const auto count = relay.record_redirect(false);
+                                    log_line("[redirect] phase=received session=" + chosen->session + " seq=" + std::to_string(chosen->sequence) +
+                                        " from=" + redirect.first + " to_source=" + std::to_string(index) +
+                                        " upstream=http://" + upstreams[index].host + ':' + upstreams[index].port + upstreams[index].prefix +
+                                        " reason=" + redirect.second + " count=" + std::to_string(count));
+                                }
                                 chosen->data = std::move(payload.body);
                                 bytes += chosen->size; found->second.downloaded = true;
                                 complete.emplace(chosen->sequence, std::move(*chosen));

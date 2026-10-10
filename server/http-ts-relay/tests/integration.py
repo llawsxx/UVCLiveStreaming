@@ -98,6 +98,53 @@ def status_logging(binary):
     print("PASS: session/sequence/speed/cache logs, deduplicated counters, periodic idle status and retention expiry", flush=True)
 
 
+def playback_event_counters(binary):
+    logs = deque(maxlen=512)
+    def wait_for(predicate):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            matches = [line for line in list(logs) if predicate(line)]
+            if matches:
+                return matches[-1]
+            time.sleep(.02)
+        raise AssertionError(list(logs))
+    with relay(binary, delay=.3, maximum=.6, logs=logs) as port:
+        wait_for(lambda line: line.startswith("[status]"))
+        assert not any("event=pending-empty" in line for line in logs), list(logs)
+        assert "pending_empty=0 catch_up=0" in wait_for(lambda line: line.startswith("[status]"))
+        # Buffered positive pending below delay must not count as an underrun.
+        assert upload(port, "counters", 0, ts(1), duration=100_000)[0] == 200
+        time.sleep(.4)
+        assert not any("event=pending-empty" in line for line in logs), list(logs)
+        assert upload(port, "counters", 1, ts(2), duration=200_000)[0] == 200
+        wait_for(lambda line: "event=pending-empty" in line and "count=1" in line)
+        # Idle reports and duplicate uploads must not increase the count.
+        assert upload(port, "counters", 1, ts(2), duration=200_000)[0] == 200
+        wait_for(lambda line: line.startswith("[status]") and "pending_empty=1 catch_up=0" in line)
+        time.sleep(1.1)
+        assert len([line for line in logs if "event=pending-empty" in line]) == 1, list(logs)
+        assert upload(port, "counters", 2, ts(3), duration=800_000)[0] == 200
+        caught = wait_for(lambda line: "seq=2 " in line and "result=accepted" in line)
+        assert "pending_empty=1 catch_up=1" in caught, caught
+        assert upload(port, "counters", 2, ts(3), duration=800_000)[0] == 200
+        wait_for(lambda line: "event=pending-empty" in line and "count=2" in line)
+        # Counters span publishing sessions within the same receiver process.
+        assert upload(port, "restart", 0, ts(4), duration=800_000)[0] == 200
+        wait_for(lambda line: "event=catch-up" in line and "count=2" in line)
+        wait_for(lambda line: "event=pending-empty" in line and "count=3" in line)
+        wait_for(lambda line: line.startswith("[status]") and "pending_empty=3 catch_up=2" in line)
+        assert len([line for line in logs if "event=catch-up" in line]) == 2, list(logs)
+    # Memory pressure can also move positive pending to zero while still buffering.
+    logs.clear()
+    with relay(binary, delay=30, maximum=60, buffer_mb=16, logs=logs) as port:
+        assert upload(port, "eviction", 0, ts(1, 50_000), duration=10_000_000)[0] == 200
+        assert upload(port, "eviction", 1, ts(2, 50_000), duration=10_000_000)[0] == 200
+        wait_for(lambda line: "event=pending-empty" in line and "reason=cache-eviction count=1" in line)
+        accepted = wait_for(lambda line: "seq=1 " in line and "result=accepted" in line)
+        assert "pending_empty=1 catch_up=0" in accepted, accepted
+    print("PASS: pending-zero transitions and actual catch-ups counted once, idle/duplicates excluded, totals survive session changes", flush=True)
+
+
 def upload(port, session, sequence, body, duration=100_000, final=False, extra=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     headers = {"Content-Type": "video/mp2t", "X-Session-ID": session,
@@ -579,6 +626,7 @@ if __name__ == "__main__":
     default_options(executable)
     invalid_cache_options(executable)
     status_logging(executable)
+    playback_event_counters(executable)
     protocol_and_rollover(executable)
     unsealed_session_rollover(executable)
     skipped_uploads(executable)

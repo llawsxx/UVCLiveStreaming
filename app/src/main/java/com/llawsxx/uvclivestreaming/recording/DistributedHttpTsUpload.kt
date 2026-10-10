@@ -28,6 +28,8 @@ internal class DistributedHttpTsUploadWorker(
         var destination: Destination? = null
         var lastDestination: Destination? = null
         var retry = false
+        var redirectReason = HttpUploadRedirectReason.UPLOAD_FAILURE
+        var redirect: HttpUploadRedirectStats? = null
     }
     private data class Delivered(val block: TsUploadBlock, val destination: Destination, val rescuedNs: Long)
     private val lock = Object()
@@ -40,6 +42,9 @@ internal class DistributedHttpTsUploadWorker(
     private var closed = false
     private var dropped = 0L
     private var acknowledged: Long? = null
+    private var redirectAttempts = 0L
+    private var redirectAcknowledged = 0L
+    private val recentRedirects = mutableListOf<HttpUploadRedirectStats>()
     override val bytesAcknowledged = AtomicLong()
     private val dispatcher: Thread
 
@@ -55,7 +60,7 @@ internal class DistributedHttpTsUploadWorker(
             pending.values.sumOf { it.block.data.size.toLong() }, pending.values.sumOf { it.block.durationUs }, dropped),
             pending.values.firstOrNull { it.destination != null }?.block?.sequence, acknowledged, bytesAcknowledged.get(),
             destinations.map { HttpUploadServerStats(it.url, it.measuredRate?.let { rate -> (rate * 8).toLong() }, it.busy, it.failures) },
-            history.values.sumOf { it.block.data.size.toLong() })
+            history.values.sumOf { it.block.data.size.toLong() }, redirectAttempts, redirectAcknowledged, recentRedirects.toList())
     }
     override fun enqueue(block: TsUploadBlock, cacheSeconds: Int) = synchronized(lock) {
         check(!closed)
@@ -73,7 +78,17 @@ internal class DistributedHttpTsUploadWorker(
         lock.notifyAll()
     }
     private fun retire(sequence: Long) {
-        pending.remove(sequence)?.let { item -> item.destination?.upload?.invalidate(); dropped++ }
+        pending.remove(sequence)?.let { item ->
+            item.destination?.upload?.invalidate(); dropped++
+            redirectState(item, HttpUploadRedirectState.EXPIRED)
+        }
+    }
+    private fun redirectState(item: Pending, state: HttpUploadRedirectState) {
+        val at = recentRedirects.indexOfFirst { it.attempt == item.redirect?.attempt }
+        val record = recentRedirects.getOrNull(at) ?: return
+        if ((state == HttpUploadRedirectState.EXPIRED || state == HttpUploadRedirectState.CANCELLED) &&
+            record.state != HttpUploadRedirectState.UPLOADING) return
+        recentRedirects[at] = record.copy(state = state)
     }
     private fun expire() {
         val oldest = System.nanoTime() - cacheSeconds.coerceIn(30, 300) * 1_000_000_000L
@@ -98,6 +113,14 @@ internal class DistributedHttpTsUploadWorker(
             } }
             if (item != null && target != null && target.availableNs <= now) {
                 item.destination = target
+                val from = item.lastDestination
+                if (from != null && from !== target) {
+                    item.redirect = HttpUploadRedirectStats(++redirectAttempts, item.block.sequence, from.url, target.url, item.redirectReason).also {
+                        recentRedirects.add(0, it)
+                        if (recentRedirects.size > 5) recentRedirects.removeAt(recentRedirects.lastIndex)
+                    }
+                } else if (item.redirect?.toUrl == target.url) redirectState(item, HttpUploadRedirectState.UPLOADING)
+                else item.redirect = null
                 target.busy = true
                 target.scheduledNs = now
                 target.scheduledBytes = item.block.data.size
@@ -114,6 +137,10 @@ internal class DistributedHttpTsUploadWorker(
             synchronized(lock) {
                 if (closed || pending[item.block.sequence] !== item) return@synchronized
                 pending.remove(item.block.sequence)
+                if (item.redirect != null) {
+                    redirectAcknowledged++
+                    redirectState(item, HttpUploadRedirectState.ACKNOWLEDGED)
+                }
                 if (!item.alreadyAcknowledged) bytesAcknowledged.addAndGet(item.block.data.size.toLong())
                 acknowledged = max(acknowledged ?: -1L, item.block.sequence)
                 history[item.block.sequence] = Delivered(item.block, target, item.rescuedNs)
@@ -128,12 +155,14 @@ internal class DistributedHttpTsUploadWorker(
             target.upload.invalidate()
             synchronized(lock) {
                 if (!closed && pending[item.block.sequence] === item) {
+                    redirectState(item, HttpUploadRedirectState.FAILED)
                     item.destination = null
                     item.lastDestination = target
                     item.retry = true
+                    item.redirectReason = HttpUploadRedirectReason.UPLOAD_FAILURE
                     target.failures++
                     target.availableNs = System.nanoTime() + (1L shl target.failures.coerceAtMost(4)) * 1_000_000_000L
-                    if (target.failures == 1) notice = "HTTP 服务器变慢或中断，分块转投：${target.url}（${error.message}）"
+                    if (target.failures == 1) notice = "HTTP 分块 ${item.block.sequence} 上传失败，等待转投：${target.url}（${error.message}）"
                 }
             }
         } finally {
@@ -174,6 +203,7 @@ internal class DistributedHttpTsUploadWorker(
                             history.remove(sequence)
                             pending[saved.block.sequence] = Pending(saved.block, true, now).apply {
                                 lastDestination = target; retry = true
+                                redirectReason = HttpUploadRedirectReason.SLOW_DOWNLOAD
                             }
                             lock.notifyAll()
                         }
@@ -195,7 +225,10 @@ internal class DistributedHttpTsUploadWorker(
         val now = System.nanoTime()
         val budgetNs = ((block.data.size / rate * 2 + 2) * 1e9).toLong().coerceIn(3_000_000_000L, 15_000_000_000L)
         val remainingNs = cacheSeconds.coerceIn(30, 300) * 1_000_000_000L - (now - block.createdNs)
-        val response = destination.upload.request("POST", block.httpHeaders(), block.data,
+        val headers = block.httpHeaders() + (item.redirect?.let { mapOf(
+            "X-Redirect-From" to it.fromUrl, "X-Redirect-Reason" to it.reason.wireValue,
+        ) } ?: emptyMap())
+        val response = destination.upload.request("POST", headers, block.data,
             now + minOf(budgetNs, remainingNs.coerceAtLeast(0)), expectedGeneration = generation)
         check(response.status == 200 && response.headers["x-ack-sequence"] == block.sequence.toString()) {
             "HTTP ${response.status}: block not acknowledged"
@@ -207,6 +240,7 @@ internal class DistributedHttpTsUploadWorker(
         synchronized(lock) {
             if (closed) return
             closed = true
+            pending.values.forEach { redirectState(it, HttpUploadRedirectState.CANCELLED) }
             pending.clear()
             history.clear()
             destinations.forEach { it.upload.close(); it.feedback.close() }

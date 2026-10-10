@@ -246,6 +246,7 @@ class Relay {
     uint64_t accepted_bytes = 0;
     uint64_t dropped_blocks = 0, skipped_sequences = 0, skip_before_index = 1;
     uint64_t playback_generation = 0, dropped_bytes = 0;
+    uint64_t pending_empty_count = 0, catch_up_count = 0, redirect_requests = 0, redirect_received = 0;
     std::atomic<bool> reporting_stopped{false};
     std::thread reporter;
 
@@ -257,6 +258,7 @@ class Relay {
         bool buffering;
         uint64_t dropped_blocks, skipped_sequences;
         uint64_t dropped_bytes;
+        uint64_t pending_empty_count, catch_up_count, redirect_requests, redirect_received;
     };
     Stats snapshot() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -266,7 +268,8 @@ class Relay {
         Stats stats{active_session.empty() ? "-" : active_session,
             receipt == receipts.end() || !receipt->second.next ? "-" : std::to_string(receipt->second.next - 1),
             bytes, blocks.size(), 0, std::chrono::duration<double>(tail - position).count(), accepted_bytes,
-            buffering, dropped_blocks, skipped_sequences, dropped_bytes};
+            buffering, dropped_blocks, skipped_sequences, dropped_bytes,
+            pending_empty_count, catch_up_count, redirect_requests, redirect_received};
         for (const auto& block : blocks) {
             stats.cached_seconds += std::chrono::duration<double>(block->duration).count();
         }
@@ -278,7 +281,9 @@ class Relay {
              << " pending=" << stats.pending_seconds << " s blocks=" << stats.blocks
              << " state=" << (stats.buffering ? "buffering" : "playing")
              << " dropped=" << stats.dropped_blocks << " skipped=" << stats.skipped_sequences
-             << " dropped_bytes=" << stats.dropped_bytes / 1024.0 << " KiB";
+             << " dropped_bytes=" << stats.dropped_bytes / 1024.0 << " KiB"
+             << " pending_empty=" << stats.pending_empty_count << " catch_up=" << stats.catch_up_count
+             << " redirect_requests=" << stats.redirect_requests << " redirect_received=" << stats.redirect_received;
     }
     void log_upload(const std::string& session, const std::string& sequence, int status,
                     const std::string& result, size_t received, double seconds) {
@@ -327,6 +332,15 @@ class Relay {
         const auto packets = block.data.size() / 188;
         return static_cast<size_t>((relative * packets + block.duration.count() - 1) / block.duration.count()) * 188;
     }
+    void advance_position(Us target, const char* reason) {
+        const bool had_pending = tail > position;
+        position = target;
+        if (had_pending && position >= tail) {
+            ++pending_empty_count;
+            log_line("[playback] event=pending-empty session=" + active_session + " reason=" + reason +
+                " count=" + std::to_string(pending_empty_count));
+        }
+    }
     void catch_up(Time now) {
         // The seconds threshold controls pending playback only. Cache eviction
         // is governed by the byte budget and retention of played/skipped history.
@@ -347,7 +361,13 @@ class Relay {
                 dropped_blocks++;
             }
         }
-        position = target;
+        const auto before = tail - position;
+        advance_position(target, "catch-up");
+        ++catch_up_count;
+        log_line("[playback] event=catch-up session=" + active_session +
+            " pending_before=" + std::to_string(std::chrono::duration<double>(before).count()) +
+            "s pending_after=" + std::to_string(std::chrono::duration<double>(tail - position).count()) +
+            "s count=" + std::to_string(catch_up_count));
         anchor_position = position; anchor_time = now;
         playback_generation++;
         changed.notify_all();
@@ -357,7 +377,7 @@ class Relay {
         const auto end = block->start + block->duration;
         if (end > position) {
             dropped_bytes += block->data.size() - std::max(block->skipped_prefix, offset_at(*block, position));
-            position = end;
+            advance_position(end, "cache-eviction");
             anchor_position = position; anchor_time = now;
             skip_before_index = block->index + 1;
             dropped_blocks++;
@@ -369,7 +389,7 @@ class Relay {
     // One shared media clock for every viewer. Never runs past the available media.
     void update(Time now) {
         if (!buffering) {
-            position = std::min(tail, anchor_position + std::chrono::duration_cast<Us>(now - anchor_time));
+            advance_position(std::min(tail, anchor_position + std::chrono::duration_cast<Us>(now - anchor_time)), "playback");
             if (position >= tail) buffering = true;
         }
         for (const auto& block : blocks) {
@@ -464,6 +484,10 @@ public:
     ~Relay() { reporting_stopped = true; if (reporter.joinable()) reporter.join(); }
 
     void ingest(Request request) { accept_upload(invalid_socket, std::move(request)); }
+    uint64_t record_redirect(bool requested) {
+        std::lock_guard<std::mutex> lock(mutex);
+        return requested ? ++redirect_requests : ++redirect_received;
+    }
 
     void upload(Socket socket, Request request, bool keep_alive = false) {
         // Only log validated identifiers/numbers, keeping user input from injecting log lines.
