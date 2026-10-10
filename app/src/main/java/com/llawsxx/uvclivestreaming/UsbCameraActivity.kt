@@ -159,7 +159,7 @@ class UsbCameraActivity : ComponentActivity() {
     }
 }
 
-private enum class UsbAction { NONE, PREVIEW, RECORD, STREAM, RTMP }
+private enum class UsbAction { NONE, REFRESH_FORMATS, PREVIEW, RECORD, STREAM, RTMP }
 private enum class UsbStopAction(val label: String) {
     RECORDING("录像"), HTTP("HTTP 串流"), RTMP("RTMP 推流")
 }
@@ -237,6 +237,7 @@ private fun UsbCameraScreen() {
     var usbPermissionRequestPending by remember { mutableStateOf(false) }
     var usbPermissionEpoch by remember { mutableStateOf(0) }
     var runtimePermissionEpoch by remember { mutableStateOf(0) }
+    var runtimePermissionRequestPending by remember { mutableStateOf(false) }
     var includeAudio by rememberSaveable { mutableStateOf(uiSettings.includeAudio) }
     var audioInput by rememberSaveable { mutableStateOf(uiSettings.audioInput) }
     var systemAudioInput by rememberSaveable { mutableStateOf(uiSettings.systemAudioInput) }
@@ -426,14 +427,19 @@ private fun UsbCameraScreen() {
         ))
     }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        runtimePermissionRequestPending = false
         runtimePermissionEpoch++
         val cameraGranted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.CAMERA
         ) == PackageManager.PERMISSION_GRANTED
+        if (it[Manifest.permission.CAMERA] == true && selected?.let { device -> manager.hasPermission(device) } == true) {
+            // USB permission may have survived a runtime permission change; retry the format scan now.
+            usbPermissionEpoch++
+        }
         if (!cameraGranted && (!testCardSelected || uacNeedsCameraPermission)) {
             pendingAction = UsbAction.NONE
             previewRequested = false
-            message = "未获得相机权限，无法录像或串流"
+            message = "未获得相机权限，无法访问 USB 摄像头"
         } else if (includeAudio && it.containsKey(Manifest.permission.RECORD_AUDIO) &&
             it[Manifest.permission.RECORD_AUDIO] != true
         ) {
@@ -457,7 +463,7 @@ private fun UsbCameraScreen() {
                             // Stop the auto-preview effect from immediately
                             // requesting again after an explicit denial.
                             previewRequested = false
-                            message = "USB 设备访问权限被拒绝，请重新点击预览授权"
+                            message = "USB 设备访问权限被拒绝，请重新选择设备或点击刷新授权"
                         }
                     }
                     UsbManager.ACTION_USB_DEVICE_ATTACHED, UsbManager.ACTION_USB_DEVICE_DETACHED -> {
@@ -502,6 +508,12 @@ private fun UsbCameraScreen() {
         }
     }
 
+    LaunchedEffect(selectedName) {
+        if (selected != null && !recording && pendingAction == UsbAction.NONE) {
+            pendingAction = UsbAction.REFRESH_FORMATS
+        }
+    }
+
     LaunchedEffect(selectedName, usbPermissionEpoch) {
         val scanKey = selectedName to usbPermissionEpoch
         modesReadyKey = null
@@ -516,7 +528,8 @@ private fun UsbCameraScreen() {
             return@LaunchedEffect
         }
         val device = selected
-        if (device == null || !manager.hasPermission(device)) {
+        if (device == null || !manager.hasPermission(device) ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             modesReadyKey = scanKey
             return@LaunchedEffect
         }
@@ -535,6 +548,7 @@ private fun UsbCameraScreen() {
                 selectedMode = found.firstOrNull { it.display == uiSettings.selectedModeDisplay }
             }
             if (selectedMode != null && selectedMode?.custom != true && selectedMode !in found) selectedMode = null
+            if (pendingAction == UsbAction.REFRESH_FORMATS) message = "已刷新 USB 视频格式：${found.size} 项"
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -624,12 +638,13 @@ private fun UsbCameraScreen() {
     LaunchedEffect(pendingAction, selectedName, usbPermissionEpoch, runtimePermissionEpoch, modesReadyKey, uacDevices) {
         if (pendingAction == UsbAction.NONE) return@LaunchedEffect
         val device = selected
+        val refreshFormatsOnly = pendingAction == UsbAction.REFRESH_FORMATS
         if (device == null && !testCardSelected) {
             pendingAction = UsbAction.NONE
             message = "请选择 USB 摄像头或测试卡"
             return@LaunchedEffect
         }
-        val audioDevice = if (captureAudioEnabled && audioInput == UsbAudioInput.USB && uacDevice != null) {
+        val audioDevice = if (!refreshFormatsOnly && captureAudioEnabled && audioInput == UsbAudioInput.USB && uacDevice != null) {
             val resolved = resolveUsbAudioDevice(checkNotNull(uacDevice), usbAudioInputDevices(manager))
             val found = resolved?.let { manager.deviceList[it.deviceName] }
             if (found == null) {
@@ -644,21 +659,24 @@ private fun UsbCameraScreen() {
         // can be granted for a USB video-class device. Request it first;
         // requesting USB permission before CAMERA yields permission=false with
         // no dialog on several devices.
-        if (pendingAction == UsbAction.PREVIEW ||
+        if (pendingAction == UsbAction.REFRESH_FORMATS || pendingAction == UsbAction.PREVIEW ||
             pendingAction == UsbAction.RECORD || pendingAction == UsbAction.STREAM ||
             pendingAction == UsbAction.RTMP
         ) {
             val needed = buildList {
                 if (!testCardSelected || uacNeedsCameraPermission) add(Manifest.permission.CAMERA)
-                if (captureAudioEnabled && (pendingAction != UsbAction.PREVIEW || audioInput == UsbAudioInput.SYSTEM)) {
+                if (!refreshFormatsOnly && captureAudioEnabled && (pendingAction != UsbAction.PREVIEW || audioInput == UsbAudioInput.SYSTEM)) {
                     add(Manifest.permission.RECORD_AUDIO)
                 }
-                if (pendingAction != UsbAction.PREVIEW && Build.VERSION.SDK_INT >= 33) {
+                if (!refreshFormatsOnly && pendingAction != UsbAction.PREVIEW && Build.VERSION.SDK_INT >= 33) {
                     add(Manifest.permission.POST_NOTIFICATIONS)
                 }
             }.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
             if (needed.isNotEmpty()) {
-                permissionLauncher.launch(needed.toTypedArray())
+                if (!runtimePermissionRequestPending) {
+                    runtimePermissionRequestPending = true
+                    permissionLauncher.launch(needed.toTypedArray())
+                }
                 return@LaunchedEffect
             }
         }
@@ -680,6 +698,7 @@ private fun UsbCameraScreen() {
         if (modesReadyKey != (selectedName to usbPermissionEpoch)) return@LaunchedEffect
         val requested = pendingAction
         pendingAction = UsbAction.NONE
+        if (requested == UsbAction.REFRESH_FORMATS) return@LaunchedEffect
         if (requested == UsbAction.PREVIEW) {
             val requestRevision = ++previewRequestRevision
             val target = surface?.takeIf { it.isValid }
@@ -919,6 +938,7 @@ private fun UsbCameraScreen() {
                         DropdownMenu(expanded = devicesExpanded, onDismissRequest = { devicesExpanded = false }) {
                             DropdownMenuItem(text = { Text("测试卡（虚拟设备）") }, onClick = {
                                 idlePreview?.stop(); idlePreview = null; previewRequested = false
+                                pendingAction = UsbAction.NONE
                                 selectedName = TestCardSettings.DEVICE_ID; devicesExpanded = false
                             })
                             devices.forEach { device ->
@@ -929,6 +949,8 @@ private fun UsbCameraScreen() {
                                         previewRequested = false
                                         selectedMode = null
                                         selectedName = device.deviceName
+                                        pendingAction = UsbAction.REFRESH_FORMATS
+                                        usbPermissionEpoch++
                                         devicesExpanded = false
                                     })
                             }
@@ -937,7 +959,14 @@ private fun UsbCameraScreen() {
                     OutlinedButton(onClick = {
                         devices = usbVideoDevices(manager)
                         if (!testCardSelected && devices.none { it.deviceName == selectedName }) selectedName = devices.firstOrNull()?.deviceName ?: TestCardSettings.DEVICE_ID
-                    }) { Text("刷新") }
+                        if (devices.any { it.deviceName == selectedName }) {
+                            // The idle preview holds the USB gate; release it before scanning,
+                            // then resume through the usual preview action if it was enabled.
+                            idlePreview?.stop(); idlePreview = null
+                            pendingAction = if (previewRequested) UsbAction.PREVIEW else UsbAction.REFRESH_FORMATS
+                            usbPermissionEpoch++
+                        }
+                    }, enabled = !recording) { Text("刷新") }
                 }
                 Box {
                     OutlinedButton(onClick = { modesExpanded = true }, enabled = !recording,
