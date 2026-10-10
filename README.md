@@ -28,6 +28,23 @@ Android USB camera recorder and streamer.
   pending upload/retry counts, cache bytes/duration and chunk assembly progress.
   The relay logs each upload and reports throughput/cache status every second.
   Build, protocol and limitations: [HTTP TS relay](server/http-ts-relay/README.md).
+- Optional "网络自适应视频码率" in the USB Output tab adjusts the running encoder
+  for HTTP remote chunk uploads. The video setting is the ceiling; the saved floor
+  defaults to 1000 kbps (the feature defaults off). Original unacknowledged queue
+  growth, stalled ACKs, cache eviction and repeated receiver rescue requests trigger
+  reductions of 25–50% after sustained congestion, with a five-second cooldown.
+  Fresh store egress feedback reserves audio/TS/retransmission headroom when choosing
+  a reduction; unknown or expired feedback is not assumed to be 3 Mbps. Low achieved
+  throughput alone never reduces bitrate. After 20 healthy seconds, a 10% increase
+  probes recovery, bounded by the ceiling. Retained history and rescue copies do not
+  count as original upload backlog. Resolution/FPS remain fixed; already encoded
+  chunks retain their previous bitrate. The Output tab shows the target, bounds,
+  adjustment count and reason. Simultaneous recording and RTMP share the changed
+  encoder bitrate; stopping HTTP restores the configured target. No relay update is
+  required. Actual bitrate response depends on the hardware encoder and bitrate mode.
+  With adaptive bitrate enabled, the default bitrate mode selects supported CBR
+  (VBR fallback); explicit VBR/CBR selections are respected. Some default/VBR rate
+  controllers overshoot substantially after a change, so CBR is recommended.
 - Recording, HTTP streaming and RTMP publishing can be started/stopped independently during one capture session; they share the same H.264/HEVC + AAC encoder output. Newly added outputs begin at a keyframe with their own timestamp origin.
 - Stop buttons for recording, HTTP and RTMP ask for confirmation by default.
   The saved "Confirm before stopping" setting in the Output tab can disable it.

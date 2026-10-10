@@ -18,6 +18,7 @@ internal class DistributedHttpTsUploadWorker(
         }, watchdog)
         var rate = 375_000.0 // Bootstrap estimate; replaced by measured server egress feedback, not a cap.
         var measuredRate: Double? = null
+        var measuredNs = 0L
         var availableNs = 0L
         var busy = false
         var failures = 0
@@ -42,9 +43,11 @@ internal class DistributedHttpTsUploadWorker(
     private val destinations = urls.map { Destination(it, watchdog) }
     private var closed = false
     private var dropped = 0L
+    private var originalDropped = 0L
     private var acknowledged: Long? = null
     private var redirectAttempts = 0L
     private var redirectAcknowledged = 0L
+    private var slowDownloadRescues = 0L
     private val recentRedirects = mutableListOf<HttpUploadRedirectStats>()
     override val bytesAcknowledged = AtomicLong()
     private val dispatcher: Thread
@@ -57,18 +60,29 @@ internal class DistributedHttpTsUploadWorker(
     override val pendingBlocks: Int get() = synchronized(lock) { pending.size }
     override fun snapshot(): HttpTsUploadWorker.Stats = synchronized(lock) {
         val retries = pending.values.count { it.retry }
+        val now = System.nanoTime()
         HttpTsUploadWorker.Stats(TsUploadQueue.Stats(pending.size - retries, retries,
             pending.values.sumOf { it.block.data.size.toLong() }, pending.values.sumOf { it.block.durationUs }, dropped),
             pending.values.firstOrNull { it.destination != null }?.block?.sequence, acknowledged, bytesAcknowledged.get(),
+<<<<<<< Updated upstream
             destinations.map { HttpUploadServerStats(it.url, it.measuredRate?.let { rate -> (rate * 8).toLong() }, it.busy, it.failures) },
             history.values.sumOf { it.block.data.size.toLong() }, redirectAttempts, redirectAcknowledged, recentRedirects.toList())
+=======
+            destinations.map {
+                val age = ((now - it.measuredNs) / 1_000_000).takeIf { age -> it.measuredRate != null && age in 0..10_000 }
+                HttpUploadServerStats(it.url, it.measuredRate?.takeIf { age != null }?.let { rate -> (rate * 8).toLong() },
+                    it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks, age)
+            },
+            history.values.sumOf { it.block.data.size.toLong() }, redirectAttempts, redirectAcknowledged, recentRedirects.toList(),
+            pending.values.filter { !it.alreadyAcknowledged }.sumOf { it.block.durationUs }, slowDownloadRescues, originalDropped)
+>>>>>>> Stashed changes
     }
     override fun enqueue(block: TsUploadBlock, cacheSeconds: Int) = synchronized(lock) {
         check(!closed)
         expire()
         val maximumUs = cacheSeconds.coerceIn(30, 300) * 1_000_000L
         if (block.data.size > MAX_BYTES || block.durationUs > maximumUs ||
-            System.nanoTime() - block.createdNs >= maximumUs * 1_000) { dropped++; return@synchronized }
+            System.nanoTime() - block.createdNs >= maximumUs * 1_000) { dropped++; originalDropped++; return@synchronized }
         while (history.isNotEmpty() && (history.size + pending.size >= 16_384 ||
             history.values.sumOf { it.block.data.size.toLong() } + pending.values.sumOf { it.block.data.size.toLong() } + block.data.size > MAX_BYTES))
             history.remove(history.values.minBy { it.block.createdNs }.block.sequence)
@@ -81,6 +95,7 @@ internal class DistributedHttpTsUploadWorker(
     private fun retire(sequence: Long) {
         pending.remove(sequence)?.let { item ->
             item.destination?.upload?.invalidate(); dropped++
+            if (!item.alreadyAcknowledged) originalDropped++
             redirectState(item, HttpUploadRedirectState.EXPIRED)
         }
     }
@@ -151,6 +166,7 @@ internal class DistributedHttpTsUploadWorker(
                 if (rate > 0) {
                     target.rate = rate.toDouble().coerceIn(1_000.0, 125_000_000.0)
                     target.measuredRate = target.rate
+                    target.measuredNs = System.nanoTime()
                 }
                 if (target.failures > 0) notice = "HTTP 服务器已恢复：${target.url}"
                 target.failures = 0
@@ -197,15 +213,17 @@ internal class DistributedHttpTsUploadWorker(
                         if (rate != null && rate > 0) {
                             target.rate = rate.toDouble().coerceIn(1_000.0, 125_000_000.0)
                             target.measuredRate = target.rate
+                            target.measuredNs = System.nanoTime()
                             if (!target.busy && target.failures == 0) target.availableNs = max(System.nanoTime(),
                                 target.scheduledNs + (target.scheduledBytes / target.rate * 1e9).toLong())
                             lock.notifyAll()
-                        }
+                        } else target.measuredRate = null
                         val saved = history[sequence]
                         val now = System.nanoTime()
                         if (saved != null && saved.block.session == session &&
                             now - saved.rescuedNs >= 5_000_000_000L && !pending.containsKey(sequence)) {
                             history.remove(sequence)
+                            slowDownloadRescues++
                             pending[saved.block.sequence] = Pending(saved.block, true, now).apply {
                                 lastDestination = saved.destination; retry = true
                                 if (saved.destination !== target) rescueDestination = target

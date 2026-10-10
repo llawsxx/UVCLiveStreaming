@@ -385,6 +385,9 @@ data class RecordingConfig(
     val httpUploadEnabled: Boolean = false,
     val httpUploadUrl: String = "",
     val httpUploadCacheSeconds: Int = 60,
+    val httpAutoBitrateEnabled: Boolean = false,
+    /** The configured video bitrate is the ceiling; this is the adaptive floor. */
+    val httpMinVideoBitrate: Int = 1_000_000,
     /** RTMP is available for USB capture and uses H.264/HEVC + AAC messages. */
     val rtmpEnabled: Boolean = false,
     val rtmpUrl: String = "",
@@ -550,7 +553,15 @@ data class CameraInfo(
 
 /** A snapshot of this HTTP publishing session. Counts include the unacknowledged in-flight block. */
 data class HttpUploadServerStats(val url: String, val estimatedBitsPerSecond: Long?,
+<<<<<<< Updated upstream
     val uploading: Boolean, val consecutiveFailures: Int)
+=======
+    val uploading: Boolean, val consecutiveFailures: Int,
+    /** Confirmed TS payloads for this destination, including acknowledged rescue copies. */
+    val acknowledgedBytes: Long = 0, val acknowledgedBlocks: Long = 0,
+    /** Monotonic age of server egress feedback; null means unmeasured/expired. */
+    val feedbackAgeMs: Long? = null)
+>>>>>>> Stashed changes
 
 enum class HttpUploadRedirectReason(val label: String, val wireValue: String) {
     UPLOAD_FAILURE("上传失败", "upload-failed"), SLOW_DOWNLOAD("接收端下载慢", "download-slow")
@@ -582,6 +593,10 @@ data class HttpUploadStats(
     val redirectAttempts: Long = 0,
     val redirectAcknowledged: Long = 0,
     val recentRedirects: List<HttpUploadRedirectStats> = emptyList(),
+    /** Original unacknowledged chunks only; excludes retained and re-uploaded rescue copies. */
+    val unacknowledgedDurationUs: Long = queuedDurationUs,
+    val slowDownloadRescues: Long = 0,
+    val originalDroppedBlocks: Long = droppedBlocks,
 ) {
     val cachedDataBytes: Long get() = queuedBytes + assemblingBytes + retainedBytes
     // Payload arrays and the chunk builder allocation; excludes object/socket overhead and transient copies.
@@ -614,7 +629,11 @@ data class RecordingStats(
     val recentFps: Double? = null,
     /** Recent USB video endpoint throughput; includes UVC headers, excludes audio/bus overhead. */
     val usbVideoReceiveBitsPerSecond: Double? = null,
+    val httpAutoBitrate: HttpAutoBitrateStats? = null,
 )
+
+data class HttpAutoBitrateStats(val targetBitsPerSecond: Int, val minimumBitsPerSecond: Int,
+    val maximumBitsPerSecond: Int, val adjustments: Long, val status: String)
 
 data class CameraExposureState(
     val cameraId: String,

@@ -68,6 +68,13 @@ class UsbRecorderEngine(
     private val nativeMetricsLock = Any()
     private var usbConnection: android.hardware.usb.UsbDeviceConnection? = null
     private var videoCodec: MediaCodec? = null
+    private val codecParametersLock = Any()
+    @Volatile private var currentVideoBitrate = config.videoBitrate.coerceAtLeast(100_000)
+    @Volatile private var adaptiveBitrateStats: HttpAutoBitrateStats? = null
+    private var adaptiveBitrateController: HttpAdaptiveBitrateController? = null
+    private var adaptiveBitrateSession: String? = null
+    private var adaptiveBitrateError: String? = null
+    private var adaptiveBitrateAdjustments = 0L
     private var audioCodec: MediaCodec? = null
     private val outputs = EncodedOutputRouter<MediaFormat>(
         muxingQueueSize = config.muxingQueueSize,
@@ -281,17 +288,23 @@ class UsbRecorderEngine(
                 colorRange = if (config.colorRange == VideoColorRange.DEFAULT) VideoColorRange.LIMITED else config.colorRange,
                 colorTransfer = if (config.colorTransfer == VideoColorTransfer.DEFAULT) VideoColorTransfer.BT709 else config.colorTransfer)
                 else config
+            val bitrateMode = encoderBitrateMode(config) {
+                codec.codecInfo.getCapabilitiesForType(mime).encoderCapabilities?.isBitrateModeSupported(it) == true
+            }
             val format = MediaFormat.createVideoFormat(mime, videoWidth, videoHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, if (direct) MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
                     else MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, config.videoBitrate.coerceAtLeast(100_000))
                 setInteger(MediaFormat.KEY_FRAME_RATE, config.fps.roundToInt().coerceIn(1, 240))
                 applyEncoderGopSettings(config)
-                config.videoBitrateMode.mediaFormatValue?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
+                bitrateMode?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
                 applyEncoderAdvancedSettings(config, VideoEncoderCapabilities.from(codec.codecInfo, mime))
                 applyEncoderColorSettings(colors)
             }
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            if (config.httpUploadEnabled && config.httpAutoBitrateEnabled && config.videoBitrateMode == VideoBitrateMode.DEFAULT)
+                onNotice(if (bitrateMode == MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                    "HTTP 自动码率使用 CBR 编码模式" else "HTTP 自动码率：当前编码器不支持 CBR，实际码率可能偏离目标")
             encoderInputSurface = if (direct) null else codec.createInputSurface()
             Log.i("UsbVideoDiagnostics", "Encoder input=${if (direct) "YUV" else "Surface"} codec=${codec.name} " +
                 "standard=${colors.colorStandard.label} range=${colors.colorRange.label} " +
@@ -349,6 +362,7 @@ class UsbRecorderEngine(
                     lastRendered = rendered
                     lastEncoded = encoded
                 }
+                updateAdaptiveBitrate(nowNs, outputs.snapshot()[CaptureOutput.HTTP]?.httpUploadStats)
                 onStats(captureStats())
                 try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
             }
@@ -649,10 +663,61 @@ class UsbRecorderEngine(
 
     private fun requestKeyFrame() {
         runCatching {
-            videoCodec?.setParameters(android.os.Bundle().apply {
-                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-            })
+            synchronized(codecParametersLock) {
+                videoCodec?.setParameters(android.os.Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                })
+            }
         }.onFailure { if (running.get()) onNotice("已等待下一个视频关键帧") }
+    }
+
+    private fun updateAdaptiveBitrate(nowNs: Long, upload: HttpUploadStats?) {
+        if (!config.httpAutoBitrateEnabled || !config.httpUploadEnabled) return
+        val maximum = config.videoBitrate.coerceAtLeast(100_000)
+        if (adaptiveBitrateSession != upload?.sessionId) {
+            adaptiveBitrateController = null
+            adaptiveBitrateSession = upload?.sessionId
+            adaptiveBitrateStats = null
+            adaptiveBitrateAdjustments = 0L
+            // Detaching HTTP restores the configured bitrate for remaining outputs.
+            if (currentVideoBitrate != maximum) applyVideoBitrate(maximum)
+        }
+        if (upload == null) return
+        val controller = adaptiveBitrateController ?: HttpAdaptiveBitrateController(maximum,
+            config.httpMinVideoBitrate, if (audioCaptureEnabled) config.audioBitrate else 0).also {
+            adaptiveBitrateController = it
+        }
+        if (adaptiveBitrateError == null) {
+            controller.sample(nowNs, upload)?.let { adjustment ->
+                if (applyVideoBitrate(adjustment.bitrate)) {
+                    adaptiveBitrateAdjustments++
+                    val notice = "HTTP 自动码率：${currentVideoBitrate / 1000} kbps；${adjustment.reason}"
+                    Log.i("HttpAdaptiveBitrate", notice)
+                    onNotice(notice)
+                }
+            }
+        }
+        adaptiveBitrateStats = HttpAutoBitrateStats(currentVideoBitrate, controller.minimum, controller.maximum,
+            adaptiveBitrateAdjustments, adaptiveBitrateError ?: controller.status)
+    }
+
+    private fun applyVideoBitrate(bitrate: Int): Boolean {
+        return try {
+            synchronized(codecParametersLock) {
+                if (!running.get()) return false
+                checkNotNull(videoCodec).setParameters(android.os.Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate)
+                })
+                currentVideoBitrate = bitrate
+            }
+            true
+        } catch (error: Exception) {
+            if (running.get()) {
+                adaptiveBitrateError = "自动码率已停用：编码器拒绝动态调整（${error.message}）"
+                onNotice(checkNotNull(adaptiveBitrateError))
+            }
+            false
+        }
     }
 
     private fun onOutputFailure(type: CaptureOutput, error: Exception) {
@@ -684,6 +749,7 @@ class UsbRecorderEngine(
             rtmpStreaming = CaptureOutput.RTMP in active,
             rtmpReconnectCount = active[CaptureOutput.RTMP]?.reconnectCount ?: 0L,
             httpUploadStats = active[CaptureOutput.HTTP]?.httpUploadStats,
+            httpAutoBitrate = adaptiveBitrateStats.takeIf { CaptureOutput.HTTP in active },
             outputChangePending = outputChanges.get() > 0,
             bytesStreamed = active.values.sumOf { it.bytesStreamed },
             streamBitrateBitsPerSecond = streamRate,
@@ -720,6 +786,8 @@ class UsbRecorderEngine(
             return
         }
         try {
+        statsThread?.interrupt()
+        if (Thread.currentThread() != statsThread) runCatching { statsThread?.join(1_000) }
         videoWake.close()
         mjpegDecodePool.close()
         systemAudioCapture?.close()
@@ -750,8 +818,11 @@ class UsbRecorderEngine(
         if (!runCatching { outputCommands.awaitTermination(3, TimeUnit.SECONDS) }.getOrDefault(false))
             outputCommands.shutdownNow()
         outputs.close()
-        runCatching { videoCodec?.stop() }
-        runCatching { videoCodec?.release() }
+        synchronized(codecParametersLock) {
+            runCatching { videoCodec?.stop() }
+            runCatching { videoCodec?.release() }
+            videoCodec = null
+        }
         runCatching { audioCodec?.stop() }
         runCatching { audioCodec?.release() }
         runCatching { usbConnection?.close() }

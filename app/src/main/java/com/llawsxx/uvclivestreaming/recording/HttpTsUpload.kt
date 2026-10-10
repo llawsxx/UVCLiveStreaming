@@ -194,6 +194,9 @@ internal class HttpTsUploadSink(
                 redirectAttempts = state.redirectAttempts,
                 redirectAcknowledged = state.redirectAcknowledged,
                 recentRedirects = state.recentRedirects,
+                unacknowledgedDurationUs = state.unacknowledgedDurationUs,
+                slowDownloadRescues = state.slowDownloadRescues,
+                originalDroppedBlocks = state.originalDroppedBlocks,
             )
         }
 
@@ -224,15 +227,31 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     private var failing = false
     private var uploadingSequence: Long? = null
     private var acknowledgedSequence: Long? = null
+<<<<<<< Updated upstream
+=======
+    private var acknowledgedBlocks = 0L
+    private var consecutiveFailures = 0
+    private var measuredRate: Long? = null
+    private var measuredNs = 0L
+>>>>>>> Stashed changes
     private val thread: Thread
     override val pendingBlocks: Int get() = queue.size
     data class Stats(val queue: TsUploadQueue.Stats, val uploadingSequence: Long?,
                      val acknowledgedSequence: Long?, val acknowledgedBytes: Long,
                      val servers: List<HttpUploadServerStats> = emptyList(), val retainedBytes: Long = 0,
                      val redirectAttempts: Long = 0, val redirectAcknowledged: Long = 0,
-                     val recentRedirects: List<HttpUploadRedirectStats> = emptyList())
+                     val recentRedirects: List<HttpUploadRedirectStats> = emptyList(),
+                     val unacknowledgedDurationUs: Long = queue.durationUs, val slowDownloadRescues: Long = 0,
+                     val originalDroppedBlocks: Long = queue.droppedBlocks)
     override fun snapshot(): Stats = synchronized(wake) {
+<<<<<<< Updated upstream
         Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get())
+=======
+        val age = ((System.nanoTime() - measuredNs) / 1_000_000).takeIf { measuredRate != null && it in 0..10_000 }
+        Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get(),
+            servers = listOf(HttpUploadServerStats(url, measuredRate?.takeIf { age != null }, uploadingSequence != null, consecutiveFailures,
+                bytesAcknowledged.get(), acknowledgedBlocks, age)))
+>>>>>>> Stashed changes
     }
 
     init {
@@ -317,6 +336,12 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                 now + remainingNs.coerceIn(0, 15_000_000_000L), readTimeoutMs = 10_000, expectedGeneration = generation)
             check(response.status == 200 && response.headers["x-ack-sequence"] == block.sequence.toString()) {
                 "HTTP ${response.status}，服务器未确认块 ${block.sequence}"
+            }
+            synchronized(wake) {
+                measuredRate = response.headers["x-download-rate-bps"]?.toLongOrNull()?.takeIf {
+                    response.headers["x-relay-mode"] == "store" && it in 1_000..125_000_000
+                }?.times(8)
+                measuredNs = System.nanoTime()
             }
         } catch (error: Exception) {
             connection.invalidate()

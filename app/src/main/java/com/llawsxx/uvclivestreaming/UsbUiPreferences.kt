@@ -45,6 +45,8 @@ internal data class UsbUiSettings(
     val httpUploadEnabled: Boolean = false,
     val httpUploadUrl: String = "",
     val httpUploadCacheSeconds: Int = 60,
+    val httpAutoBitrateEnabled: Boolean = false,
+    val httpMinVideoBitrateKbps: String = "1000",
     val rtmpUrl: String = "",
     val rtmpBufferMs: Int = 5_000,
     val rtmpSendTimeoutSeconds: Int = 10,
@@ -135,6 +137,8 @@ internal object UsbUiPreferences {
             httpUploadEnabled = p.getBoolean("httpUploadEnabled", false),
             httpUploadUrl = p.getString("httpUploadUrl", "").orEmpty(),
             httpUploadCacheSeconds = p.getInt("httpUploadCacheSeconds", 60).coerceIn(30, 300),
+            httpAutoBitrateEnabled = p.getBoolean("httpAutoBitrateEnabled", false),
+            httpMinVideoBitrateKbps = p.getString("httpMinVideoBitrateKbps", "1000").orEmpty(),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
             rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
             rtmpSendTimeoutSeconds = p.getInt("rtmpSendTimeoutSeconds", 10).coerceIn(3, 30),
@@ -222,6 +226,8 @@ internal object UsbUiPreferences {
             .putString("httpUploadUrl", settings.httpUploadUrl)
             .remove("httpUploadChunkSeconds")
             .putInt("httpUploadCacheSeconds", settings.httpUploadCacheSeconds.coerceIn(30, 300))
+            .putBoolean("httpAutoBitrateEnabled", settings.httpAutoBitrateEnabled)
+            .putString("httpMinVideoBitrateKbps", settings.httpMinVideoBitrateKbps)
             .putString("rtmpUrl", settings.rtmpUrl)
             .putInt("rtmpBufferMs", settings.rtmpBufferMs.coerceIn(100, 30_000))
             .putInt("rtmpSendTimeoutSeconds", settings.rtmpSendTimeoutSeconds.coerceIn(3, 30))

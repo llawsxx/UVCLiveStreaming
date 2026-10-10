@@ -239,6 +239,8 @@ object ConfigPreferences {
             httpUploadEnabled = p.getBoolean("httpUploadEnabled", false),
             httpUploadUrl = p.getString("httpUploadUrl", "").orEmpty(),
             httpUploadCacheSeconds = p.getInt("httpUploadCacheSeconds", 60).coerceIn(30, 300),
+            httpAutoBitrateEnabled = p.getBoolean("httpAutoBitrateEnabled", false),
+            httpMinVideoBitrate = p.getInt("httpMinVideoBitrate", 1_000_000).coerceIn(100_000, 100_000_000),
             rtmpEnabled = p.getBoolean("rtmpEnabled", false),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
             rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
@@ -415,6 +417,8 @@ object ConfigPreferences {
             .putString("httpUploadUrl", c.httpUploadUrl)
             .remove("httpUploadChunkSeconds")
             .putInt("httpUploadCacheSeconds", c.httpUploadCacheSeconds.coerceIn(30, 300))
+            .putBoolean("httpAutoBitrateEnabled", c.httpAutoBitrateEnabled)
+            .putInt("httpMinVideoBitrate", c.httpMinVideoBitrate.coerceIn(100_000, 100_000_000))
             .putBoolean("rtmpEnabled", c.rtmpEnabled)
             .putString("rtmpUrl", c.rtmpUrl)
             .putInt("rtmpBufferMs", c.rtmpBufferMs.coerceIn(100, 30_000))

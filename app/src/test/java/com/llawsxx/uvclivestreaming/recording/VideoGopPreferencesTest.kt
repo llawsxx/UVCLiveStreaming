@@ -26,12 +26,17 @@ class VideoGopPreferencesTest {
         val prefs = preferences(values)
         assertEquals(false, ConfigPreferences.load(prefs).httpUploadEnabled)
         assertEquals(60, ConfigPreferences.load(prefs).httpUploadCacheSeconds)
+        assertEquals(false, ConfigPreferences.load(prefs).httpAutoBitrateEnabled)
+        assertEquals(1_000_000, ConfigPreferences.load(prefs).httpMinVideoBitrate)
         ConfigPreferences.save(prefs, RecordingConfig(httpUploadEnabled = true,
-            httpUploadUrl = "http://host:8080/upload/live", httpUploadCacheSeconds = 90))
+            httpUploadUrl = "http://host:8080/upload/live", httpUploadCacheSeconds = 90,
+            httpAutoBitrateEnabled = true, httpMinVideoBitrate = 600_000))
         val loaded = ConfigPreferences.load(prefs)
         assertEquals(true, loaded.httpUploadEnabled)
         assertEquals("http://host:8080/upload/live", loaded.httpUploadUrl)
         assertEquals(90, loaded.httpUploadCacheSeconds)
+        assertEquals(true, loaded.httpAutoBitrateEnabled)
+        assertEquals(600_000, loaded.httpMinVideoBitrate)
         values["httpUploadChunkSeconds"] = 99; values["httpUploadCacheSeconds"] = 1
         assertEquals(30, ConfigPreferences.load(prefs).httpUploadCacheSeconds)
         ConfigPreferences.save(prefs, ConfigPreferences.load(prefs))
