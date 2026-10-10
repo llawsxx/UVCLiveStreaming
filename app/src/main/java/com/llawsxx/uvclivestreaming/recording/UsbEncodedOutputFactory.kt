@@ -34,7 +34,7 @@ internal class UsbEncodedOutputFactory(
 
     private fun ts(baseName: String, record: Boolean): EncodedOutput<MediaFormat> {
         val upload = if (!record && config.httpUploadEnabled) HttpTsUploadSink(
-            config.httpUploadUrl, config.httpUploadChunkSeconds,
+            config.httpUploadUrl,
             config.httpUploadCacheSeconds, onNotice,
         ) else null
         val server = if (record || upload != null) null else HttpTsRingBufferServer(

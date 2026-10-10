@@ -384,7 +384,6 @@ data class RecordingConfig(
     /** The HTTP output can publish TS chunks to a remote delay relay instead of serving locally. */
     val httpUploadEnabled: Boolean = false,
     val httpUploadUrl: String = "",
-    val httpUploadChunkSeconds: Int = 1,
     val httpUploadCacheSeconds: Int = 60,
     /** RTMP is available for USB capture and uses H.264/HEVC + AAC messages. */
     val rtmpEnabled: Boolean = false,

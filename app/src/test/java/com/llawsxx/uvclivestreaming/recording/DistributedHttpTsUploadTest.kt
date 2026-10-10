@@ -24,6 +24,7 @@ class DistributedHttpTsUploadTest {
         val accepted = CountDownLatch(1)
         val disconnected = CountDownLatch(1)
         val rescue = AtomicLong(-1)
+        @Volatile var rescueSession = "test"
         private val sockets = CopyOnWriteArrayList<Socket>()
         private val pool = Executors.newCachedThreadPool { Thread(it).apply { isDaemon = true } }
         private val listener = Thread {
@@ -67,7 +68,7 @@ class DistributedHttpTsUploadTest {
                                 socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\nConnection: " +
                                     (if (keepAlive) "keep-alive" else "close") + "\r\nX-Relay-Mode: store\r\n" +
                                     (if (rate.get() > 0) "X-Download-Rate-Bps: ${rate.get()}\r\n" else "") +
-                                    (if (!post && rescue.get() >= 0) "X-Rescue-Session: test\r\nX-Rescue-Sequence: ${rescue.get()}\r\n" else "") +
+                                    (if (!post && rescue.get() >= 0) "X-Rescue-Session: $rescueSession\r\nX-Rescue-Sequence: ${rescue.get()}\r\n" else "") +
                                     (sequence?.let { "X-Ack-Sequence: $it\r\n" } ?: "") + "\r\n" + body).toByteArray())
                                 if (!keepAlive || (post && disconnectAfterAck)) break
                             }
@@ -193,6 +194,37 @@ class DistributedHttpTsUploadTest {
                 assertEquals(0, worker.pendingBlocks)
                 assertEquals(0L, worker.snapshot().retainedBytes)
             } finally { worker.close() }
+        } }
+    }
+
+    @Test fun missingBlockRescueUsesRequestingStoreAndValidatesSessionAndCooldown() {
+        Store(AtomicLong(2_000_000)).use { original -> Store(AtomicLong(1_000_000)).use { other ->
+            Store(AtomicLong(1_000)).use { requester ->
+                DistributedHttpTsUploadWorker(listOf(original.url, other.url, requester.url), 60) {}.use { worker ->
+                    await { worker.snapshot().servers.all { it.estimatedBitsPerSecond != null } }
+                    worker.enqueue(block(0, 1), 60)
+                    await { worker.bytesAcknowledged.get() == 188L }
+                    assertEquals(listOf(0L), original.received.toList())
+                    requester.rescueSession = "another-session"
+                    requester.rescue.set(0)
+                    val before = requester.requests.count { it.startsWith("GET") }
+                    await { requester.requests.count { it.startsWith("GET") } >= before + 2 }
+                    assertEquals(0L, worker.snapshot().redirectAttempts)
+                    requester.rescueSession = "test"
+                    await { worker.snapshot().redirectAcknowledged == 1L }
+                    assertEquals(listOf(0L), requester.received.toList())
+                    assertTrue(other.received.isEmpty())
+                    assertEquals(188L, worker.bytesAcknowledged.get())
+                    val redirect = worker.snapshot().recentRedirects.single()
+                    assertEquals(original.url, redirect.fromUrl)
+                    assertEquals(requester.url, redirect.toUrl)
+                    assertEquals(HttpUploadRedirectReason.SLOW_DOWNLOAD, redirect.reason)
+                    val after = requester.requests.count { it.startsWith("GET") }
+                    await { requester.requests.count { it.startsWith("GET") } >= after + 2 }
+                    assertEquals("Repeated feedback within five seconds must not resend the block", 1L,
+                        worker.snapshot().redirectAttempts)
+                }
+            }
         } }
     }
 

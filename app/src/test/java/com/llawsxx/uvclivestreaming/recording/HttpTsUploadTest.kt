@@ -31,7 +31,7 @@ class HttpTsUploadTest {
 
     @Test fun assemblingStatisticsIncludePartialBytesTimeAndAllocatedBuffer() {
         var now = 0L
-        val chunker = TsUploadChunker(1, {}, { now }, "stats-session")
+        val chunker = TsUploadChunker({}, { now }, "stats-session")
         assertNull(chunker.latestSequence)
         chunker.write(ts(1))
         now = 500_000_000
@@ -52,7 +52,7 @@ class HttpTsUploadTest {
     @Test fun chunkingUsesElapsedTimeAndPreservesEveryByteWithoutKeyframeChecks() {
         var now = 0L
         val output = mutableListOf<TsUploadBlock>()
-        val chunker = TsUploadChunker(1, output::add, { now }, "session")
+        val chunker = TsUploadChunker(output::add, { now }, "session")
         chunker.write(ts(1))
         now = 500_000_000; chunker.write(ts(2))
         now = 1_000_000_000; chunker.write(ts(3))
@@ -68,7 +68,7 @@ class HttpTsUploadTest {
 
     @Test fun stoppingAnEmptySessionProducesAnAcknowledgableFinalMarker() {
         val output = mutableListOf<TsUploadBlock>()
-        TsUploadChunker(1, output::add).close()
+        TsUploadChunker(output::add).close()
         assertEquals(1, output.size)
         assertTrue(output.single().final)
         assertEquals(0L, output.single().durationUs)
@@ -77,7 +77,7 @@ class HttpTsUploadTest {
 
     @Test fun discardDropsThePartialChunkWithoutEmittingAFinalBlock() {
         val output = mutableListOf<TsUploadBlock>()
-        val chunker = TsUploadChunker(1, output::add)
+        val chunker = TsUploadChunker(output::add)
         chunker.write(ts(1))
         chunker.discard(); chunker.close(); chunker.discard()
         assertTrue(output.isEmpty())
@@ -219,7 +219,7 @@ class HttpTsUploadTest {
                 } catch (error: Throwable) { failure += error } finally { done.countDown() }
             }.apply { isDaemon = true; start() }
             val url = "http://127.0.0.1:${server.localPort}/upload/live"
-            val first = HttpTsUploadSink(url, 1, 60) { if (it.contains("中断")) retryNotice.countDown() }
+            val first = HttpTsUploadSink(url, 60) { if (it.contains("中断")) retryNotice.countDown() }
             assertNull(first.stats.latestSequence)
             first.write(ts(1)); Thread.sleep(1_100); first.write(ts(2))
             assertTrue(retryNotice.await(3, TimeUnit.SECONDS))
@@ -294,7 +294,7 @@ class HttpTsUploadTest {
                     assertThrows(java.net.SocketTimeoutException::class.java) { server.accept().use { } }
                 } catch (error: Throwable) { failure += error; disconnected.countDown() }
             }.apply { isDaemon = true; start() }
-            val sink = HttpTsUploadSink("http://127.0.0.1:${server.localPort}/upload/live", 1, 60) {}
+            val sink = HttpTsUploadSink("http://127.0.0.1:${server.localPort}/upload/live", 60) {}
             sink.write(ts(1)); Thread.sleep(1_100); sink.write(ts(2))
             assertTrue(accepted.await(3, TimeUnit.SECONDS))
             Thread.sleep(1_100); sink.write(ts(3))
@@ -330,7 +330,7 @@ class HttpTsUploadTest {
     @Test fun distributedTimelineHasContiguousAbsoluteMicrosecondBoundaries() {
         var now = 0L
         val blocks = mutableListOf<TsUploadBlock>()
-        val chunker = TsUploadChunker(1, blocks::add, { now }, "timeline")
+        val chunker = TsUploadChunker(blocks::add, { now }, "timeline")
         repeat(100) {
             chunker.write(ts(1))
             now += 1_000_000_400L

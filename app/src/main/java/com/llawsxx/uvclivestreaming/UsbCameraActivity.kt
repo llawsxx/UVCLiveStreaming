@@ -261,7 +261,6 @@ private fun UsbCameraScreen() {
     var container by rememberSaveable { mutableStateOf(uiSettings.container) }
     var httpUploadEnabled by rememberSaveable { mutableStateOf(uiSettings.httpUploadEnabled) }
     var httpUploadUrl by rememberSaveable { mutableStateOf(uiSettings.httpUploadUrl) }
-    var httpUploadChunkSeconds by rememberSaveable { mutableStateOf(uiSettings.httpUploadChunkSeconds) }
     var httpUploadCacheSeconds by rememberSaveable { mutableStateOf(uiSettings.httpUploadCacheSeconds) }
     var rtmpUrl by rememberSaveable { mutableStateOf(uiSettings.rtmpUrl) }
     var rtmpBufferMs by rememberSaveable { mutableStateOf(uiSettings.rtmpBufferMs) }
@@ -364,7 +363,7 @@ private fun UsbCameraScreen() {
     }
     LaunchedEffect(
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
-        container, confirmStopOutputs, httpUploadEnabled, httpUploadUrl, httpUploadChunkSeconds, httpUploadCacheSeconds,
+        container, confirmStopOutputs, httpUploadEnabled, httpUploadUrl, httpUploadCacheSeconds,
         rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, encoderComplexity, encoderProfile, encoderLevel, audioRate,
         bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, yuvEncoderInput, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -391,7 +390,6 @@ private fun UsbCameraScreen() {
             confirmStopOutputs = confirmStopOutputs,
             httpUploadEnabled = httpUploadEnabled,
             httpUploadUrl = httpUploadUrl.trim(),
-            httpUploadChunkSeconds = httpUploadChunkSeconds,
             httpUploadCacheSeconds = httpUploadCacheSeconds,
             rtmpUrl = rtmpUrl,
             rtmpBufferMs = rtmpBufferMs,
@@ -746,7 +744,7 @@ private fun UsbCameraScreen() {
             idlePreview = null
             val config = usbRecordingConfig(
                 context, device, effectiveMode, testCardSettings, captureAudioEnabled, audioInput, systemAudioInput, captureUacDevice, uacBitDepth, audioRate, bufferFrames, receiveTransferCount, container,
-                requested == UsbAction.STREAM, httpUploadEnabled, httpUploadUrl.trim(), httpUploadChunkSeconds,
+                requested == UsbAction.STREAM, httpUploadEnabled, httpUploadUrl.trim(),
                 httpUploadCacheSeconds, requested == UsbAction.RTMP, rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds,
                 videoCodec, bitrateMode,
                 (videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000) * 1_000,
@@ -1186,11 +1184,9 @@ private fun UsbCameraScreen() {
                         modifier = Modifier.fillMaxWidth(), label = { Text("HTTP 上传地址（多服务器每行一个）") },
                         placeholder = { Text("http://服务器:8080/upload/live") },
                         isError = !validHttpUploadUrl(httpUploadUrl.trim()))
-                    UsbSettingChoice("上传分块时长", listOf(1, 2, 3, 5), httpUploadChunkSeconds,
-                        !recording && outputControlsEnabled, { "$it 秒" }) { httpUploadChunkSeconds = it }
                     UsbSettingChoice("断线补传缓存", listOf(30, 60, 90, 120, 180, 300), httpUploadCacheSeconds,
                         !recording && outputControlsEnabled, { "$it 秒" }) { httpUploadCacheSeconds = it }
-                    Text("默认 1 秒一块、60 秒内存缓存（最多 256 MiB）。缓存满或块过期时淘汰最旧块，继续串流；停止串流会立即取消上传并清空缓存。服务端默认延迟 10 秒、待播上限 20 秒，TS 原样透传。",
+                    Text("固定 1 秒一块，默认 60 秒内存缓存（最多 256 MiB）。缓存满或块过期时淘汰最旧块，继续串流；停止串流会立即取消上传并清空缓存。服务端默认延迟 10 秒、待播上限 20 秒，TS 原样透传。",
                         style = MaterialTheme.typography.bodySmall)
                     if (httpUploadUrls(httpUploadUrl).size > 1) Text(
                         "多服务器自动分流：根据接收速度分配，慢块自动转投。所有地址使用相同流名称；服务器启用 store 模式，接收端启用 merge 模式后打开其播放地址。",
@@ -1357,7 +1353,7 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                uacDevice: UsbAudioDevice?, uacBitDepth: UsbAudioBitDepth,
                                audioRate: Int, bufferFrames: Int, receiveTransferCount: Int, container: ContainerFormat,
                                httpEnabled: Boolean, httpUploadEnabled: Boolean, httpUploadUrl: String,
-                               httpUploadChunkSeconds: Int, httpUploadCacheSeconds: Int,
+                               httpUploadCacheSeconds: Int,
                                rtmpEnabled: Boolean, rtmpUrl: String, rtmpBufferMs: Int,
                                rtmpSendTimeoutSeconds: Int, videoCodec: VideoCodec,
                                bitrateMode: VideoBitrateMode, videoBitrate: Int, audioBitrate: Int,
@@ -1422,7 +1418,6 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         httpStreamEnabled = httpEnabled,
         httpUploadEnabled = httpUploadEnabled,
         httpUploadUrl = httpUploadUrl,
-        httpUploadChunkSeconds = httpUploadChunkSeconds.coerceIn(1, 5),
         httpUploadCacheSeconds = httpUploadCacheSeconds.coerceIn(30, 300),
         httpServiceOnly = httpEnabled || rtmpEnabled,
         rtmpEnabled = rtmpEnabled,

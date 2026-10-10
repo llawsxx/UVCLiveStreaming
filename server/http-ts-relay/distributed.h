@@ -136,9 +136,9 @@ public:
             const auto session = request.headers.find("x-rescue-session"), sequence = request.headers.find("x-rescue-sequence");
             if (session != request.headers.end() && sequence != request.headers.end() && identifier(session->second)) {
                 const auto seq = number(sequence->second, std::numeric_limits<int64_t>::max() / 2);
-                if (chunks.count(Key{session->second, seq})) {
-                    rescue_session = session->second; rescue_sequence = seq; rescue_time = Clock::now();
-                }
+                // Forward missing-block requests too: the original store may be unreachable
+                // from merge. The sender owns the session/sequence history and validates it.
+                rescue_session = session->second; rescue_sequence = seq; rescue_time = Clock::now();
             }
             std::ostringstream list;
             list << "TS-CHUNKS 1\n";

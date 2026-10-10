@@ -83,6 +83,10 @@ def protocol(binary):
         headers = get(a, "/status/live")[1]
         assert headers["X-Download-Rate-Bps"] == "125000"
         assert headers["X-Rescue-Sequence"] == "0"
+        # A healthy store must relay a request even when the missing block lives elsewhere.
+        assert get(a, "/chunks/live/ordered/99")[0] == 404
+        get(a, "/feedback/live", {"X-Rescue-Session": "ordered", "X-Rescue-Sequence": "99"})
+        assert get(a, "/status/live")[1]["X-Rescue-Sequence"] == "99"
         with relay(binary, delay=.3, extra_args=merge_args(a, b)) as output:
             viewer = Playback(output, len(body) * 9, timeout=10)
             for seq in (3, 1, 5, 2, 4):
@@ -330,6 +334,58 @@ def production_single(binary, classes, stdlib, java, javac):
                     (" -> single-upstream merge" if mode == "store" else "") + ", two sessions, byte-exact", flush=True)
 
 
+def production_unreachable(binary, classes, stdlib, java, javac):
+    build = Path(__file__).resolve().parents[1] / "build"
+    build.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=build) as temporary:
+        cp = os.pathsep.join([str(classes.resolve()), str(stdlib.resolve()), temporary])
+        subprocess.run([str(javac), "-cp", cp, "-d", temporary,
+                        str(Path(__file__).with_name("CrossStoreRescueHarness.java"))], check=True)
+        for offline_upstream in (False, True):
+            with contextlib.ExitStack() as stack:
+                a = stack.enter_context(relay(binary, extra_args=["--mode", "store"]))
+                b = stack.enter_context(relay(binary, extra_args=["--mode", "store"]))
+                sender = subprocess.Popen([str(java), "-cp", cp, "CrossStoreRescueHarness",
+                    f"http://127.0.0.1:{a}/upload/live", f"http://127.0.0.1:{b}/upload/live"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                try:
+                    ready = sender.stdout.readline().strip()
+                    assert ready == "READY: 0,2 on A; 1 on B", ready
+                    assert get(a, "/chunks/live/cross-store-test/1")[0] == 404
+                    assert get(b, "/chunks/live/cross-store-test/1")[0] == 200
+                    unavailable = None
+                    if offline_upstream:
+                        # Bound without listening: unreachable from merge while the phone still uploads to real B.
+                        reserved = stack.enter_context(socket.socket())
+                        reserved.bind(("127.0.0.1", 0))
+                        unavailable = reserved.getsockname()[1]
+                    logs = []
+                    output = stack.enter_context(relay(binary, delay=.2, logs=logs,
+                        extra_args=merge_args(a, unavailable, gap=8)))
+                    viewer = Playback(output, 3 * len(ts(1)), timeout=15)
+                    try:
+                        assert viewer.finish(timeout=15) == b"".join(ts(tag) for tag in (1, 2, 3))
+                    except AssertionError:
+                        print("Cross-store test failure: received bytes=", len(viewer.output), "merge logs=", logs, flush=True)
+                        raise
+                    remaining = sender.communicate(timeout=15)[0]
+                    assert sender.returncode == 0, remaining
+                    assert "PASS: cross-store rescue" in remaining, remaining
+                    copied = get(a, "/chunks/live/cross-store-test/1")
+                    assert copied[2] == ts(2)
+                    assert copied[1]["X-Redirect-From"] == f"http://127.0.0.1:{b}/upload/live"
+                    assert copied[1]["X-Redirect-Reason"] == "download-slow"
+                    assert any("phase=received" in line and "seq=1 " in line for line in logs), logs
+                    assert not any("skipped after timeout" in line for line in logs), logs
+                finally:
+                    if sender.poll() is None:
+                        sender.kill()
+                        sender.communicate()
+            print("PASS: production phone recovers missing B block through A, byte-exact; " +
+                  ("second merge upstream unreachable" if offline_upstream else "merge configured with only A"), flush=True)
+
+
 def production(binary, classes, stdlib, slow, java, javac):
     with contextlib.ExitStack() as stack:
         a = stack.enter_context(relay(binary, extra_args=["--mode", "store"]))
@@ -381,7 +437,7 @@ if __name__ == "__main__":
     parser.add_argument("--kotlin-stdlib", type=Path)
     parser.add_argument("--java", type=Path, default=Path("java"))
     parser.add_argument("--javac", type=Path, default=Path("javac"))
-    parser.add_argument("--case", choices=["all", "protocol", "network", "join", "single", "normal", "slow"], default="all")
+    parser.add_argument("--case", choices=["all", "protocol", "network", "join", "single", "normal", "slow", "unreachable"], default="all")
     args = parser.parse_args()
     if args.case in ("all", "protocol"):
         protocol(args.binary.resolve())
@@ -397,3 +453,5 @@ if __name__ == "__main__":
             production(args.binary.resolve(), args.android_classes, args.kotlin_stdlib, False, args.java, args.javac)
         if args.case in ("all", "slow"):
             production(args.binary.resolve(), args.android_classes, args.kotlin_stdlib, True, args.java, args.javac)
+        if args.case in ("all", "unreachable"):
+            production_unreachable(args.binary.resolve(), args.android_classes, args.kotlin_stdlib, args.java, args.javac)

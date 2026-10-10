@@ -35,7 +35,6 @@ internal data class TsUploadBlock(
 
 /** Splits complete TS packet batches by elapsed monotonic time; never edits the TS bytes. */
 internal class TsUploadChunker(
-    seconds: Int,
     private val emit: (TsUploadBlock) -> Unit,
     private val clockNs: () -> Long = System::nanoTime,
     val session: String = UUID.randomUUID().toString(),
@@ -43,7 +42,7 @@ internal class TsUploadChunker(
     private class Buffer : ByteArrayOutputStream() {
         val capacity: Int get() = buf.size
     }
-    private val intervalNs = seconds.coerceIn(1, 5) * 1_000_000_000L
+    private val intervalNs = 1_000_000_000L
     private var bytes = Buffer()
     private var startNs: Long? = null
     private var originNs: Long? = null
@@ -169,13 +168,13 @@ internal class TsUploadQueue(private val maxBytes: Long = 256L * 1024 * 1024,
 }
 
 internal class HttpTsUploadSink(
-    url: String, seconds: Int, private val cacheSeconds: Int,
+    url: String, private val cacheSeconds: Int,
     private val onNotice: (String) -> Unit,
 ) : Closeable {
     private val worker: HttpUploadTransport = if (httpUploadUrls(url).size > 1)
         DistributedHttpTsUploadWorker(httpUploadUrls(url), cacheSeconds, onNotice)
         else HttpTsUploadWorker(url.trim(), cacheSeconds, onNotice)
-    private val chunker = TsUploadChunker(seconds, { worker.enqueue(it, cacheSeconds) })
+    private val chunker = TsUploadChunker({ worker.enqueue(it, cacheSeconds) })
     val bytesSent: Long get() = worker.bytesAcknowledged.get()
     internal val pendingBlocks: Int get() = worker.pendingBlocks
     val stats: HttpUploadStats

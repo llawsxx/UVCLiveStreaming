@@ -27,6 +27,7 @@ internal class DistributedHttpTsUploadWorker(
     private class Pending(val block: TsUploadBlock, val alreadyAcknowledged: Boolean = false, val rescuedNs: Long = 0) {
         var destination: Destination? = null
         var lastDestination: Destination? = null
+        var rescueDestination: Destination? = null
         var retry = false
         var redirectReason = HttpUploadRedirectReason.UPLOAD_FAILURE
         var redirect: HttpUploadRedirectStats? = null
@@ -104,7 +105,10 @@ internal class DistributedHttpTsUploadWorker(
             var free = destinations.filter { !it.busy }
             // Wait for a healthy alternative even when it is busy/paced; re-posting to the same store
             // cannot rescue a block whose download path is stalled.
-            if (item?.lastDestination != null && destinations.any {
+            if (item?.rescueDestination != null) {
+                // This store is reachable by merge and is asking for a copy it does not own.
+                free = free.filter { it === item.rescueDestination }
+            } else if (item?.lastDestination != null && destinations.any {
                 it !== item.lastDestination && (it.failures == 0 || it.availableNs <= now)
             })
                 free = free.filter { it !== item.lastDestination }
@@ -158,6 +162,7 @@ internal class DistributedHttpTsUploadWorker(
                     redirectState(item, HttpUploadRedirectState.FAILED)
                     item.destination = null
                     item.lastDestination = target
+                    item.rescueDestination = null
                     item.retry = true
                     item.redirectReason = HttpUploadRedirectReason.UPLOAD_FAILURE
                     target.failures++
@@ -198,11 +203,12 @@ internal class DistributedHttpTsUploadWorker(
                         }
                         val saved = history[sequence]
                         val now = System.nanoTime()
-                        if (saved != null && saved.block.session == session && saved.destination === target &&
+                        if (saved != null && saved.block.session == session &&
                             now - saved.rescuedNs >= 5_000_000_000L && !pending.containsKey(sequence)) {
                             history.remove(sequence)
                             pending[saved.block.sequence] = Pending(saved.block, true, now).apply {
-                                lastDestination = target; retry = true
+                                lastDestination = saved.destination; retry = true
+                                if (saved.destination !== target) rescueDestination = target
                                 redirectReason = HttpUploadRedirectReason.SLOW_DOWNLOAD
                             }
                             lock.notifyAll()

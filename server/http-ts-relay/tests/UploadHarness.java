@@ -16,7 +16,7 @@ public class UploadHarness {
         }
     }
     public static void main(String[] args) throws Exception {
-        HttpTsUploadSink first = new HttpTsUploadSink(args[1], 1, 60,
+        HttpTsUploadSink first = new HttpTsUploadSink(args[1], 60,
             message -> { System.out.println(message); return Unit.INSTANCE; });
         if (args.length > 2 && args[2].equals("stall")) {
             byte[] large = new byte[188 * 70000];
@@ -30,7 +30,7 @@ public class UploadHarness {
             first.write(ts(3));
             waitForConfirmed(first, 2L * 188 * 128);
             first.close();
-            HttpTsUploadSink second = new HttpTsUploadSink(args[1], 1, 60,
+            HttpTsUploadSink second = new HttpTsUploadSink(args[1], 60,
                 message -> { System.out.println(message); return Unit.INSTANCE; });
             second.write(ts(4)); Thread.sleep(1100);
             second.write(ts(5)); Thread.sleep(1100);
