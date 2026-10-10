@@ -9,7 +9,7 @@ internal val VideoCodec.encoderMime: String get() =
 
 internal fun encoderBitrateMode(config: RecordingConfig, supports: (Int) -> Boolean): Int? {
     config.videoBitrateMode.mediaFormatValue?.let { return it }
-    if (!config.httpUploadEnabled || !config.httpAutoBitrateEnabled) return null
+    if (!(config.httpUploadEnabled && config.httpAutoBitrateEnabled) && !config.rtmpAutoBitrateEnabled) return null
     return listOf(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
         MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR).firstOrNull(supports)
 }

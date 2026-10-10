@@ -98,6 +98,7 @@ internal class UsbEncodedOutputFactory(
     }
 
     private class RtmpOutput(private val sink: RtmpStreamSink) : EncodedOutput<MediaFormat> {
+        override val rtmpUploadStats: RtmpUploadStats get() = sink.snapshot()
         override val bytesStreamed: Long get() = sink.bytesSent
         override val reconnectCount: Long get() = sink.reconnectCount
         override fun setVideoFormat(format: MediaFormat) = sink.setVideoFormat(format)

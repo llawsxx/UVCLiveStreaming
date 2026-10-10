@@ -8,6 +8,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class EncodedOutputRouterTest {
+    @Test fun standaloneRtmpPressureIsVisibleUntilOutputIsDetached() {
+        val router = router()
+        val telemetry = RtmpUploadStats("standalone", true, 0, 1024, 600,
+            3500, 4000, 200, 3, 1)
+        router.attach(CaptureOutput.RTMP, object : Output() {
+            override val rtmpUploadStats get() = telemetry
+        })
+        assertSame(telemetry, router.snapshot()[CaptureOutput.RTMP]!!.rtmpUploadStats)
+        assertEquals(600L, router.snapshot()[CaptureOutput.RTMP]!!.rtmpUploadStats!!.pendingBytes)
+        assertNull(router.snapshot()[CaptureOutput.HTTP])
+        router.detach(CaptureOutput.RTMP)
+        assertTrue(router.snapshot().isEmpty())
+        router.close()
+    }
     private open class Output : EncodedOutput<String> {
         val formats = mutableListOf<String>()
         val samples = mutableListOf<EncodedSample>()

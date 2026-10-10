@@ -391,6 +391,8 @@ data class RecordingConfig(
     /** RTMP is available for USB capture and uses H.264/HEVC + AAC messages. */
     val rtmpEnabled: Boolean = false,
     val rtmpUrl: String = "",
+    val rtmpAutoBitrateEnabled: Boolean = false,
+    val rtmpMinVideoBitrate: Int = 1_000_000,
     /** Send queue capacity expressed as milliseconds of the configured encoding bitrate. */
     val rtmpBufferMs: Int = 5_000,
     val rtmpSendTimeoutSeconds: Int = 10,
@@ -625,11 +627,23 @@ data class RecordingStats(
     val recentFps: Double? = null,
     /** Recent USB video endpoint throughput; includes UVC headers, excludes audio/bus overhead. */
     val usbVideoReceiveBitsPerSecond: Double? = null,
-    val httpAutoBitrate: HttpAutoBitrateStats? = null,
+    val httpAutoBitrate: VideoAutoBitrateStats? = null,
+    val rtmpAutoBitrate: VideoAutoBitrateStats? = null,
+    val rtmpUploadStats: RtmpUploadStats? = null,
 )
 
-data class HttpAutoBitrateStats(val targetBitsPerSecond: Int, val minimumBitsPerSecond: Int,
-    val maximumBitsPerSecond: Int, val adjustments: Long, val status: String)
+data class VideoAutoBitrateStats(val targetBitsPerSecond: Int, val minimumBitsPerSecond: Int,
+    val maximumBitsPerSecond: Int, val adjustments: Long, val status: String,
+    /** This output's request before another output limits the shared encoder. */
+    val requestedBitsPerSecond: Int = targetBitsPerSecond)
+
+/** Bytes accepted by TCP are not confirmations from the RTMP server. Includes the in-flight write. */
+data class RtmpUploadStats(val sessionId: String, val connected: Boolean, val queuedBytes: Long,
+    val queueLimitBytes: Long, val inFlightBytes: Long, val inFlightAgeMs: Long,
+    val oldestPendingAgeMs: Long, val sentMediaBytes: Long, val droppedPackets: Long,
+    val connectionFailures: Long) {
+    val pendingBytes: Long get() = queuedBytes + inFlightBytes
+}
 
 data class CameraExposureState(
     val cameraId: String,

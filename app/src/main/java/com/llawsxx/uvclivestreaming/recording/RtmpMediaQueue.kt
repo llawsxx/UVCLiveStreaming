@@ -7,6 +7,7 @@ internal data class RtmpMediaPacket(
     val ptsUs: Long,
     val payload: ByteArray,
     val keyFrame: Boolean = false,
+    val queuedAtNs: Long = System.nanoTime(),
 ) {
     val timestampMs: Int get() = (ptsUs / 1_000L).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
 }
@@ -14,7 +15,11 @@ internal data class RtmpMediaPacket(
 /** Access is serialized by RtmpStreamSink's lock. Each connection starts with fresh media. */
 internal class RtmpMediaQueue(private val maxBytes: Long) {
     private val packets = ArrayDeque<RtmpMediaPacket>()
-    private var queuedBytes = 0L
+    var queuedBytes = 0L
+        private set
+    var droppedPackets = 0L
+        private set
+    val oldestQueuedNs: Long? get() = packets.minOfOrNull { it.queuedAtNs }
     private var generation = 0L
     private var connected = false
     private var originUs: Long? = null
@@ -50,7 +55,7 @@ internal class RtmpMediaQueue(private val maxBytes: Long) {
         // Late audio can arrive after the keyframe but describe samples from before it.
         if (ptsUs < 0L) return false
         if (packet.type == 9 && waitingForVideoKeyFrame) {
-            if (!packet.keyFrame) return false
+            if (!packet.keyFrame) { droppedPackets++; return false }
             waitingForVideoKeyFrame = false
         }
         val queuedPacket = packet.copy(ptsUs = ptsUs)
@@ -68,6 +73,7 @@ internal class RtmpMediaQueue(private val maxBytes: Long) {
             if (firstVideo == null) {
                 // Audio has no video prediction dependencies; bound its backlog independently.
                 queuedBytes -= packets.removeFirst().payload.size
+                droppedPackets++
                 continue
             }
             if (firstVideo.keyFrame && firstVideo.payload.size > maxBytes &&
@@ -80,6 +86,7 @@ internal class RtmpMediaQueue(private val maxBytes: Long) {
                         if (next.type == 8) {
                             queuedBytes -= next.payload.size
                             audio.remove()
+                            droppedPackets++
                             break
                         }
                     }
@@ -98,6 +105,7 @@ internal class RtmpMediaQueue(private val maxBytes: Long) {
                 }
                 queuedBytes -= next.payload.size
                 iterator.remove()
+                droppedPackets++
                 removedVideo = true
             }
             if (!foundKeyFrame) {

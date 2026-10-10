@@ -4,6 +4,49 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RtmpMediaQueueTest {
+    @Test fun pressureUsesMonotonicArrivalTimeAndTracksRemovedBytes() {
+        val queue = RtmpMediaQueue(1024)
+        queue.beginSession()
+        val generation = checkNotNull(queue.currentGeneration)
+        queue.offer(RtmpMediaPacket(9, 1_000_000, ByteArray(30), true, 100L), generation)
+        queue.offer(RtmpMediaPacket(9, 1_040_000, ByteArray(20), false, 200L), generation)
+        queue.offer(RtmpMediaPacket(8, 1_020_000, ByteArray(10), false, 300L), generation)
+        assertEquals(60L, queue.queuedBytes)
+        assertEquals(100L, queue.oldestQueuedNs)
+        assertEquals(100L, queue.poll()!!.queuedAtNs)
+        assertEquals(30L, queue.queuedBytes)
+        assertEquals(200L, queue.oldestQueuedNs)
+        queue.disconnect()
+        assertEquals(0L, queue.queuedBytes)
+        assertNull(queue.oldestQueuedNs)
+        assertEquals(0L, queue.droppedPackets) // Reconnect flushing is a separate failure signal.
+    }
+
+    @Test fun overflowCountsDiscardedVideoAndDependentFramesWithoutCountingStartupGating() {
+        val queue = RtmpMediaQueue(5)
+        queue.beginSession()
+        val generation = checkNotNull(queue.currentGeneration)
+        queue.offer(video(0), generation)
+        assertEquals(0L, queue.droppedPackets)
+        queue.offer(video(0, true), generation)
+        queue.offer(video(40_000), generation)
+        assertEquals(2L, queue.droppedPackets)
+        assertEquals(0L, queue.queuedBytes)
+        assertTrue(queue.takeKeyFrameRequest())
+        queue.offer(video(80_000), generation)
+        assertEquals(3L, queue.droppedPackets)
+        queue.offer(video(120_000, true), generation)
+        assertEquals(3L, queue.queuedBytes)
+        assertEquals(3L, queue.droppedPackets)
+    }
+
+    @Test fun oversizedKeyframeAloneDoesNotSignalCongestion() {
+        val queue = RtmpMediaQueue(1)
+        queue.beginSession()
+        assertTrue(queue.offer(video(0, true), checkNotNull(queue.currentGeneration)))
+        assertEquals(3L, queue.queuedBytes)
+        assertEquals(0L, queue.droppedPackets)
+    }
     private fun video(ptsUs: Long, keyFrame: Boolean = false) =
         RtmpMediaPacket(9, ptsUs, byteArrayOf(1, 2, 3), keyFrame)
     private fun audio(ptsUs: Long) = RtmpMediaPacket(8, ptsUs, byteArrayOf(4, 5))

@@ -40,7 +40,8 @@ Android USB camera recorder and streamer.
   count as original upload backlog. Resolution/FPS remain fixed; already encoded
   chunks retain their previous bitrate. The Output tab shows the target, bounds,
   adjustment count and reason. Simultaneous recording and RTMP share the changed
-  encoder bitrate; stopping HTTP restores the configured target. No relay update is
+  encoder bitrate; stopping HTTP restores the remaining adaptive output's target,
+  or the configured ceiling when none remains. No relay update is
   required. Actual bitrate response depends on the hardware encoder and bitrate mode.
   With adaptive bitrate enabled, the default bitrate mode selects supported CBR
   (VBR fallback); explicit VBR/CBR selections are respected. Some default/VBR rate
@@ -49,6 +50,21 @@ Android USB camera recorder and streamer.
 - Stop buttons for recording, HTTP and RTMP ask for confirmation by default.
   The saved "Confirm before stopping" setting in the Output tab can disable it.
 - RTMP H.264/HEVC (`hvc1`) + AAC publishing with reconnect.
+- Optional "RTMP 网络自适应视频码率" works with RTMP alone, independently of HTTP.
+  Enable it before starting capture; its saved floor defaults to 1000 kbps and the
+  video setting is the ceiling (the feature defaults off). Once per second, it
+  samples queue bytes, oldest pending age, the in-flight socket write, overflow
+  drops and connection failures. Sustained pressure reduces the target by 25%,
+  after at least five startup seconds and three pressure seconds, with at least
+  five seconds between adjustments. After 20 healthy seconds it probes a 10%
+  increase. Small buffers use overflow/occupancy signals; a blocked write is still
+  counted after its packet leaves the queue. Successful TCP writes are not RTMP
+  server acknowledgements or measured available bandwidth. Reconnect keeps the
+  reduced target, while stopping/restarting that output resets its controller.
+  HTTP and RTMP controllers independently request a bitrate; the shared encoder
+  uses the lower request, also affecting simultaneous recording. The Output tab
+  shows the effective target, each link's request, bounds, adjustment count and
+  status. Default mode prefers supported CBR; explicit bitrate modes are respected.
 - The main status and Output tab show RTMP reconnect attempts for the current
   publishing session. The first connection is excluded; restarting RTMP resets
   the count, and failed retries are included.

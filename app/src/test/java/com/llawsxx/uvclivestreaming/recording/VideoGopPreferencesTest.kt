@@ -6,6 +6,21 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VideoGopPreferencesTest {
+    @Test fun rtmpAdaptiveSettingsPersistIndependentlyAndClamp() {
+        val values = mutableMapOf<String, Any?>()
+        val prefs = preferences(values)
+        assertEquals(false, ConfigPreferences.load(prefs).rtmpAutoBitrateEnabled)
+        assertEquals(1_000_000, ConfigPreferences.load(prefs).rtmpMinVideoBitrate)
+        ConfigPreferences.save(prefs, RecordingConfig(rtmpAutoBitrateEnabled = true,
+            rtmpMinVideoBitrate = 700_000, httpAutoBitrateEnabled = false))
+        assertEquals(true, ConfigPreferences.load(prefs).rtmpAutoBitrateEnabled)
+        assertEquals(700_000, ConfigPreferences.load(prefs).rtmpMinVideoBitrate)
+        assertEquals(false, ConfigPreferences.load(prefs).httpAutoBitrateEnabled)
+        ConfigPreferences.save(prefs, RecordingConfig(rtmpMinVideoBitrate = 1))
+        assertEquals(100_000, ConfigPreferences.load(prefs).rtmpMinVideoBitrate)
+        values["rtmpMinVideoBitrate"] = Int.MAX_VALUE
+        assertEquals(100_000_000, ConfigPreferences.load(prefs).rtmpMinVideoBitrate)
+    }
     @Test fun encoderRequestsPersistAndDefaultsRemoveExplicitSettings() {
         val prefs = preferences(mutableMapOf())
         assertEquals(null, ConfigPreferences.load(prefs).videoEncoderComplexity)

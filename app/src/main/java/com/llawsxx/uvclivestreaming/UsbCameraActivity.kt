@@ -266,6 +266,8 @@ private fun UsbCameraScreen() {
     var httpAutoBitrateEnabled by rememberSaveable { mutableStateOf(uiSettings.httpAutoBitrateEnabled) }
     var httpMinVideoBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.httpMinVideoBitrateKbps) }
     var rtmpUrl by rememberSaveable { mutableStateOf(uiSettings.rtmpUrl) }
+    var rtmpAutoBitrateEnabled by rememberSaveable { mutableStateOf(uiSettings.rtmpAutoBitrateEnabled) }
+    var rtmpMinVideoBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.rtmpMinVideoBitrateKbps) }
     var rtmpBufferMs by rememberSaveable { mutableStateOf(uiSettings.rtmpBufferMs) }
     var rtmpSendTimeoutSeconds by rememberSaveable { mutableStateOf(uiSettings.rtmpSendTimeoutSeconds) }
     var videoBitrateKbps by rememberSaveable { mutableStateOf(uiSettings.videoBitrateKbps) }
@@ -368,6 +370,7 @@ private fun UsbCameraScreen() {
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, confirmStopOutputs, httpUploadEnabled, httpUploadUrl, httpUploadCacheSeconds,
         httpAutoBitrateEnabled, httpMinVideoBitrateKbps,
+        rtmpAutoBitrateEnabled, rtmpMinVideoBitrateKbps,
         rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, encoderComplexity, encoderProfile, encoderLevel, audioRate,
         bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, yuvEncoderInput, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
@@ -398,6 +401,8 @@ private fun UsbCameraScreen() {
             httpAutoBitrateEnabled = httpAutoBitrateEnabled,
             httpMinVideoBitrateKbps = httpMinVideoBitrateKbps,
             rtmpUrl = rtmpUrl,
+            rtmpAutoBitrateEnabled = rtmpAutoBitrateEnabled,
+            rtmpMinVideoBitrateKbps = rtmpMinVideoBitrateKbps,
             rtmpBufferMs = rtmpBufferMs,
             rtmpSendTimeoutSeconds = rtmpSendTimeoutSeconds,
             videoBitrateKbps = videoBitrateKbps,
@@ -764,10 +769,15 @@ private fun UsbCameraScreen() {
                 return@LaunchedEffect
             }
             val adaptiveMinimumKbps = httpMinVideoBitrateKbps.toIntOrNull()
+            val rtmpMinimumKbps = rtmpMinVideoBitrateKbps.toIntOrNull()
             val videoMaximumKbps = videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000
             if (httpUploadEnabled && httpAutoBitrateEnabled &&
                 (adaptiveMinimumKbps == null || adaptiveMinimumKbps !in 100..videoMaximumKbps)) {
                 message = "自动码率的最低值请输入 100～$videoMaximumKbps kbps（不能高于视频码率）"
+                return@LaunchedEffect
+            }
+            if (rtmpAutoBitrateEnabled && (rtmpMinimumKbps == null || rtmpMinimumKbps !in 100..videoMaximumKbps)) {
+                message = "RTMP 自动码率的最低值请输入 100～$videoMaximumKbps kbps（不能高于视频码率）"
                 return@LaunchedEffect
             }
             previewRequested = false
@@ -792,6 +802,8 @@ private fun UsbCameraScreen() {
                 videoEncoderLevel = encoderLevel.takeIf { it > 0 },
                 httpAutoBitrateEnabled = httpAutoBitrateEnabled,
                 httpMinVideoBitrate = (adaptiveMinimumKbps ?: 1000).coerceIn(100, videoMaximumKbps) * 1000,
+                rtmpAutoBitrateEnabled = rtmpAutoBitrateEnabled,
+                rtmpMinVideoBitrate = (rtmpMinimumKbps ?: 1000).coerceIn(100, videoMaximumKbps) * 1000,
             )
             ConfigPreferences.save(context, config)
             previous?.stop {
@@ -1264,6 +1276,23 @@ private fun UsbCameraScreen() {
                     label = { Text("RTMP 地址（可选）") },
                     placeholder = { Text("rtmp://服务器/app/串流密钥") },
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = rtmpAutoBitrateEnabled, onCheckedChange = { rtmpAutoBitrateEnabled = it },
+                        enabled = !recording && outputControlsEnabled)
+                    Text("RTMP 网络自适应视频码率")
+                }
+                if (rtmpAutoBitrateEnabled) {
+                    val minimum = rtmpMinVideoBitrateKbps.toIntOrNull()
+                    val maximum = videoBitrateKbps.toIntOrNull()?.coerceIn(100, 100_000) ?: 12_000
+                    OutlinedTextField(rtmpMinVideoBitrateKbps, { rtmpMinVideoBitrateKbps = it.filter(Char::isDigit) },
+                        enabled = !recording && outputControlsEnabled, singleLine = true,
+                        label = { Text("RTMP 最低视频码率（kbps）") }, modifier = Modifier.fillMaxWidth(),
+                        isError = minimum == null || minimum !in 100..maximum)
+                    Text("单独 RTMP 推流也适用。最高码率取视频设置；发送持续拥堵、丢帧或断线时降低，稳定 20 秒后逐步提高。分辨率与帧率保持当前设置。",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("默认码率模式优先使用 CBR。同时开启 HTTP 自适应时采用两者较低的目标；共享编码器的录像也会随之调整。请在开始采集前设置。",
+                        style = MaterialTheme.typography.bodySmall)
+                }
                 UsbSettingChoice("RTMP 推流缓存", listOf(100, 250, 500, 1_000, 2_000, 3_000, 5_000, 10_000, 15_000, 30_000),
                     rtmpBufferMs, !rtmpStreaming && outputControlsEnabled,
                     { "${it / 1_000.0} 秒" }) { rtmpBufferMs = it }
@@ -1296,10 +1325,22 @@ private fun UsbCameraScreen() {
                         if (streaming) " · 串流 ${String.format(Locale.US, "%.0f", streamRate)} kbps" else "")
                     if (stats.rtmpStreaming) Text("RTMP 重连尝试：${stats.rtmpReconnectCount} 次（不含首次连接）",
                         style = MaterialTheme.typography.bodySmall)
+                    stats.rtmpAutoBitrate?.let { adaptive ->
+                        Text(String.format(Locale.US, "RTMP 自动码率目标：%.0f kbps · 本链路请求 %.0f kbps · 范围 %.0f～%.0f kbps · 调整 %d 次",
+                            adaptive.targetBitsPerSecond / 1000.0, adaptive.requestedBitsPerSecond / 1000.0,
+                            adaptive.minimumBitsPerSecond / 1000.0, adaptive.maximumBitsPerSecond / 1000.0, adaptive.adjustments),
+                            style = MaterialTheme.typography.bodySmall)
+                        Text(adaptive.status, style = MaterialTheme.typography.bodySmall)
+                    }
+                    stats.rtmpUploadStats?.takeIf { stats.rtmpAutoBitrate != null }?.let { upload ->
+                        Text(String.format(Locale.US, "RTMP 待发送：%.1f KiB · 最旧数据 %.2f 秒 · 发送阻塞 %.2f 秒 · 缓存丢包 %d 个",
+                            upload.pendingBytes / 1024.0, upload.oldestPendingAgeMs / 1000.0,
+                            upload.inFlightAgeMs / 1000.0, upload.droppedPackets), style = MaterialTheme.typography.bodySmall)
+                    }
                     stats.httpUploadStats?.let { upload ->
                         stats.httpAutoBitrate?.let { adaptive ->
-                            Text(String.format(Locale.US, "自动码率目标：%.0f kbps · 范围 %.0f～%.0f kbps · 调整 %d 次",
-                                adaptive.targetBitsPerSecond / 1000.0, adaptive.minimumBitsPerSecond / 1000.0,
+                            Text(String.format(Locale.US, "HTTP 自动码率目标：%.0f kbps · 本链路请求 %.0f kbps · 范围 %.0f～%.0f kbps · 调整 %d 次",
+                                adaptive.targetBitsPerSecond / 1000.0, adaptive.requestedBitsPerSecond / 1000.0, adaptive.minimumBitsPerSecond / 1000.0,
                                 adaptive.maximumBitsPerSecond / 1000.0, adaptive.adjustments),
                                 style = MaterialTheme.typography.bodySmall)
                             Text(adaptive.status, style = MaterialTheme.typography.bodySmall)
@@ -1441,7 +1482,8 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                rewriteColorTransfer: VideoColorTransfer,
                                 videoEncoderComplexity: Int? = null, videoEncoderProfile: Int? = null,
                                 videoEncoderLevel: Int? = null, httpAutoBitrateEnabled: Boolean = false,
-                                httpMinVideoBitrate: Int = 1_000_000): RecordingConfig {
+                                httpMinVideoBitrate: Int = 1_000_000, rtmpAutoBitrateEnabled: Boolean = false,
+                                rtmpMinVideoBitrate: Int = 1_000_000): RecordingConfig {
     val saved = ConfigPreferences.load(context)
     return RecordingConfig(
         mode = if (audio) RecordingMode.AUDIO_VIDEO else RecordingMode.VIDEO,
@@ -1496,6 +1538,8 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         httpMinVideoBitrate = httpMinVideoBitrate.coerceIn(100_000, videoBitrate.coerceAtLeast(100_000)),
         httpServiceOnly = httpEnabled || rtmpEnabled,
         rtmpEnabled = rtmpEnabled,
+        rtmpAutoBitrateEnabled = rtmpAutoBitrateEnabled,
+        rtmpMinVideoBitrate = rtmpMinVideoBitrate.coerceIn(100_000, videoBitrate.coerceAtLeast(100_000)),
         rtmpUrl = rtmpUrl,
         rtmpBufferMs = rtmpBufferMs.coerceIn(100, 30_000),
         rtmpSendTimeoutSeconds = rtmpSendTimeoutSeconds.coerceIn(3, 30),

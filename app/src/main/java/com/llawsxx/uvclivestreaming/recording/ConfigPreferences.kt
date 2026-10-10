@@ -243,6 +243,8 @@ object ConfigPreferences {
             httpMinVideoBitrate = p.getInt("httpMinVideoBitrate", 1_000_000).coerceIn(100_000, 100_000_000),
             rtmpEnabled = p.getBoolean("rtmpEnabled", false),
             rtmpUrl = p.getString("rtmpUrl", "").orEmpty(),
+            rtmpAutoBitrateEnabled = p.getBoolean("rtmpAutoBitrateEnabled", false),
+            rtmpMinVideoBitrate = p.getInt("rtmpMinVideoBitrate", 1_000_000).coerceIn(100_000, 100_000_000),
             rtmpBufferMs = p.getInt("rtmpBufferMs", 5_000).coerceIn(100, 30_000),
             rtmpSendTimeoutSeconds = p.getInt("rtmpSendTimeoutSeconds", 10).coerceIn(3, 30),
             rtmpReconnectDelaySeconds = p.getInt("rtmpReconnectDelaySeconds", 3).coerceIn(1, 30),
@@ -421,6 +423,8 @@ object ConfigPreferences {
             .putInt("httpMinVideoBitrate", c.httpMinVideoBitrate.coerceIn(100_000, 100_000_000))
             .putBoolean("rtmpEnabled", c.rtmpEnabled)
             .putString("rtmpUrl", c.rtmpUrl)
+            .putBoolean("rtmpAutoBitrateEnabled", c.rtmpAutoBitrateEnabled)
+            .putInt("rtmpMinVideoBitrate", c.rtmpMinVideoBitrate.coerceIn(100_000, 100_000_000))
             .putInt("rtmpBufferMs", c.rtmpBufferMs.coerceIn(100, 30_000))
             .putInt("rtmpSendTimeoutSeconds", c.rtmpSendTimeoutSeconds.coerceIn(3, 30))
             .putInt("rtmpReconnectDelaySeconds", c.rtmpReconnectDelaySeconds.coerceIn(1, 30))

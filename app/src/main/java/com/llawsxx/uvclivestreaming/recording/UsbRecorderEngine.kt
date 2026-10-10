@@ -70,11 +70,10 @@ class UsbRecorderEngine(
     private var videoCodec: MediaCodec? = null
     private val codecParametersLock = Any()
     @Volatile private var currentVideoBitrate = config.videoBitrate.coerceAtLeast(100_000)
-    @Volatile private var adaptiveBitrateStats: HttpAutoBitrateStats? = null
-    private var adaptiveBitrateController: HttpAdaptiveBitrateController? = null
-    private var adaptiveBitrateSession: String? = null
+    @Volatile private var adaptiveBitrateStats: VideoAutoBitrateStats? = null
+    @Volatile private var rtmpAdaptiveBitrateStats: VideoAutoBitrateStats? = null
+    private var adaptiveBitrateController: VideoAdaptiveBitrateController? = null
     private var adaptiveBitrateError: String? = null
-    private var adaptiveBitrateAdjustments = 0L
     private var audioCodec: MediaCodec? = null
     private val outputs = EncodedOutputRouter<MediaFormat>(
         muxingQueueSize = config.muxingQueueSize,
@@ -302,9 +301,9 @@ class UsbRecorderEngine(
                 applyEncoderColorSettings(colors)
             }
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            if (config.httpUploadEnabled && config.httpAutoBitrateEnabled && config.videoBitrateMode == VideoBitrateMode.DEFAULT)
+            if (((config.httpUploadEnabled && config.httpAutoBitrateEnabled) || config.rtmpAutoBitrateEnabled) && config.videoBitrateMode == VideoBitrateMode.DEFAULT)
                 onNotice(if (bitrateMode == MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-                    "HTTP 自动码率使用 CBR 编码模式" else "HTTP 自动码率：当前编码器不支持 CBR，实际码率可能偏离目标")
+                    "自动码率使用 CBR 编码模式" else "自动码率：当前编码器不支持 CBR，实际码率可能偏离目标")
             encoderInputSurface = if (direct) null else codec.createInputSurface()
             Log.i("UsbVideoDiagnostics", "Encoder input=${if (direct) "YUV" else "Surface"} codec=${codec.name} " +
                 "standard=${colors.colorStandard.label} range=${colors.colorRange.label} " +
@@ -362,7 +361,7 @@ class UsbRecorderEngine(
                     lastRendered = rendered
                     lastEncoded = encoded
                 }
-                updateAdaptiveBitrate(nowNs, outputs.snapshot()[CaptureOutput.HTTP]?.httpUploadStats)
+                updateAdaptiveBitrate(nowNs, outputs.snapshot())
                 onStats(captureStats())
                 try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
             }
@@ -671,34 +670,23 @@ class UsbRecorderEngine(
         }.onFailure { if (running.get()) onNotice("已等待下一个视频关键帧") }
     }
 
-    private fun updateAdaptiveBitrate(nowNs: Long, upload: HttpUploadStats?) {
-        if (!config.httpAutoBitrateEnabled || !config.httpUploadEnabled) return
-        val maximum = config.videoBitrate.coerceAtLeast(100_000)
-        if (adaptiveBitrateSession != upload?.sessionId) {
-            adaptiveBitrateController = null
-            adaptiveBitrateSession = upload?.sessionId
-            adaptiveBitrateStats = null
-            adaptiveBitrateAdjustments = 0L
-            // Detaching HTTP restores the configured bitrate for remaining outputs.
-            if (currentVideoBitrate != maximum) applyVideoBitrate(maximum)
-        }
-        if (upload == null) return
-        val controller = adaptiveBitrateController ?: HttpAdaptiveBitrateController(maximum,
-            config.httpMinVideoBitrate, if (audioCaptureEnabled) config.audioBitrate else 0).also {
-            adaptiveBitrateController = it
-        }
+    private fun updateAdaptiveBitrate(nowNs: Long, active: Map<CaptureOutput, EncodedOutputInfo>) {
+        if (!(config.httpAutoBitrateEnabled && config.httpUploadEnabled) && !config.rtmpAutoBitrateEnabled) return
+        val controller = adaptiveBitrateController ?: VideoAdaptiveBitrateController(config,
+            if (audioCaptureEnabled) config.audioBitrate else 0).also { adaptiveBitrateController = it }
         if (adaptiveBitrateError == null) {
-            controller.sample(nowNs, upload)?.let { adjustment ->
-                if (applyVideoBitrate(adjustment.bitrate)) {
-                    adaptiveBitrateAdjustments++
-                    val notice = "HTTP 自动码率：${currentVideoBitrate / 1000} kbps；${adjustment.reason}"
-                    Log.i("HttpAdaptiveBitrate", notice)
-                    onNotice(notice)
-                }
+            controller.sample(nowNs, active[CaptureOutput.HTTP]?.httpUploadStats, active[CaptureOutput.RTMP]?.rtmpUploadStats)
+            if (controller.target != currentVideoBitrate && applyVideoBitrate(controller.target)) {
+                val notice = "自动视频码率：${currentVideoBitrate / 1000} kbps"
+                Log.i("VideoAdaptiveBitrate", notice)
+                onNotice(notice)
             }
         }
-        adaptiveBitrateStats = HttpAutoBitrateStats(currentVideoBitrate, controller.minimum, controller.maximum,
-            adaptiveBitrateAdjustments, adaptiveBitrateError ?: controller.status)
+        fun reported(stats: VideoAutoBitrateStats?) = stats?.copy(targetBitsPerSecond = currentVideoBitrate,
+            status = adaptiveBitrateError ?: (stats.status + if (currentVideoBitrate < stats.requestedBitsPerSecond)
+                "；共享编码器受另一推流限制" else ""))
+        adaptiveBitrateStats = reported(controller.httpStats)
+        rtmpAdaptiveBitrateStats = reported(controller.rtmpStats)
     }
 
     private fun applyVideoBitrate(bitrate: Int): Boolean {
@@ -750,6 +738,8 @@ class UsbRecorderEngine(
             rtmpReconnectCount = active[CaptureOutput.RTMP]?.reconnectCount ?: 0L,
             httpUploadStats = active[CaptureOutput.HTTP]?.httpUploadStats,
             httpAutoBitrate = adaptiveBitrateStats.takeIf { CaptureOutput.HTTP in active },
+            rtmpAutoBitrate = rtmpAdaptiveBitrateStats.takeIf { CaptureOutput.RTMP in active },
+            rtmpUploadStats = active[CaptureOutput.RTMP]?.rtmpUploadStats,
             outputChangePending = outputChanges.get() > 0,
             bytesStreamed = active.values.sumOf { it.bytesStreamed },
             streamBitrateBitsPerSecond = streamRate,

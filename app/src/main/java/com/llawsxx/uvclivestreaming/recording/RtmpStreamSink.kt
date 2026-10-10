@@ -43,6 +43,21 @@ internal class RtmpStreamSink(
     @Volatile private var connection: RtmpConnection? = null
     private val sentBytes = AtomicLong()
     private val reconnectAttempts = AtomicLong()
+    private val sessionId = java.util.UUID.randomUUID().toString()
+    private var inFlight: RtmpMediaPacket? = null
+    private var inFlightStartedNs = 0L
+    private var sentMediaBytes = 0L
+    private var connectionFailures = 0L
+
+    fun snapshot(): RtmpUploadStats = lock.withLock {
+        val nowNs = System.nanoTime()
+        val oldest = listOfNotNull(queue.oldestQueuedNs, inFlight?.queuedAtNs).minOrNull()
+        RtmpUploadStats(sessionId, queue.currentGeneration != null, queue.queuedBytes, maxQueuedBytes,
+            inFlight?.payload?.size?.toLong() ?: 0L,
+            if (inFlight != null) ((nowNs - inFlightStartedNs) / 1_000_000).coerceAtLeast(0) else 0L,
+            oldest?.let { ((nowNs - it) / 1_000_000).coerceAtLeast(0) } ?: 0L,
+            sentMediaBytes, queue.droppedPackets, connectionFailures)
+    }
 
     val bytesSent: Long get() = sentBytes.get()
     val reconnectCount: Long get() = reconnectAttempts.get()
@@ -164,13 +179,17 @@ internal class RtmpStreamSink(
                 connection!!.ensureActive()
                 val nextPacket = lock.withLock {
                     if (running && queue.isEmpty) changed.await(250, TimeUnit.MILLISECONDS)
-                    if (!running) null else queue.poll()
+                    if (!running) null else queue.poll()?.also {
+                        inFlight = it
+                        inFlightStartedNs = System.nanoTime()
+                    }
                 }
                 if (nextPacket == null) continue
                 val packet = nextPacket
                 sendMessage(connection!!, packet.type, packet.timestampMs, packet.payload, if (packet.type == 9) 6 else 4)
+                lock.withLock { sentMediaBytes += packet.payload.size; inFlight = null }
             } catch (error: Throwable) {
-                lock.withLock { queue.disconnect() }
+                lock.withLock { queue.disconnect(); inFlight = null; if (running) connectionFailures++ }
                 if (running) {
                     Log.e(TAG, "RTMP connection failed", error)
                     onNotice("RTMP 连接中断：${error.message ?: "网络错误"}，正在重连")
@@ -218,7 +237,7 @@ internal class RtmpStreamSink(
         worker?.interrupt()
         worker?.join(2_000)
         worker = null
-        lock.withLock { queue.disconnect() }
+        lock.withLock { queue.disconnect(); inFlight = null }
         closeSocket()
     }
 
