@@ -208,7 +208,7 @@ TCP 连接超时 5 秒，读响应超时 10 秒，单次 POST 总超时 15 秒�
 
 ## 服务端状态日志
 
-每次完整收到上传请求后打印 `[upload]`，每秒打印 `[status]`，断线或无客户端时也刷新。
+`relay` / `merge` 使用播放队列统计。每次完整收到上传请求后打印 `[upload]`，每秒打印 `[status]`，断线或无客户端时也刷新。
 例如：
 
 ```text
@@ -238,8 +238,29 @@ KiB 为 1024 字节，速度单位为 KiB/s；时长来自上传的块时长，�
 | `redirect_requests` | merge 请求补救的不同会话／分段数 |
 | `redirect_received` | merge 已下载、校验并采用的转投分段数；重复副本不计 |
 
-pending／播放统计用于 `relay` 和 `merge` 的播放队列；`store` 不播放，转投接收信息以 `[redirect] phase=stored` 为准。
+pending／播放统计用于 `relay` 和 `merge` 的播放队列。
 追赶时另输出 `[playback] event=catch-up`，包含跳转前后的 pending 秒数及累计次数。
+
+`store` 每秒输出实际分块存储和传输统计，例如：
+
+```text
+[status] mode=store session=abc seq=12 upload=512.00 KiB/s download=480.00 KiB/s cache=6656.00 KiB cached=13.00 s blocks=13 uploaded=6656.00 KiB downloaded=5760.00 KiB accepted=13 duplicates=0 expired=0 evicted=0 feedback=480.00 KiB/s redirect_requests=1 redirect_received=1 rescue=abc:10
+```
+
+`session/seq` 是最新会话已接收的最高序号；迟到的旧会话和旧序号补传不会让它回退。
+`upload` 是最近一个统计周期完整接收并通过校验的上传请求体速度，包含重复上传；
+`download` 是同期分块下载交给 TCP 的 TS 字节速度，包含重复下载和断线前已发送的部分。
+两项都排除 HTTP 头、目录和反馈消息，空闲时归零；`uploaded/downloaded` 是对应的累计字节量。
+`cache/blocks` 来自 store 当前实际目录缓存，`cached` 是所有缓存块的时长之和，包含不同会话和
+不连续序号，不代表连续可播放时长。过期块每秒自动清理。
+`accepted` 是新入库块数，`duplicates` 是内容相同的重复上传次数；冲突返回 409，不计入上传统计。
+`expired` 是按 retention 到期释放的块数，`evicted` 是容量或块数上限淘汰的块数。
+`feedback` 是 merge 反馈的下载速度估计，尚未测量或反馈超过 10 秒未刷新时为 `unknown`。
+`redirect_requests` 是连续反馈中目标会话／序号发生变化时累计的补救请求数，重复轮询同一请求不增加；
+`redirect_received` 是新入库的转投块数，重复 POST 不增加。`rescue` 显示当前有效请求的会话及序号，
+没有请求或超过 3 秒未刷新时为 `-`。转投详情继续输出 `[redirect] phase=stored`。
+这些累计数在进程重启时重置，跨推流会话保留；store 不显示 pending、播放状态或追赶次数。
+HTTP `/status/<stream>` 仍用于向手机传递速度反馈和补传请求。
 
 ## 上传协议
 

@@ -34,6 +34,65 @@ def merge_args(a, b=None, gap=2):
     return result
 
 
+def store_status(binary):
+    logs = []
+
+    def wait_for(predicate, timeout=6):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            matches = [line for line in list(logs) if line.startswith("[status]") and predicate(line)]
+            if matches:
+                return matches[-1]
+            time.sleep(.02)
+        raise AssertionError(logs)
+
+    with relay(binary, retention=3, logs=logs, extra_args=["--mode", "store"]) as source:
+        idle = wait_for(lambda line: "mode=store" in line)
+        assert "session=- seq=-" in idle and "feedback=unknown" in idle
+        assert "upload=0.00 KiB/s download=0.00 KiB/s" in idle
+        body = ts(1)
+        assert block(source, 100, body)[0] == 200
+        assert block(source, 98, ts(2))[0] == 200
+        assert block(source, 100, body)[0] == 200
+        assert block(source, 100, ts(3))[0] == 409
+        assert get(source, "/chunks/live/ordered/98")[2] == ts(2)
+        assert get(source, "/chunks/live/ordered/98")[2] == ts(2)
+        feedback = {"X-Download-Rate-Bps": "125000", "X-Rescue-Session": "ordered", "X-Rescue-Sequence": "99"}
+        for _ in range(2):
+            assert get(source, "/feedback/live", feedback)[0] == 200
+        assert get(source, "/status/live")[1]["X-Rescue-Sequence"] == "99"
+        active = wait_for(lambda line: "accepted=2 duplicates=1" in line)
+        assert "session=ordered seq=100" in active, active
+        assert "cache=47.00 KiB cached=0.20 s blocks=2" in active, active
+        assert "uploaded=70.50 KiB downloaded=47.00 KiB" in active, active
+        assert "upload=0.00 KiB/s" not in active and "download=0.00 KiB/s" not in active, active
+        assert "feedback=122.07 KiB/s redirect_requests=1 redirect_received=0 rescue=ordered:99" in active, active
+        redirected = {"X-Session-Started-Ms": "2000", "X-Start-Us": "0",
+                      "X-Redirect-From": "http://other-store:8080/upload/live", "X-Redirect-Reason": "download-slow"}
+        assert upload(source, "restart", 5, body, extra=redirected)[0] == 200
+        assert upload(source, "restart", 5, body, extra=redirected)[0] == 200
+        assert block(source, 200, body)[0] == 200
+        latest = wait_for(lambda line: "accepted=4 duplicates=2" in line)
+        assert "session=restart seq=5" in latest and "redirect_received=1" in latest, latest
+        expired = wait_for(lambda line: "blocks=0" in line and "expired=4" in line)
+        assert "cache=0.00 KiB cached=0.00 s" in expired, expired
+        assert "upload=0.00 KiB/s download=0.00 KiB/s" in expired, expired
+        assert get(source, "/chunks/live/restart/5")[0] == 404
+        assert all("mode=store" in line and "pending=" not in line and "state=" not in line
+                   for line in logs if line.startswith("[status]")), logs
+    print("PASS: store status reports real cache/traffic, deduplicates counters, tracks latest session and expires idle cache", flush=True)
+
+    logs.clear()
+    with relay(binary, buffer_mb=16, logs=logs, extra_args=["--mode", "store"]) as source:
+        large = ts(1, packets=50_000)
+        assert block(source, 0, large)[0] == 200
+        assert block(source, 1, large)[0] == 200
+        limited = wait_for(lambda line: "accepted=2" in line and "evicted=1" in line)
+        assert "blocks=1" in limited and f"cache={len(large) / 1024:.2f} KiB" in limited, limited
+        assert get(source, "/chunks/live/ordered/0")[0] == 404
+    print("PASS: store status distinguishes memory-budget eviction from retention expiry", flush=True)
+
+
 def protocol(binary):
     empty = subprocess.run([str(binary), "--mode", "merge"], capture_output=True, text=True, timeout=5)
     assert empty.returncode != 0 and "Invalid relay options" in empty.stdout + empty.stderr
@@ -437,15 +496,17 @@ if __name__ == "__main__":
     parser.add_argument("--kotlin-stdlib", type=Path)
     parser.add_argument("--java", type=Path, default=Path("java"))
     parser.add_argument("--javac", type=Path, default=Path("javac"))
-    parser.add_argument("--case", choices=["all", "protocol", "network", "join", "single", "normal", "slow", "unreachable"], default="all")
+    parser.add_argument("--case", choices=["all", "status", "protocol", "network", "join", "single", "normal", "slow", "unreachable"], default="all")
     args = parser.parse_args()
+    if args.case in ("all", "status"):
+        store_status(args.binary.resolve())
     if args.case in ("all", "protocol"):
         protocol(args.binary.resolve())
     if args.case in ("all", "network"):
         upstream_network(args.binary.resolve())
     if args.case in ("all", "join"):
         live_join(args.binary.resolve())
-    if args.android_classes and args.case not in ("protocol", "network", "join"):
+    if args.android_classes and args.case not in ("status", "protocol", "network", "join"):
         assert args.kotlin_stdlib
         if args.case in ("all", "single"):
             production_single(args.binary.resolve(), args.android_classes, args.kotlin_stdlib, args.java, args.javac)

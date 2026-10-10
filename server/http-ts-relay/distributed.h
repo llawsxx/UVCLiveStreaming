@@ -60,11 +60,20 @@ class ChunkStore {
     std::string rescue_session;
     std::optional<uint64_t> rescue_sequence;
     uint64_t redirect_received = 0;
+    uint64_t uploaded_bytes = 0, accepted_blocks = 0, duplicate_blocks = 0;
+    uint64_t expired_blocks = 0, evicted_blocks = 0, redirect_requests = 0;
+    std::atomic<uint64_t> downloaded_bytes{0};
+    std::string latest_session;
+    uint64_t latest_epoch = 0, latest_sequence = 0;
+    std::optional<Key> last_rescue;
     Time feedback_time = Clock::now(), rescue_time = Clock::now();
+    bool reporting_stopped = false;
+    std::condition_variable report_changed;
+    std::thread reporter;
     void prune() {
         const auto oldest = Clock::now() - retention;
         for (auto it = chunks.begin(); it != chunks.end();) {
-            if (it->second->created < oldest) { bytes -= it->second->size; it = chunks.erase(it); }
+            if (it->second->created < oldest) { bytes -= it->second->size; it = chunks.erase(it); ++expired_blocks; }
             else ++it;
         }
     }
@@ -77,8 +86,50 @@ class ChunkStore {
             headers += "X-Rescue-Session: " + rescue_session + "\r\nX-Rescue-Sequence: " + std::to_string(*rescue_sequence) + "\r\n";
         return headers;
     }
+    void report() {
+        auto previous = Clock::now();
+        uint64_t previous_uploaded = 0, previous_downloaded = 0;
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (report_changed.wait_for(lock, std::chrono::seconds(1), [this] { return reporting_stopped; })) return;
+            prune();
+            const auto now = Clock::now();
+            const double seconds = std::chrono::duration<double>(now - previous).count();
+            const auto downloaded = downloaded_bytes.load(std::memory_order_relaxed);
+            double cached = 0;
+            for (const auto& entry : chunks) cached += entry.second->duration / 1000000.0;
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(2)
+                 << "[status] mode=store session=" << (latest_session.empty() ? "-" : latest_session)
+                 << " seq=" << (latest_session.empty() ? "-" : std::to_string(latest_sequence))
+                 << " upload=" << (uploaded_bytes - previous_uploaded) / 1024.0 / seconds << " KiB/s"
+                 << " download=" << (downloaded - previous_downloaded) / 1024.0 / seconds << " KiB/s"
+                 << " cache=" << bytes / 1024.0 << " KiB cached=" << cached << " s blocks=" << chunks.size()
+                 << " uploaded=" << uploaded_bytes / 1024.0 << " KiB downloaded=" << downloaded / 1024.0 << " KiB"
+                 << " accepted=" << accepted_blocks << " duplicates=" << duplicate_blocks
+                 << " expired=" << expired_blocks << " evicted=" << evicted_blocks << " feedback=";
+            if (download_rate > 0 && now - feedback_time < std::chrono::seconds(10))
+                line << download_rate / 1024.0 << " KiB/s";
+            else line << "unknown";
+            line << " redirect_requests=" << redirect_requests << " redirect_received=" << redirect_received
+                 << " rescue=";
+            if (rescue_sequence && now - rescue_time < std::chrono::seconds(3))
+                line << rescue_session << ':' << *rescue_sequence;
+            else line << '-';
+            previous = now; previous_uploaded = uploaded_bytes; previous_downloaded = downloaded;
+            lock.unlock();
+            log_line(line.str());
+        }
+    }
 public:
-    ChunkStore(size_t limit, Us keep) : maximum(limit), retention(keep) {}
+    ChunkStore(size_t limit, Us keep, bool reporting = false) : maximum(limit), retention(keep) {
+        if (reporting) reporter = std::thread([this] { report(); });
+    }
+    ~ChunkStore() {
+        { std::lock_guard<std::mutex> lock(mutex); reporting_stopped = true; }
+        report_changed.notify_all();
+        if (reporter.joinable()) reporter.join();
+    }
     void upload(Socket socket, Request request, bool keep_alive = false) {
         auto chunk = chunk_metadata(request);
         const auto key = Key{chunk.session, chunk.sequence};
@@ -96,17 +147,28 @@ public:
                 if (old.hash != chunk.hash || old.start != chunk.start || old.duration != chunk.duration ||
                     old.epoch != chunk.epoch || old.final != chunk.final || old.size != chunk.size)
                     throw HttpError(409, "Conflicting duplicate block");
+                ++duplicate_blocks;
             } else {
                 if (chunk.size > maximum) throw HttpError(413, "Block exceeds cache budget");
                 while (!chunks.empty() && (bytes + chunk.size > maximum || chunks.size() >= 4096)) {
                     auto oldest = std::min_element(chunks.begin(), chunks.end(), [](const auto& a, const auto& b) {
                         return a.second->created < b.second->created;
                     });
-                    bytes -= oldest->second->size; chunks.erase(oldest);
+                    bytes -= oldest->second->size; chunks.erase(oldest); ++evicted_blocks;
                 }
+                ++accepted_blocks;
                 bytes += chunk.size;
                 if (!redirect_from.empty()) ++redirect_received;
                 chunk.data = std::move(request.body);
+            }
+            // Keep the latest session's highest accepted sequence even when old rescue copies arrive.
+            if (latest_session.empty() || std::tie(chunk.epoch, chunk.session) > std::tie(latest_epoch, latest_session)) {
+                latest_epoch = chunk.epoch; latest_session = chunk.session; latest_sequence = chunk.sequence;
+            } else if (chunk.epoch == latest_epoch && chunk.session == latest_session) {
+                latest_sequence = std::max(latest_sequence, chunk.sequence);
+            }
+            uploaded_bytes += chunk.size;
+            if (!duplicate) {
                 chunks.emplace(key, std::make_shared<StoredChunk>(std::move(chunk)));
             }
             headers = status_headers() + "X-Ack-Sequence: " + std::to_string(key.second) + "\r\n";
@@ -139,6 +201,8 @@ public:
                 // Forward missing-block requests too: the original store may be unreachable
                 // from merge. The sender owns the session/sequence history and validates it.
                 rescue_session = session->second; rescue_sequence = seq; rescue_time = Clock::now();
+                const Key requested{session->second, seq};
+                if (!last_rescue || *last_rescue != requested) { ++redirect_requests; last_rescue = requested; }
             }
             std::ostringstream list;
             list << "TS-CHUNKS 1\n";
@@ -179,7 +243,7 @@ public:
             std::to_string(chunk->size) + "\r\nX-Chunk-Hash: " + std::to_string(chunk->hash) + "\r\n" +
             (chunk->redirect_from.empty() ? "" : "X-Redirect-From: " + chunk->redirect_from +
                 "\r\nX-Redirect-Reason: " + chunk->redirect_reason + "\r\n") + "\r\n")
-            && send_all(socket, chunk->data.data(), chunk->size);
+            && send_all(socket, chunk->data.data(), chunk->size, &downloaded_bytes);
     }
 };
 

@@ -97,7 +97,7 @@ static bool ready(Socket socket, bool write, Time deadline, [[maybe_unused]] boo
     }
 }
 
-static bool send_all(Socket socket, const char* data, size_t size) {
+static bool send_all(Socket socket, const char* data, size_t size, std::atomic<uint64_t>* transferred = nullptr) {
     const auto deadline = Clock::now() + std::chrono::seconds(10);
     while (size) {
         if (!ready(socket, true, deadline)) return false;
@@ -107,7 +107,10 @@ static bool send_all(Socket socket, const char* data, size_t size) {
 #else
         const int sent = static_cast<int>(send(socket, data, length, MSG_NOSIGNAL));
 #endif
-        if (sent > 0) { data += sent; size -= static_cast<size_t>(sent); }
+        if (sent > 0) {
+            data += sent; size -= static_cast<size_t>(sent);
+            if (transferred) transferred->fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
+        }
         else if (sent == 0 || !retryable()) return false;
     }
     return true;
@@ -479,8 +482,10 @@ class Relay {
     }
 
 public:
-    Relay(Us latency, Us keep, Us maximum, size_t limit) : delay(latency), retention(keep), max_pending(maximum), max_bytes(limit),
-        reporter([this] { report(); }) {}
+    Relay(Us latency, Us keep, Us maximum, size_t limit, bool reporting = true)
+        : delay(latency), retention(keep), max_pending(maximum), max_bytes(limit) {
+        if (reporting) reporter = std::thread([this] { report(); });
+    }
     ~Relay() { reporting_stopped = true; if (reporter.joinable()) reporter.join(); }
 
     void ingest(Request request) { accept_upload(invalid_socket, std::move(request)); }
@@ -626,8 +631,8 @@ int main(int argc, char** argv) {
         if (bind(listener.socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) || listen(listener.socket, 64))
             throw std::runtime_error("bind/listen failed");
         Relay relay(Us(static_cast<int64_t>(delay * 1000000)), Us(static_cast<int64_t>(retention * 1000000)),
-                    Us(static_cast<int64_t>(max_pending * 1000000)), memory_mb * 1024 * 1024 / (mode == "merge" ? 2 : 1));
-        ChunkStore store(memory_mb * 1024 * 1024, Us(static_cast<int64_t>(retention * 1000000)));
+                    Us(static_cast<int64_t>(max_pending * 1000000)), memory_mb * 1024 * 1024 / (mode == "merge" ? 2 : 1), mode != "store");
+        ChunkStore store(memory_mb * 1024 * 1024, Us(static_cast<int64_t>(retention * 1000000)), mode == "store");
         std::unique_ptr<ChunkMerger> merger;
         if (mode == "merge") merger = std::make_unique<ChunkMerger>(relay, upstreams, stream,
             memory_mb * 1024 * 1024 / 2, gap_timeout, delay, max_pending);
