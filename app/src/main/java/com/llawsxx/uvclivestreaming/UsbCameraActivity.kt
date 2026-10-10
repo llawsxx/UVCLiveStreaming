@@ -1248,12 +1248,17 @@ private fun UsbCameraScreen() {
                                 String.format(Locale.US, "%.2f Mbps", it / 1_000_000.0)
                             } ?: "待评估"
                             val status = if (server.consecutiveFailures > 0) "重试 / 暂缓分配" else if (server.uploading) "上传中" else "待分配"
-                            Text("服务器 ${index + 1}：$bandwidth · $status",
+                            Text("服务器 ${index + 1}：" + (if (upload.servers.size > 1) "$bandwidth · " else "") + status,
+                                style = MaterialTheme.typography.bodySmall)
+                            Text(String.format(Locale.US, "累计上传（已确认）：%.2f MiB · %d 块",
+                                server.acknowledgedBytes / (1024.0 * 1024.0), server.acknowledgedBlocks),
                                 style = MaterialTheme.typography.bodySmall)
                         }
-                        if (upload.servers.isNotEmpty()) Text(String.format(Locale.US, "已确认分块保留：%.1f KiB（供慢块转投）",
+                        if (upload.servers.size > 1) Text("各服务器累计上传包含已确认的补传与转投数据。",
+                            style = MaterialTheme.typography.bodySmall)
+                        if (upload.servers.size > 1) Text(String.format(Locale.US, "已确认分块保留：%.1f KiB（供慢块转投）",
                             upload.retainedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)
-                        if (upload.servers.isNotEmpty()) {
+                        if (upload.servers.size > 1) {
                             Text("转投尝试：${upload.redirectAttempts} 次 · 已确认：${upload.redirectAcknowledged} 次",
                                 style = MaterialTheme.typography.bodySmall)
                             upload.recentRedirects.forEach { redirect ->
@@ -1270,7 +1275,7 @@ private fun UsbCameraScreen() {
                             upload.queuedBytes / 1024.0, upload.queuedDurationUs / 1_000_000.0,
                             upload.cacheLimitSeconds, upload.cacheLimitBytes / (1024.0 * 1024.0)),
                             style = MaterialTheme.typography.bodySmall)
-                        Text(String.format(Locale.US, "正在组块：%.1f KiB / %.2f 秒 · 累计确认：%.1f KiB",
+                        Text(String.format(Locale.US, "正在组块：%.1f KiB / %.2f 秒 · 累计确认（去重）：%.1f KiB",
                             upload.assemblingBytes / 1024.0, upload.assemblingDurationUs / 1_000_000.0,
                             upload.acknowledgedBytes / 1024.0), style = MaterialTheme.typography.bodySmall)
                     }

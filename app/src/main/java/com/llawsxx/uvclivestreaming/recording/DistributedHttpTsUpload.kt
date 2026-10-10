@@ -23,6 +23,8 @@ internal class DistributedHttpTsUploadWorker(
         var failures = 0
         var scheduledNs = 0L
         var scheduledBytes = 0
+        var acknowledgedBytes = 0L
+        var acknowledgedBlocks = 0L
     }
     private class Pending(val block: TsUploadBlock, val alreadyAcknowledged: Boolean = false, val rescuedNs: Long = 0) {
         var destination: Destination? = null
@@ -60,7 +62,8 @@ internal class DistributedHttpTsUploadWorker(
         HttpTsUploadWorker.Stats(TsUploadQueue.Stats(pending.size - retries, retries,
             pending.values.sumOf { it.block.data.size.toLong() }, pending.values.sumOf { it.block.durationUs }, dropped),
             pending.values.firstOrNull { it.destination != null }?.block?.sequence, acknowledged, bytesAcknowledged.get(),
-            destinations.map { HttpUploadServerStats(it.url, it.measuredRate?.let { rate -> (rate * 8).toLong() }, it.busy, it.failures) },
+            destinations.map { HttpUploadServerStats(it.url, it.measuredRate?.let { rate -> (rate * 8).toLong() },
+                it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks) },
             history.values.sumOf { it.block.data.size.toLong() }, redirectAttempts, redirectAcknowledged, recentRedirects.toList())
     }
     override fun enqueue(block: TsUploadBlock, cacheSeconds: Int) = synchronized(lock) {
@@ -141,6 +144,8 @@ internal class DistributedHttpTsUploadWorker(
             synchronized(lock) {
                 if (closed || pending[item.block.sequence] !== item) return@synchronized
                 pending.remove(item.block.sequence)
+                target.acknowledgedBytes += item.block.data.size
+                target.acknowledgedBlocks++
                 if (item.redirect != null) {
                     redirectAcknowledged++
                     redirectState(item, HttpUploadRedirectState.ACKNOWLEDGED)

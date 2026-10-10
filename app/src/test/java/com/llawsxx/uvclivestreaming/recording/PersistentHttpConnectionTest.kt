@@ -67,6 +67,8 @@ class PersistentHttpConnectionTest {
                 val deadline = System.nanoTime() + 2_000_000_000L
                 while (worker.bytesAcknowledged.get() != 564L && System.nanoTime() < deadline) Thread.sleep(10)
                 assertEquals(564L, worker.bytesAcknowledged.get())
+                assertEquals(564L, worker.snapshot().servers.single().acknowledgedBytes)
+                assertEquals(3L, worker.snapshot().servers.single().acknowledgedBlocks)
             }
             assertTrue(finished.await(2, TimeUnit.SECONDS))
             thread.join(1_000)

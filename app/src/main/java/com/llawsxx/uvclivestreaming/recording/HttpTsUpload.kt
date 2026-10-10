@@ -224,6 +224,8 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     private var failing = false
     private var uploadingSequence: Long? = null
     private var acknowledgedSequence: Long? = null
+    private var acknowledgedBlocks = 0L
+    private var consecutiveFailures = 0
     private val thread: Thread
     override val pendingBlocks: Int get() = queue.size
     data class Stats(val queue: TsUploadQueue.Stats, val uploadingSequence: Long?,
@@ -232,7 +234,9 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                      val redirectAttempts: Long = 0, val redirectAcknowledged: Long = 0,
                      val recentRedirects: List<HttpUploadRedirectStats> = emptyList())
     override fun snapshot(): Stats = synchronized(wake) {
-        Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get())
+        Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get(),
+            servers = listOf(HttpUploadServerStats(url, null, uploadingSequence != null, consecutiveFailures,
+                bytesAcknowledged.get(), acknowledgedBlocks)))
     }
 
     init {
@@ -285,6 +289,8 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                     uploadingSequence = null
                     acknowledgedSequence = pending.sequence
                     bytesAcknowledged.addAndGet(pending.data.size.toLong())
+                    acknowledgedBlocks++
+                    consecutiveFailures = 0
                     failing.also { failing = false }
                 }
                 if (recovered) onNotice("HTTP 上传已恢复，正在按序补传")
@@ -295,6 +301,7 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                     queue.expire(cacheSeconds)
                     if (queue.first() !== pending) continue
                     queue.markForRetry()
+                    consecutiveFailures++
                     (!failing).also { failing = true }
                 }
                 if (firstFailure) onNotice("HTTP 上传中断，数据保留等待补传：${error.message}")

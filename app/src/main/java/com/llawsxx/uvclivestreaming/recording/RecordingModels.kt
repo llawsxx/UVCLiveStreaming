@@ -550,7 +550,9 @@ data class CameraInfo(
 
 /** A snapshot of this HTTP publishing session. Counts include the unacknowledged in-flight block. */
 data class HttpUploadServerStats(val url: String, val estimatedBitsPerSecond: Long?,
-    val uploading: Boolean, val consecutiveFailures: Int)
+    val uploading: Boolean, val consecutiveFailures: Int,
+    /** Confirmed TS payloads for this destination, including acknowledged rescue copies. */
+    val acknowledgedBytes: Long = 0, val acknowledgedBlocks: Long = 0)
 
 enum class HttpUploadRedirectReason(val label: String, val wireValue: String) {
     UPLOAD_FAILURE("上传失败", "upload-failed"), SLOW_DOWNLOAD("接收端下载慢", "download-slow")
