@@ -1253,7 +1253,7 @@ private fun UsbCameraScreen() {
                             enabled = !recording && outputControlsEnabled, singleLine = true,
                             label = { Text("最低视频码率（kbps）") }, modifier = Modifier.fillMaxWidth(),
                             isError = minimum == null || minimum !in 100..maximum)
-                        Text("视频设置中的码率作为上限。持续拥堵时快速降低，稳定 20 秒后逐步提高；分辨率和帧率保持当前设置。同时录像或 RTMP 推流也会使用调整后的码率。",
+                        Text("视频码率设置作为上限。稳定 5 秒后，按上传与 merge 下载测速预留余量提码；测速不完整时大幅试探。持续排队后回退并细调。分辨率和帧率保持当前设置，同时录像或 RTMP 也会使用调整后的码率。",
                             style = MaterialTheme.typography.bodySmall)
                         Text("码率模式选默认时优先使用编码器支持的 CBR；显式选择 VBR 时，实际输出可能偏离目标码率。",
                             style = MaterialTheme.typography.bodySmall)
@@ -1288,7 +1288,7 @@ private fun UsbCameraScreen() {
                         enabled = !recording && outputControlsEnabled, singleLine = true,
                         label = { Text("RTMP 最低视频码率（kbps）") }, modifier = Modifier.fillMaxWidth(),
                         isError = minimum == null || minimum !in 100..maximum)
-                    Text("单独 RTMP 推流也适用。最高码率取视频设置；发送持续拥堵、丢帧或断线时降低，稳定 20 秒后逐步提高。分辨率与帧率保持当前设置。",
+                    Text("单独 RTMP 推流也适用。最高码率取视频设置；持续拥堵、丢帧或断线时降低，稳定 5 秒后大幅试探提升，持续排队后回退并细调。分辨率与帧率保持当前设置。",
                         style = MaterialTheme.typography.bodySmall)
                     Text("默认码率模式优先使用 CBR。同时开启 HTTP 自适应时采用两者较低的目标；共享编码器的录像也会随之调整。请在开始采集前设置。",
                         style = MaterialTheme.typography.bodySmall)
@@ -1344,6 +1344,10 @@ private fun UsbCameraScreen() {
                                 adaptive.maximumBitsPerSecond / 1000.0, adaptive.adjustments),
                                 style = MaterialTheme.typography.bodySmall)
                             Text(adaptive.status, style = MaterialTheme.typography.bodySmall)
+                            adaptive.measuredVideoBudgetBitsPerSecond?.let { budget ->
+                                Text(String.format(Locale.US, "上传与接收测速参考目标：%.0f kbps（已预留音频及封装余量）",
+                                    budget / 1000.0), style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                         Text("HTTP 会话 ID：${upload.sessionId}", style = MaterialTheme.typography.bodySmall)
                         Text("序号 · 最新生成：${upload.latestSequence ?: "—"} · 上传中：${upload.uploadingSequence ?: "—"} · 已确认：${upload.acknowledgedSequence ?: "—"}",
@@ -1358,6 +1362,10 @@ private fun UsbCameraScreen() {
                             val status = if (server.consecutiveFailures > 0) "重试 / 暂缓分配" else if (server.uploading) "上传中" else "待分配"
                             Text("服务器 ${index + 1}：" + (if (upload.servers.size > 1 || server.estimatedBitsPerSecond != null) "$bandwidth · " else "") + status,
                                 style = MaterialTheme.typography.bodySmall)
+                            if (stats.httpAutoBitrate != null) {
+                                val upstream = server.uploadBitsPerSecond?.let { String.format(Locale.US, "%.2f Mbps", it / 1_000_000.0) } ?: "待评估"
+                                Text("上传测速：$upstream · merge 下载测速：$bandwidth", style = MaterialTheme.typography.bodySmall)
+                            }
                             Text(String.format(Locale.US, "累计上传（已确认）：%.2f MiB · %d 块",
                                 server.acknowledgedBytes / (1024.0 * 1024.0), server.acknowledgedBlocks),
                                 style = MaterialTheme.typography.bodySmall)

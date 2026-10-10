@@ -103,12 +103,27 @@ class DistributedHttpTsUploadTest {
                 assertEquals(first.received.size.toLong() * 188 * 128, servers[0].acknowledgedBytes)
                 assertEquals(second.received.size.toLong() * 188 * 128, servers[1].acknowledgedBytes)
                 assertEquals(worker.bytesAcknowledged.get(), servers.sumOf { it.acknowledgedBytes })
+                assertTrue(servers.all { it.uploadBitsPerSecond != null && it.uploadRateAgeMs != null })
                 assertEquals("One upload socket and one feedback socket per destination", 2L, first.connections.get())
                 assertEquals(2L, second.connections.get())
                 assertEquals(0L, worker.snapshot().redirectAttempts)
                 assertTrue(worker.snapshot().recentRedirects.isEmpty())
             }
         } }
+    }
+
+    @Test fun uploadMeasurementIncludesStoreAcknowledgementWaitAndWorksWithoutMerge() {
+        Store(rate = AtomicLong(0), ackDelayMs = 200, keepAlive = true).use { store ->
+            HttpTsUploadWorker(store.url, 60, onNotice = {}).use { worker ->
+                worker.enqueue(block(0), 60)
+                await { worker.bytesAcknowledged.get() > 0 }
+                val server = worker.snapshot().servers.single()
+                assertNull(server.estimatedBitsPerSecond)
+                val rate = checkNotNull(server.uploadBitsPerSecond)
+                assertTrue("ACK wait must be included in upload measurement", rate in 1..(188L * 128 * 8 * 5))
+                assertTrue(checkNotNull(server.uploadRateAgeMs) < 1_000)
+            }
+        }
     }
 
     @Test fun unexpectedlyClosedPersistentSocketsReconnectAndKeepUniqueAcknowledgementCount() {

@@ -14,7 +14,7 @@ import javax.net.ssl.SSLSocketFactory
 
 /** Sequential HTTP requests on one socket. Lifecycle operations may cancel I/O from another thread. */
 internal class PersistentHttpConnection(url: String, private val watchdog: ScheduledExecutorService) : Closeable {
-    data class Response(val status: Int, val headers: Map<String, String>)
+    data class Response(val status: Int, val headers: Map<String, String>, val transferNs: Long = 0L)
     private val uri = URI(url)
     private val guard = Any()
     private var transport: Socket? = null
@@ -79,6 +79,7 @@ internal class PersistentHttpConnection(url: String, private val watchdog: Sched
                 headers.forEach { (key, value) -> append("$key: $value\r\n") }
                 append("\r\n")
             }
+            val transferStartedNs = System.nanoTime()
             connected.getOutputStream().apply {
                 write(message.toByteArray(Charsets.US_ASCII)); if (body != null) write(body); flush()
             }
@@ -125,7 +126,7 @@ internal class PersistentHttpConnection(url: String, private val watchdog: Sched
                 reusable = "close" !in connection && (version == "HTTP/1.1" || "keep-alive" in connection)
             }
             // Unframed/chunked ACKs remain compatible, with a fresh connection for the next request.
-            return Response(status, response)
+            return Response(status, response, (System.nanoTime() - transferStartedNs).coerceAtLeast(1))
         } finally {
             synchronized(guard) {
                 if (transport === raw && !reusable) invalidateLocked()

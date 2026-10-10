@@ -19,6 +19,7 @@ internal class DistributedHttpTsUploadWorker(
         var rate = 375_000.0 // Bootstrap estimate; replaced by measured server egress feedback, not a cap.
         var measuredRate: Double? = null
         var measuredNs = 0L
+        val uploadRate = HttpUploadRateMeter()
         var availableNs = 0L
         var busy = false
         var failures = 0
@@ -68,8 +69,9 @@ internal class DistributedHttpTsUploadWorker(
             pending.values.firstOrNull { it.destination != null }?.block?.sequence, acknowledged, bytesAcknowledged.get(),
             destinations.map {
                 val age = ((now - it.measuredNs) / 1_000_000).takeIf { age -> it.measuredRate != null && age in 0..10_000 }
+                val upstream = it.uploadRate.reading(now)
                 HttpUploadServerStats(it.url, it.measuredRate?.takeIf { age != null }?.let { rate -> (rate * 8).toLong() },
-                    it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks, age)
+                    it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs)
             },
             history.values.sumOf { it.block.data.size.toLong() }, redirectAttempts, redirectAcknowledged, recentRedirects.toList(),
             pending.values.filter { !it.alreadyAcknowledged }.sumOf { it.block.durationUs }, slowDownloadRescues, originalDropped)
@@ -257,6 +259,10 @@ internal class DistributedHttpTsUploadWorker(
             "HTTP ${response.status}: block not acknowledged"
         }
         check(response.headers["x-relay-mode"] == "store") { "多服务器上传需要服务端 --mode store" }
+        synchronized(lock) {
+            if (!closed && pending[block.sequence] === item)
+                destination.uploadRate.record(block.data.size, response.transferNs, System.nanoTime())
+        }
         return response.headers["x-download-rate-bps"]?.toLongOrNull()?.coerceAtLeast(0) ?: 0
     }
     override fun close() {

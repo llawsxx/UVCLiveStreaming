@@ -231,6 +231,7 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     private var consecutiveFailures = 0
     private var measuredRate: Long? = null
     private var measuredNs = 0L
+    private val uploadRate = HttpUploadRateMeter()
     private val thread: Thread
     override val pendingBlocks: Int get() = queue.size
     data class Stats(val queue: TsUploadQueue.Stats, val uploadingSequence: Long?,
@@ -241,10 +242,12 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                      val unacknowledgedDurationUs: Long = queue.durationUs, val slowDownloadRescues: Long = 0,
                      val originalDroppedBlocks: Long = queue.droppedBlocks)
     override fun snapshot(): Stats = synchronized(wake) {
-        val age = ((System.nanoTime() - measuredNs) / 1_000_000).takeIf { measuredRate != null && it in 0..10_000 }
+        val now = System.nanoTime()
+        val age = ((now - measuredNs) / 1_000_000).takeIf { measuredRate != null && it in 0..10_000 }
+        val upstream = uploadRate.reading(now)
         Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get(),
             servers = listOf(HttpUploadServerStats(url, measuredRate?.takeIf { age != null }, uploadingSequence != null, consecutiveFailures,
-                bytesAcknowledged.get(), acknowledgedBlocks, age)))
+                bytesAcknowledged.get(), acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs)))
     }
 
     init {
@@ -334,6 +337,7 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                 "HTTP ${response.status}，服务器未确认块 ${block.sequence}"
             }
             synchronized(wake) {
+                uploadRate.record(block.data.size, response.transferNs, System.nanoTime())
                 measuredRate = response.headers["x-download-rate-bps"]?.toLongOrNull()?.takeIf {
                     response.headers["x-relay-mode"] == "store" && it in 1_000..125_000_000
                 }?.times(8)

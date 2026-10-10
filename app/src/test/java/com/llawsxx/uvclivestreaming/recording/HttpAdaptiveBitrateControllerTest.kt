@@ -106,18 +106,18 @@ class HttpAdaptiveBitrateControllerTest {
         assertTrue(controller.target < 6_000_000)
     }
 
-    @Test fun stableNetworkRecoversInSmallProbesEvenIfPreviousMeasurementWasLow() {
+    @Test fun lowMeasuredBudgetStillAllowsSmallProbesWithoutSelfLocking() {
         val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
         repeat(10) { sample(controller, it, upload(it, queue = it.toDouble())) }
         val lowered = controller.target
         assertTrue(lowered < 6_000_000)
         val server = HttpUploadServerStats("A", 1_000_000, false, 0, feedbackAgeMs = 0)
-        for (second in 10..29) assertNull(sample(controller, second, upload(second, servers = listOf(server))))
-        val raised = checkNotNull(sample(controller, 30, upload(30, servers = listOf(server))))
+        for (second in 10..14) assertNull(sample(controller, second, upload(second, servers = listOf(server))))
+        val raised = checkNotNull(sample(controller, 15, upload(15, servers = listOf(server))))
         assertEquals((lowered * 1.1).toInt(), raised.bitrate)
-        for (second in 31..50) assertNull(sample(controller, second, upload(second, servers = listOf(server))))
-        assertNotNull(sample(controller, 51, upload(51, servers = listOf(server))))
-        repeat(400) { sample(controller, it + 52) }
+        for (second in 16..20) assertNull(sample(controller, second, upload(second, servers = listOf(server))))
+        assertNotNull(sample(controller, 21, upload(21, servers = listOf(server))))
+        repeat(50) { sample(controller, it + 22) }
         assertEquals(6_000_000, controller.target)
     }
 
@@ -127,8 +127,8 @@ class HttpAdaptiveBitrateControllerTest {
         val lowered = controller.target
         val servers = listOf(HttpUploadServerStats("A", null, false, 0),
             HttpUploadServerStats("B", null, false, 10))
-        for (second in 10..29) assertNull(sample(controller, second, upload(second, servers = servers)))
-        assertNotNull(sample(controller, 30, upload(30, servers = servers)))
+        for (second in 10..14) assertNull(sample(controller, second, upload(second, servers = servers)))
+        assertNotNull(sample(controller, 15, upload(15, servers = servers)))
         assertTrue(controller.target > lowered)
     }
 
@@ -139,6 +139,46 @@ class HttpAdaptiveBitrateControllerTest {
         repeat(20) { assertNull(sample(controller, 10)) }
         assertNull(sample(controller, 120))
         assertEquals(lowered, controller.target)
+    }
+
+    @Test fun freshUploadAndMergeMeasurementsChooseTheRecoveryTarget() {
+        val controller = HttpAdaptiveBitrateController(12_000_000, 1_000_000, 192_000)
+        repeat(30) { sample(controller, it, upload(it, queue = it.toDouble())) }
+        val previous = controller.target
+        val server = HttpUploadServerStats("A", 9_000_000, false, 0, feedbackAgeMs = 0,
+            uploadBitsPerSecond = 8_000_000, uploadRateAgeMs = 0)
+        for (second in 30..34) sample(controller, second, upload(second, servers = listOf(server)))
+        val adjustment = checkNotNull(sample(controller, 35, upload(35, servers = listOf(server))))
+        assertEquals((8_000_000 * 0.85 / 1.06 - 192_000).toInt(), adjustment.bitrate)
+        assertTrue(adjustment.bitrate > previous * 2)
+        assertEquals(adjustment.bitrate, controller.measuredVideoBudget)
+    }
+
+    @Test fun failedLargeProbeRollsBackAtTwoPressureSecondsThenBisects() {
+        val controller = HttpAdaptiveBitrateController(12_000_000, 1_000_000, 0)
+        repeat(30) { sample(controller, it, upload(it, queue = it.toDouble())) }
+        val stable = controller.target
+        for (second in 30..35) sample(controller, second)
+        val probe = controller.target
+        assertEquals(minOf(stable * 2, 12_000_000), probe)
+        // The chunk queue can naturally oscillate up to one second; ignore that.
+        assertNull(sample(controller, 36, upload(36, queue = 1.0)))
+        assertNull(sample(controller, 37, upload(37, queue = 2.0)))
+        assertNull(sample(controller, 38, upload(38, queue = 2.5)))
+        assertNotNull(sample(controller, 39, upload(39, queue = 3.0)))
+        assertEquals(stable, controller.target)
+        for (second in 40..45) sample(controller, second)
+        assertEquals(stable + (probe - stable) / 2, controller.target)
+    }
+
+    @Test fun lowerSharedEncoderRateCannotValidateAnUntestedHigherRequest() {
+        val controller = HttpAdaptiveBitrateController(12_000_000, 1_000_000, 0)
+        repeat(30) { sample(controller, it, upload(it, queue = it.toDouble())) }
+        val stable = controller.target
+        for (second in 30..60) controller.sample(second * 1_000_000_000L, upload(second), stable / 2)
+        assertEquals(stable, controller.target)
+        for (second in 61..66) controller.sample(second * 1_000_000_000L, upload(second), stable)
+        assertEquals(stable * 2, controller.target)
     }
 
     @Test fun minimumAboveMaximumIsClampedToConfiguredCeiling() {
@@ -155,6 +195,7 @@ class HttpAdaptiveBitrateControllerTest {
         var acknowledged = 0L
         var highestQueue = 0
         var lowerTarget = 0
+        var recoveredAt: Int? = null
         for (second in 0..400) {
             // Each new one-second chunk retains the bitrate at which it was encoded.
             chunks.addLast((controller.target + 192_000) * 1.06 / 8)
@@ -166,12 +207,16 @@ class HttpAdaptiveBitrateControllerTest {
                 if (remaining == 0.0) acknowledged += chunks.removeFirst().toLong()
             }
             highestQueue = maxOf(highestQueue, chunks.size)
-            sample(controller, second, upload(second, chunks.size.toDouble(), acknowledged))
+            val server = HttpUploadServerStats("A", if (second < 80) 3_000_000 else 8_000_000,
+                false, 0, feedbackAgeMs = 0, uploadBitsPerSecond = 20_000_000, uploadRateAgeMs = 0)
+            sample(controller, second, upload(second, chunks.size.toDouble(), acknowledged, servers = listOf(server)))
             if (second == 79) lowerTarget = controller.target
+            if (second >= 80 && controller.target == 5_500_000 && recoveredAt == null) recoveredAt = second
         }
         assertTrue("Congestion did not reduce bitrate", lowerTarget < 3_000_000)
         assertTrue("Unbounded network backlog: $highestQueue", highestQueue < 15)
         assertEquals(5_500_000, controller.target)
         assertTrue(chunks.size <= 1)
+        assertTrue("Slow recovery after measured capacity improved: $recoveredAt", checkNotNull(recoveredAt) <= 105)
     }
 }

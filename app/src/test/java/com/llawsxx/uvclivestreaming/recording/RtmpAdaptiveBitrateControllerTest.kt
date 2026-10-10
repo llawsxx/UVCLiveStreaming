@@ -69,17 +69,32 @@ class RtmpAdaptiveBitrateControllerTest {
         assertTrue(controller.target < 6_000_000)
     }
 
-    @Test fun recoveryProbesAfterTwentyStableSecondsAndDoesNotLockToAchievedThroughput() {
+    @Test fun recoveryDoublesAfterFiveStableSecondsAndDoesNotLockToAchievedThroughput() {
         val controller = RtmpAdaptiveBitrateController(6_000_000, 1_000_000)
         repeat(12) { sample(controller, it, upload(it, inFlight = 100, inFlightAge = it * 1000L, sent = 0)) }
         val reduced = controller.target
         assertTrue(reduced < 6_000_000)
-        repeat(20) { sample(controller, 12 + it) }
+        repeat(5) { sample(controller, 12 + it) }
         assertEquals(reduced, controller.target)
-        sample(controller, 32)
-        assertTrue(controller.target > reduced)
-        repeat(300) { sample(controller, 33 + it, upload(33 + it, sent = (33 + it) * 100_000L)) }
+        sample(controller, 17)
+        assertEquals(minOf(reduced * 2, 6_000_000), controller.target)
+        repeat(30) { sample(controller, 18 + it, upload(18 + it, sent = (18 + it) * 100_000L)) }
         assertEquals(6_000_000, controller.target)
+    }
+
+    @Test fun recoveryQueueGrowthRollsBackAndNextProbeIsSmaller() {
+        val controller = RtmpAdaptiveBitrateController(12_000_000, 1_000_000)
+        repeat(30) { sample(controller, it, upload(it, connected = false, failures = 1, sent = 0)) }
+        val stable = controller.target
+        for (second in 30..35) sample(controller, second)
+        assertEquals(stable * 2, controller.target)
+        sample(controller, 36, upload(36, queue = 400_000, oldest = 800))
+        sample(controller, 37, upload(37, queue = 500_000, oldest = 900))
+        assertEquals(stable * 2, controller.target)
+        sample(controller, 38, upload(38, queue = 600_000, oldest = 1000))
+        assertEquals(stable, controller.target)
+        for (second in 39..44) sample(controller, second)
+        assertEquals(stable + stable / 2, controller.target)
     }
 
     @Test fun staleSamplesAndPausedSamplingDoNotTriggerImmediateReduction() {

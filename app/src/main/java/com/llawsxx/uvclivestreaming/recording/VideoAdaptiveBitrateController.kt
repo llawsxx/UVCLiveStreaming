@@ -25,10 +25,11 @@ internal class VideoAdaptiveBitrateController(private val config: RecordingConfi
             rtmpSession = nextRtmp?.sessionId
             rtmp = nextRtmp?.let { RtmpAdaptiveBitrateController(maximum, config.rtmpMinVideoBitrate) }
         }
-        nextHttp?.let { http?.sample(nowNs, it) }
-        nextRtmp?.let { rtmp?.sample(nowNs, it) }
+        nextHttp?.let { http?.sample(nowNs, it, target) }
+        nextRtmp?.let { rtmp?.sample(nowNs, it, target) }
         target = minOf(http?.target ?: maximum, rtmp?.target ?: maximum)
-        httpStats = http?.let { VideoAutoBitrateStats(target, it.minimum, maximum, it.adjustments, it.status, it.target) }
+        httpStats = http?.let { VideoAutoBitrateStats(target, it.minimum, maximum, it.adjustments, it.status,
+            it.target, it.measuredVideoBudget) }
         rtmpStats = rtmp?.let { VideoAutoBitrateStats(target, it.minimum, maximum, it.adjustments, it.status, it.target) }
     }
 }

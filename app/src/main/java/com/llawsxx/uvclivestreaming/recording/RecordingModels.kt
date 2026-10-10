@@ -559,7 +559,9 @@ data class HttpUploadServerStats(val url: String, val estimatedBitsPerSecond: Lo
     /** Confirmed TS payloads for this destination, including acknowledged rescue copies. */
     val acknowledgedBytes: Long = 0, val acknowledgedBlocks: Long = 0,
     /** Monotonic age of server egress feedback; null means unmeasured/expired. */
-    val feedbackAgeMs: Long? = null)
+    val feedbackAgeMs: Long? = null,
+    /** Payload-to-valid-ACK speed on the phone-to-store leg, in bps; excludes deliberate pacing. */
+    val uploadBitsPerSecond: Long? = null, val uploadRateAgeMs: Long? = null)
 
 enum class HttpUploadRedirectReason(val label: String, val wireValue: String) {
     UPLOAD_FAILURE("上传失败", "upload-failed"), SLOW_DOWNLOAD("接收端下载慢", "download-slow")
@@ -635,7 +637,8 @@ data class RecordingStats(
 data class VideoAutoBitrateStats(val targetBitsPerSecond: Int, val minimumBitsPerSecond: Int,
     val maximumBitsPerSecond: Int, val adjustments: Long, val status: String,
     /** This output's request before another output limits the shared encoder. */
-    val requestedBitsPerSecond: Int = targetBitsPerSecond)
+    val requestedBitsPerSecond: Int = targetBitsPerSecond,
+    val measuredVideoBudgetBitsPerSecond: Int? = null)
 
 /** Bytes accepted by TCP are not confirmations from the RTMP server. Includes the in-flight write. */
 data class RtmpUploadStats(val sessionId: String, val connected: Boolean, val queuedBytes: Long,

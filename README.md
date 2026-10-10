@@ -33,13 +33,24 @@ Android USB camera recorder and streamer.
   defaults to 1000 kbps (the feature defaults off). Original unacknowledged queue
   growth, stalled ACKs, cache eviction and repeated receiver rescue requests trigger
   reductions of 25–50% after sustained congestion, with a five-second cooldown.
-  Fresh store egress feedback reserves audio/TS/retransmission headroom when choosing
-  a reduction; unknown or expired feedback is not assumed to be 3 Mbps. Low achieved
-  throughput alone never reduces bitrate. After 20 healthy seconds, a 10% increase
-  probes recovery, bounded by the ceiling. Retained history and rescue copies do not
+  Phone payload-to-ACK upload speeds and merge's per-store download feedback guide
+  both recovery and reductions. For each usable store, take the slower measured leg,
+  sum these bottlenecks, reserve 15% headroom and 6% TS overhead, then subtract audio.
+  One unmeasured leg uses the other leg; an entirely unknown usable store prevents a
+  misleading partial total. Upload measurements exclude connection setup and deliberate
+  pacing, expire after 10 seconds and omit tiny final chunks. Unknown or expired
+  feedback is not assumed to be 3 Mbps. After five healthy seconds, jump toward the
+  measured video budget; without a complete budget, probe up to double the target.
+  Persistently growing queues during a probe trigger rollback after two pressure
+  seconds, followed by smaller probes within the successful/failed bitrate interval.
+  Near that boundary, hold and reassess after 30 seconds; an improved measured
+  budget more than 25% above the failed probe's measurement can release it earlier.
+  Measurements below the
+  current target still allow small probes to avoid locking to underfilled transfers;
+  a low measurement alone does not reduce bitrate. Retained history and rescue copies do not
   count as original upload backlog. Resolution/FPS remain fixed; already encoded
   chunks retain their previous bitrate. The Output tab shows the target, bounds,
-  adjustment count and reason. Simultaneous recording and RTMP share the changed
+  adjustment count, reason, both measured legs and the video budget. Simultaneous recording and RTMP share the changed
   encoder bitrate; stopping HTTP restores the remaining adaptive output's target,
   or the configured ceiling when none remains. No relay update is
   required. Actual bitrate response depends on the hardware encoder and bitrate mode.
@@ -56,8 +67,10 @@ Android USB camera recorder and streamer.
   samples queue bytes, oldest pending age, the in-flight socket write, overflow
   drops and connection failures. Sustained pressure reduces the target by 25%,
   after at least five startup seconds and three pressure seconds, with at least
-  five seconds between adjustments. After 20 healthy seconds it probes a 10%
-  increase. Small buffers use overflow/occupancy signals; a blocked write is still
+  five seconds between normal adjustments. After five healthy seconds it probes up
+  to double the target. A failed recovery probe can roll back after two pressure
+  seconds, then bisects the successful/failed interval and reassesses its boundary
+  after 30 seconds. Small buffers use overflow/occupancy signals; a blocked write is still
   counted after its packet leaves the queue. Successful TCP writes are not RTMP
   server acknowledgements or measured available bandwidth. Reconnect keeps the
   reduced target, while stopping/restarting that output resets its controller.
@@ -65,6 +78,8 @@ Android USB camera recorder and streamer.
   uses the lower request, also affecting simultaneous recording. The Output tab
   shows the effective target, each link's request, bounds, adjustment count and
   status. Default mode prefers supported CBR; explicit bitrate modes are respected.
+  An output held below its requested rate by another output cannot validate or
+  raise that higher request from the lower-rate traffic.
 - The main status and Output tab show RTMP reconnect attempts for the current
   publishing session. The first connection is excluded; restarting RTMP resets
   the count, and failed retries are included.
