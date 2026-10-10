@@ -7,6 +7,13 @@ import android.media.MediaFormat
 internal val VideoCodec.encoderMime: String get() =
     if (this == VideoCodec.H265) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
 
+internal fun encoderBitrateMode(config: RecordingConfig, supports: (Int) -> Boolean): Int? {
+    config.videoBitrateMode.mediaFormatValue?.let { return it }
+    if (!config.httpUploadEnabled || !config.httpAutoBitrateEnabled) return null
+    return listOf(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
+        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR).firstOrNull(supports)
+}
+
 internal data class VideoEncoderCapabilities(
     val name: String,
     val complexityRange: IntRange,

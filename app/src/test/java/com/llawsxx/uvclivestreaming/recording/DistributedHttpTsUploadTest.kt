@@ -142,6 +142,42 @@ class DistributedHttpTsUploadTest {
         } }
     }
 
+    @Test fun missingEgressHeadersImmediatelyInvalidateAnOldMeasurement() {
+        Store().use { first -> Store().use { second ->
+            DistributedHttpTsUploadWorker(listOf(first.url, second.url), 60) {}.use { worker ->
+                await { worker.snapshot().servers.all { it.estimatedBitsPerSecond == 3_000_000L } }
+                assertTrue(worker.snapshot().servers.all { it.feedbackAgeMs != null })
+                first.rate.set(0)
+                await { worker.snapshot().servers[0].estimatedBitsPerSecond == null }
+                assertNull(worker.snapshot().servers[0].feedbackAgeMs)
+                assertEquals(3_000_000L, worker.snapshot().servers[1].estimatedBitsPerSecond)
+                first.rate.set(750_000)
+                await { worker.snapshot().servers[0].estimatedBitsPerSecond == 6_000_000L }
+            }
+        } }
+    }
+
+    @Test fun singleStoreExtractsFreshEgressFeedbackFromAckAndReusesOnlyTheUploadSocket() {
+        Store(keepAlive = true).use { store ->
+            HttpTsUploadWorker(store.url, 60, {}).use { worker ->
+                assertNull(worker.snapshot().servers.single().estimatedBitsPerSecond)
+                worker.enqueue(block(0), 60)
+                await { worker.bytesAcknowledged.get() == 188L * 128 }
+                val measured = worker.snapshot().servers.single()
+                assertEquals(3_000_000L, measured.estimatedBitsPerSecond)
+                assertTrue(checkNotNull(measured.feedbackAgeMs) < 1_000)
+                store.rate.set(0)
+                worker.enqueue(block(1), 60)
+                await { worker.bytesAcknowledged.get() == 188L * 256 }
+                assertNull(worker.snapshot().servers.single().estimatedBitsPerSecond)
+                assertNull(worker.snapshot().servers.single().feedbackAgeMs)
+                assertEquals(1L, store.connections.get())
+                assertEquals(2, store.requests.size)
+                assertTrue(store.requests.all { it.startsWith("POST") })
+            }
+        }
+    }
+
     @Test fun egressFeedbackWeightsDistributionAndRecoveryRemovesAnOldLongWait() {
         Store(AtomicLong(1_000)).use { slow -> Store(AtomicLong(128_000)).use { fast ->
             DistributedHttpTsUploadWorker(listOf(slow.url, fast.url), 60) {}.use { worker ->
