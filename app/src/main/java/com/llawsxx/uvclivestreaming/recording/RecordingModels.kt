@@ -276,6 +276,10 @@ data class RecordingConfig(
     val rawShadowLiftSmoothness: Float = 0.50f,
     val videoBitrate: Int = 12_000_000,
     val videoBitrateMode: VideoBitrateMode = VideoBitrateMode.DEFAULT,
+    /** Null leaves the corresponding encoder request unspecified. */
+    val videoEncoderComplexity: Int? = null,
+    val videoEncoderProfile: Int? = null,
+    val videoEncoderLevel: Int? = null,
     /** Fractional seconds are supported; zero requests every frame as a key frame. */
     val videoKeyFrameIntervalSeconds: Float = 2f,
     val videoMaxBFrames: Int = 0,
@@ -443,7 +447,8 @@ data class RecordingConfig(
             )
     val videoTransformEnabled: Boolean get() = cropEnabled || resizeEnabled || rotateImagePixels
     val customVideoEncoderParameters: Boolean get() = videoBitrateMode != VideoBitrateMode.DEFAULT ||
-        videoKeyFrameIntervalSeconds != 2f || videoMaxBFrames != 0
+        videoKeyFrameIntervalSeconds != 2f || videoMaxBFrames != 0 ||
+        videoEncoderComplexity != null || videoEncoderProfile != null || videoEncoderLevel != null
     val effectiveAudioAacProfile: AudioAacProfile get() =
         if (container == ContainerFormat.MPEG_TS) AudioAacProfile.LC else audioAacProfile
     val audioSessionEffectsRequested: Boolean get() =

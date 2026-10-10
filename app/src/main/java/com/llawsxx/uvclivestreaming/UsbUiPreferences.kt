@@ -57,6 +57,9 @@ internal data class UsbUiSettings(
     val bFrames: String = "0",
     val videoCodec: VideoCodec = VideoCodec.H264,
     val bitrateMode: VideoBitrateMode = VideoBitrateMode.DEFAULT,
+    val encoderComplexity: String = "",
+    val encoderProfile: Int = 0,
+    val encoderLevel: Int = 0,
     val audioRate: Int = 0,
     val bufferFrames: Int = 15,
     val receiveTransferCount: Int = 256,
@@ -147,6 +150,9 @@ internal object UsbUiPreferences {
             bFrames = p.getString("bFrames", "0").orEmpty(),
             videoCodec = enumValue(p.getString("videoCodec", null), VideoCodec.H264),
             bitrateMode = enumValue(p.getString("bitrateMode", null), VideoBitrateMode.DEFAULT),
+            encoderComplexity = p.getString("encoderComplexity", "").orEmpty(),
+            encoderProfile = p.getInt("encoderProfile", 0).coerceAtLeast(0),
+            encoderLevel = p.getInt("encoderLevel", 0).takeIf { p.getInt("encoderProfile", 0) > 0 } ?: 0,
             audioRate = p.getInt("audioRate", 0),
             bufferFrames = p.getInt("bufferFrames", 15).coerceIn(1, 30),
             receiveTransferCount = p.getInt("receiveTransferCount",
@@ -230,6 +236,9 @@ internal object UsbUiPreferences {
             .putString("bFrames", settings.bFrames)
             .putString("videoCodec", settings.videoCodec.name)
             .putString("bitrateMode", settings.bitrateMode.name)
+            .putString("encoderComplexity", settings.encoderComplexity)
+            .putInt("encoderProfile", settings.encoderProfile)
+            .putInt("encoderLevel", if (settings.encoderProfile > 0) settings.encoderLevel else 0)
             .putInt("audioRate", settings.audioRate)
             .putInt("bufferFrames", settings.bufferFrames.coerceIn(1, 30))
             .putInt("receiveTransferCount", settings.receiveTransferCount.coerceIn(8, 512))

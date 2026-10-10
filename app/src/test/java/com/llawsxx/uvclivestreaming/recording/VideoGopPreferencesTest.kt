@@ -6,6 +6,21 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VideoGopPreferencesTest {
+    @Test fun encoderRequestsPersistAndDefaultsRemoveExplicitSettings() {
+        val prefs = preferences(mutableMapOf())
+        assertEquals(null, ConfigPreferences.load(prefs).videoEncoderComplexity)
+        ConfigPreferences.save(prefs, RecordingConfig(videoEncoderComplexity = 0,
+            videoEncoderProfile = 8, videoEncoderLevel = 4096))
+        val loaded = ConfigPreferences.load(prefs)
+        assertEquals(0, loaded.videoEncoderComplexity)
+        assertEquals(8, loaded.videoEncoderProfile)
+        assertEquals(4096, loaded.videoEncoderLevel)
+        ConfigPreferences.save(prefs, RecordingConfig())
+        val defaults = ConfigPreferences.load(prefs)
+        assertEquals(null, defaults.videoEncoderComplexity)
+        assertEquals(null, defaults.videoEncoderProfile)
+        assertEquals(null, defaults.videoEncoderLevel)
+    }
     @Test fun httpUploadSettingsPersistAndClamp() {
         val values = mutableMapOf<String, Any?>()
         val prefs = preferences(values)

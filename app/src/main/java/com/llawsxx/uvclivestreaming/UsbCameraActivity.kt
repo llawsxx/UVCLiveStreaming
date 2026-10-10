@@ -48,6 +48,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -104,6 +105,11 @@ import com.llawsxx.uvclivestreaming.recording.runTestCardFrames
 import com.llawsxx.uvclivestreaming.recording.videoSmoothingFrameRate
 import com.llawsxx.uvclivestreaming.recording.VideoBitrateMode
 import com.llawsxx.uvclivestreaming.recording.VideoCodec
+import com.llawsxx.uvclivestreaming.recording.VideoEncoderCapabilities
+import com.llawsxx.uvclivestreaming.recording.readVideoEncoderCapabilities
+import com.llawsxx.uvclivestreaming.recording.encoderProfileLabel
+import com.llawsxx.uvclivestreaming.recording.encoderLevelLabel
+import kotlinx.coroutines.withContext
 import com.llawsxx.uvclivestreaming.recording.VideoColorRange
 import com.llawsxx.uvclivestreaming.recording.VideoColorStandard
 import com.llawsxx.uvclivestreaming.recording.VideoColorMatrix
@@ -272,6 +278,27 @@ private fun UsbCameraScreen() {
     var bFrames by rememberSaveable { mutableStateOf(uiSettings.bFrames) }
     var videoCodec by rememberSaveable { mutableStateOf(uiSettings.videoCodec) }
     var bitrateMode by rememberSaveable { mutableStateOf(uiSettings.bitrateMode) }
+    var encoderComplexity by rememberSaveable { mutableStateOf(uiSettings.encoderComplexity) }
+    var encoderProfile by rememberSaveable { mutableStateOf(uiSettings.encoderProfile) }
+    var encoderLevel by rememberSaveable { mutableStateOf(uiSettings.encoderLevel) }
+    val encoderCapabilitiesResult by produceState<Result<VideoEncoderCapabilities>?>(null, videoCodec) {
+        value = null
+        value = withContext(Dispatchers.Default) { runCatching { readVideoEncoderCapabilities(videoCodec) } }
+    }
+    val encoderCapabilities = encoderCapabilitiesResult?.getOrNull()
+    val encoderComplexityValue = encoderComplexity.toIntOrNull()
+    val encoderSettingsError = when {
+        encoderComplexity.isNotBlank() && (encoderComplexityValue == null || encoderComplexityValue < 0) ->
+            "编码复杂度请输入支持范围内的整数，留空使用编码器默认值"
+        encoderCapabilities != null -> runCatching {
+            encoderCapabilities.requestedValues(RecordingConfig(videoCodec = videoCodec,
+                videoEncoderComplexity = encoderComplexityValue, videoEncoderProfile = encoderProfile.takeIf { it > 0 },
+                videoEncoderLevel = encoderLevel.takeIf { it > 0 }))
+        }.exceptionOrNull()?.message
+        encoderCapabilitiesResult?.isFailure == true &&
+            (encoderComplexity.isNotBlank() || encoderProfile > 0 || encoderLevel > 0) -> "无法读取编码器能力，请恢复默认设置后重试"
+        else -> null
+    }
     var yuvMatrix by rememberSaveable { mutableStateOf(uiSettings.yuvMatrix) }
     var sourceRange by rememberSaveable { mutableStateOf(uiSettings.sourceRange) }
     var yuvEncoderInput by rememberSaveable { mutableStateOf(uiSettings.yuvEncoderInput) }
@@ -338,7 +365,7 @@ private fun UsbCameraScreen() {
     LaunchedEffect(
         selectedName, selectedMode?.display, customVideoMode, testCardSettings, includeAudio, audioInput, uacDevice, uacBitDepth, systemAudioInput, audioPreviewEnabled, audioDsp, videoColorGrade, previewEnabled, lowFrameRatePreview, keepScreenOn,
         container, confirmStopOutputs, httpUploadEnabled, httpUploadUrl, httpUploadChunkSeconds, httpUploadCacheSeconds,
-        rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, audioRate,
+        rtmpUrl, rtmpBufferMs, rtmpSendTimeoutSeconds, videoBitrateKbps, audioBitrateKbps, audioDelayMs, muxingQueueSize, gopSeconds, bFrames, videoCodec, bitrateMode, encoderComplexity, encoderProfile, encoderLevel, audioRate,
         bufferFrames, receiveTransferCount, yuvMatrix, sourceRange, yuvEncoderInput, timestampSmoothingEnabled, timestampSmoothingNtscEnabled,
         encoderColorStandard, encoderColorTransfer, encoderColorRange,
         timestampSmoothingMaxDeltaSeconds,
@@ -377,6 +404,9 @@ private fun UsbCameraScreen() {
             bFrames = bFrames,
             videoCodec = videoCodec,
             bitrateMode = bitrateMode,
+            encoderComplexity = encoderComplexity,
+            encoderProfile = encoderProfile,
+            encoderLevel = encoderLevel,
             audioRate = audioRate,
             bufferFrames = bufferFrames,
             receiveTransferCount = receiveTransferCount,
@@ -707,6 +737,10 @@ private fun UsbCameraScreen() {
                 message = "时间戳平滑最大偏差请输入大于或等于 0 的秒数"
                 return@LaunchedEffect
             }
+            if (encoderSettingsError != null) {
+                message = encoderSettingsError
+                return@LaunchedEffect
+            }
             previewRequested = false
             val previous = idlePreview
             idlePreview = null
@@ -724,6 +758,9 @@ private fun UsbCameraScreen() {
                 yuvMatrix, sourceRange, yuvEncoderInput,
                 encoderColorStandard, encoderColorTransfer, encoderColorRange,
                 forceSpsVui, rewriteColorRange, rewriteColorStandard, rewriteColorMatrix, rewriteColorTransfer,
+                videoEncoderComplexity = encoderComplexityValue,
+                videoEncoderProfile = encoderProfile.takeIf { it > 0 },
+                videoEncoderLevel = encoderLevel.takeIf { it > 0 },
             )
             ConfigPreferences.save(context, config)
             previous?.stop {
@@ -1019,13 +1056,38 @@ private fun UsbCameraScreen() {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Box(Modifier.weight(1f)) {
                         UsbSettingChoice("编码", VideoCodec.entries, videoCodec, !recording,
-                            { it.label }) { videoCodec = it }
+                            { it.label }) {
+                            if (videoCodec != it) {
+                                encoderComplexity = ""; encoderProfile = 0; encoderLevel = 0
+                            }
+                            videoCodec = it
+                        }
                     }
                     Box(Modifier.weight(1f)) {
                         UsbSettingChoice("码率模式", VideoBitrateMode.entries, bitrateMode, !recording,
                             { it.label }) { bitrateMode = it }
                     }
                 }
+                OutlinedTextField(encoderComplexity, { encoderComplexity = it.filter(Char::isDigit) }, enabled = !recording,
+                    singleLine = true, modifier = Modifier.fillMaxWidth(), label = { Text("编码复杂度（KEY_COMPLEXITY）") },
+                    placeholder = { Text("编码器默认") },
+                    supportingText = { Text(encoderCapabilities?.let {
+                        "支持范围 ${it.complexityRange.first}～${it.complexityRange.last}；留空使用默认值"
+                    } ?: if (encoderCapabilitiesResult == null) "正在读取编码器能力…" else "未能读取编码器能力") },
+                    isError = encoderComplexity.isNotBlank() && (encoderComplexityValue == null ||
+                        encoderComplexityValue !in (encoderCapabilities?.complexityRange ?: 0..Int.MAX_VALUE)),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                UsbSettingChoice("Profile（KEY_PROFILE）", listOf(0) + encoderCapabilities?.profiles.orEmpty(),
+                    encoderProfile, !recording, { if (it == 0) "编码器默认" else videoCodec.encoderProfileLabel(it) }) {
+                    encoderProfile = it; encoderLevel = 0
+                }
+                UsbSettingChoice("Level（KEY_LEVEL）", listOf(0) + encoderCapabilities?.levels(videoCodec, encoderProfile).orEmpty(),
+                    encoderLevel, !recording && encoderProfile > 0,
+                    { if (it == 0) "自动" else videoCodec.encoderLevelLabel(it) }) { encoderLevel = it }
+                Text("先选择 Profile 再设置 Level；自动等级按分辨率、帧率和码率选择。Level 是编码提示，实际输出可能调整。切换 H.264／HEVC 会恢复这三项默认值。",
+                    style = MaterialTheme.typography.bodySmall)
+                encoderSettingsError?.let { Text(it, color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall) }
                 OutlinedTextField(videoBitrateKbps, { videoBitrateKbps = it.filter(Char::isDigit) }, enabled = !recording,
                     singleLine = true, modifier = Modifier.fillMaxWidth(), label = { Text("视频码率 kbps") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
@@ -1308,7 +1370,9 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
                                encoderColorRange: VideoColorRange,
                                forceSpsVui: Boolean, rewriteColorRange: VideoColorRange,
                                rewriteColorStandard: VideoColorStandard, rewriteColorMatrix: VideoColorMatrix,
-                               rewriteColorTransfer: VideoColorTransfer): RecordingConfig {
+                               rewriteColorTransfer: VideoColorTransfer,
+                               videoEncoderComplexity: Int? = null, videoEncoderProfile: Int? = null,
+                               videoEncoderLevel: Int? = null): RecordingConfig {
     val saved = ConfigPreferences.load(context)
     return RecordingConfig(
         mode = if (audio) RecordingMode.AUDIO_VIDEO else RecordingMode.VIDEO,
@@ -1343,6 +1407,9 @@ private fun usbRecordingConfig(context: Context, device: UsbDevice?, mode: UsbVi
         videoCodec = videoCodec,
         videoBitrate = videoBitrate,
         videoBitrateMode = bitrateMode,
+        videoEncoderComplexity = videoEncoderComplexity,
+        videoEncoderProfile = videoEncoderProfile,
+        videoEncoderLevel = videoEncoderLevel,
         videoKeyFrameIntervalSeconds = gopSeconds,
         videoMaxBFrames = bFrames,
         audioBitrate = audioBitrate,

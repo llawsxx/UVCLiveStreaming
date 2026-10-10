@@ -288,12 +288,15 @@ class UsbRecorderEngine(
                 setInteger(MediaFormat.KEY_FRAME_RATE, config.fps.roundToInt().coerceIn(1, 240))
                 applyEncoderGopSettings(config)
                 config.videoBitrateMode.mediaFormatValue?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
+                applyEncoderAdvancedSettings(config, VideoEncoderCapabilities.from(codec.codecInfo, mime))
                 applyEncoderColorSettings(colors)
             }
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             encoderInputSurface = if (direct) null else codec.createInputSurface()
             Log.i("UsbVideoDiagnostics", "Encoder input=${if (direct) "YUV" else "Surface"} codec=${codec.name} " +
-                "standard=${colors.colorStandard.label} range=${colors.colorRange.label}")
+                "standard=${colors.colorStandard.label} range=${colors.colorRange.label} " +
+                "complexity=${config.videoEncoderComplexity} profile=${config.videoEncoderProfile} " +
+                "level=${if (format.containsKey(MediaFormat.KEY_LEVEL)) format.getInteger(MediaFormat.KEY_LEVEL) else null}")
             return codec
         } catch (error: Throwable) { codec.release(); throw error }
     }

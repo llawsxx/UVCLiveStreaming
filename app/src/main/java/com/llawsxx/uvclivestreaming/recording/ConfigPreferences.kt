@@ -108,6 +108,9 @@ object ConfigPreferences {
             rawShadowLiftSmoothness = p.getFloat("rawShadowLiftSmoothness", 0.50f).coerceIn(0f, 1f),
             videoBitrate = p.getInt("videoBitrate", 12_000_000),
             videoBitrateMode = enumValue(p.getString("videoBitrateMode", null), VideoBitrateMode.DEFAULT),
+            videoEncoderComplexity = p.getInt("videoEncoderComplexity", -1).takeIf { it >= 0 },
+            videoEncoderProfile = p.getInt("videoEncoderProfile", 0).takeIf { it > 0 },
+            videoEncoderLevel = p.getInt("videoEncoderLevel", 0).takeIf { it > 0 && p.getInt("videoEncoderProfile", 0) > 0 },
             // The previous version stored whole seconds as Int under the same key.
             videoKeyFrameIntervalSeconds = (p.all["videoKeyFrameIntervalSeconds"] as? Number)
                 ?.toFloat()?.takeIf { it.isFinite() }?.coerceIn(0f, 60f) ?: 2f,
@@ -316,6 +319,9 @@ object ConfigPreferences {
             .putFloat("rawShadowLiftSmoothness", c.effectiveRawShadowLiftSmoothness)
             .putInt("videoBitrate", c.videoBitrate)
             .putString("videoBitrateMode", c.videoBitrateMode.name)
+            .putInt("videoEncoderComplexity", c.videoEncoderComplexity ?: -1)
+            .putInt("videoEncoderProfile", c.videoEncoderProfile ?: 0)
+            .putInt("videoEncoderLevel", c.videoEncoderLevel ?: 0)
             .putFloat("videoKeyFrameIntervalSeconds", c.videoKeyFrameIntervalSeconds)
             .putInt("videoMaxBFrames", c.videoMaxBFrames)
             .putInt("audioBitrate", c.audioBitrate)
