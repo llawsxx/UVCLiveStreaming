@@ -74,7 +74,7 @@ class HttpAdaptiveBitrateControllerTest {
     @Test fun freshEgressBudgetReservesAudioAndExpiredOrPartialFeedbackDoesNotLimitBitrate() {
         fun reduced(servers: List<HttpUploadServerStats>): Int {
             val controller = HttpAdaptiveBitrateController(6_000_000, 100_000, 192_000)
-            repeat(7) { sample(controller, it, upload(it, queue = 3.0 + it, servers = servers)) }
+            repeat(10) { sample(controller, it, upload(it, queue = 3.0 + it, servers = servers)) }
             return controller.target
         }
         val server = HttpUploadServerStats("A", 4_000_000, false, 0, feedbackAgeMs = 0)
@@ -201,7 +201,7 @@ class HttpAdaptiveBitrateControllerTest {
                 ?.let { changes += second }
         }
         assertTrue(changes.isNotEmpty())
-        assertEquals(6, changes.first())
+        assertEquals(9, changes.first())
         assertTrue(changes.zipWithNext().all { (a, b) -> b - a >= 5 })
         assertEquals(1_000_000, controller.target)
     }
@@ -237,16 +237,110 @@ class HttpAdaptiveBitrateControllerTest {
     @Test fun mergeBacklogPreventsPrematureRecoveryAndFailedProbeRollsBack() {
         val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
         repeat(10) { sample(controller, it, upload(it,
-            servers = listOf(mergeServer(10.0, rate = 10_000_000)))) }
+            servers = listOf(mergeServer(10.0 + it, rate = 10_000_000)))) }
+        for (second in 10..20) sample(controller, second,
+            upload(second, servers = listOf(mergeServer(3.0, 4_000, rate = 10_000_000))))
         val stable = controller.target
-        for (second in 10..20) assertNull(sample(controller, second,
-            upload(second, servers = listOf(mergeServer(3.0, rate = 10_000_000)))))
+        assertTrue(stable < 6_000_000)
         for (second in 21..26) sample(controller, second,
             upload(second, servers = listOf(mergeServer(0.5, rate = 10_000_000))))
         assertTrue(controller.target > stable)
         for (second in 27..29) sample(controller, second,
             upload(second, servers = listOf(mergeServer(2.0 + second - 27, rate = 10_000_000))))
         assertEquals(stable, controller.target)
+    }
+
+    @Test fun eightStoresWithStableEightSecondPipelineDoNotReduceEvenDuringBatchDeliveryGaps() {
+        for (batchDelivery in listOf(false, true)) {
+            val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+            repeat(90) { second ->
+                val pending = if (batchDelivery) 1.0 + second % 8 else 8.0
+                val wait = if (batchDelivery) second % 8 * 1_000L else 500L
+                val servers = List(8) { mergeServer(pending, wait).copy(url = "store-$it") }
+                assertNull("Normal eight-store pipeline reduced at $second",
+                    sample(controller, second, upload(second, servers = servers)))
+            }
+            assertEquals(6_000_000, controller.target)
+        }
+    }
+
+    @Test fun stableEightStorePipelineAllowsRecoveryAfterAnEarlierReduction() {
+        val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(10) { sample(controller, it, upload(it, queue = it.toDouble())) }
+        val reduced = controller.target
+        assertTrue(reduced < 6_000_000)
+        for (second in 10..35) sample(controller, second, upload(second,
+            servers = List(8) { mergeServer(8.0, rate = 10_000_000).copy(url = "store-$it") }))
+        assertEquals(6_000_000, controller.target)
+    }
+
+    @Test fun fillingAnEightSecondPipelineThenDeliveringAtSourceSpeedIsNotCongestion() {
+        val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(50) { second ->
+            val servers = List(8) {
+                mergeServer(minOf(second.toDouble(), 8.0),
+                    if (second <= 8) second * 1_000L else 500L).copy(url = "store-$it")
+            }
+            assertNull(sample(controller, second, upload(second, servers = servers)))
+        }
+        assertEquals(6_000_000, controller.target)
+    }
+
+    @Test fun rescueRequestsCannotOverrideFreshEvidenceOfAStableEightStorePipeline() {
+        val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(50) { second ->
+            val servers = List(8) { mergeServer(8.0).copy(url = "store-$it") }
+            assertNull(sample(controller, second, upload(second, rescues = (second / 5).toLong(), servers = servers)))
+        }
+        assertEquals(6_000_000, controller.target)
+    }
+
+    @Test fun eightStorePipelineStillReducesWhenBacklogGrowsOrAllDeliveryStalls() {
+        for (stalled in listOf(false, true)) {
+            val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+            repeat(25) { second ->
+                val servers = List(8) {
+                    mergeServer(if (stalled) 8.0 else 8.0 + second / 2,
+                        if (stalled) second * 1_000L else 500L).copy(url = "store-$it")
+                }
+                sample(controller, second, upload(second, servers = servers))
+            }
+            assertTrue("True merge congestion was ignored", controller.target < 6_000_000)
+        }
+    }
+
+    @Test fun eightStoreUploadsCanFillAndKeepAStablePipelineWithBatchAcknowledgements() {
+        val servers = List(8) { HttpUploadServerStats("store-$it", null, false, 0) }
+        for (batch in listOf(false, true)) {
+            val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+            repeat(90) { second ->
+                val queue = if (batch) 1.0 + second % 8 else minOf(second.toDouble(), 8.0)
+                val ack = if (batch) second / 8 * 8 * 600_000L else maxOf(0, second - 8) * 600_000L
+                assertNull("Normal upload pipeline reduced at $second (batch=$batch)",
+                    sample(controller, second, upload(second, queue, ack, servers = servers)))
+            }
+            assertEquals(6_000_000, controller.target)
+        }
+    }
+
+    @Test fun eightStoreUploadsStillReduceForGrowingQueuesAndStoppedAcknowledgements() {
+        val servers = List(8) { HttpUploadServerStats("store-$it", null, false, 0) }
+        for (stopped in listOf(false, true)) {
+            val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+            repeat(30) { second ->
+                sample(controller, second, upload(second, if (stopped) 8.0 else 8.0 + second / 2,
+                    if (stopped) 0 else second * 600_000L, servers = servers))
+            }
+            assertTrue(controller.target < 6_000_000)
+        }
+    }
+
+    @Test fun gradualQuantizedBacklogGrowthStillReducesInsteadOfBeingMistakenForStablePipeline() {
+        val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(40) { second ->
+            sample(controller, second, upload(second, servers = listOf(mergeServer(3.0 + second / 5))))
+        }
+        assertTrue(controller.target < 6_000_000)
     }
 
     @Test fun storeToMergeOnlyBandwidthDropConvergesAndRecoversWhilePhoneQueueStaysEmpty() {

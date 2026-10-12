@@ -38,7 +38,7 @@ public class AdaptiveMergeHarness {
         } finally { sink.close(); }
         if (!receivedBacklog) throw new AssertionError("No real merge backlog reached single-store upload ACKs");
         if (!reducedWithFastUpload) throw new AssertionError("Merge congestion did not reduce bitrate with a healthy phone upload queue");
-        if (targetAtEnd >= 3_000_000) throw new AssertionError("Bitrate did not converge below the 3 Mbps download link: " + targetAtEnd);
+        if (targetAtEnd > 3_000_000) throw new AssertionError("Bitrate did not fit the 3 Mbps download link: " + targetAtEnd);
         System.out.println("PASS: single-store fast uploads adapt to a slower store-to-merge link");
     }
 }

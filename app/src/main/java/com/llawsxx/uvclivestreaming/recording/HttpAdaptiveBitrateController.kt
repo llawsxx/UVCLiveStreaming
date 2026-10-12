@@ -23,8 +23,8 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
     private var lastDropNs: Long? = null
     private var rescueCount = 0L
     private val rescues = ArrayDeque<Pair<Long, Long>>()
-    private var queueSeconds = 0.0
-    private var mergeQueueSeconds: Double? = null
+    private val uploadQueueTrend = HttpPipelineQueueTrend()
+    private val mergeQueueTrend = HttpPipelineQueueTrend()
     private var pressureSince: Long? = null
     private var healthySince: Long? = null
     private val recovery = BitrateRecoveryProbe()
@@ -36,18 +36,17 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
         if (previousNs == null) {
             startedNs = nowNs; lastNs = nowNs; lastAckNs = nowNs
             acknowledged = upload.acknowledgedBytes; dropped = upload.originalDroppedBlocks
-            rescueCount = upload.slowDownloadRescues; queueSeconds = pending
+            rescueCount = upload.slowDownloadRescues
             return null
         }
         val seconds = (nowNs - previousNs) / 1_000_000_000.0
         lastNs = nowNs
         if (seconds > 3.0) {
-            pressureSince = null; healthySince = null; queueSeconds = pending
-            mergeQueueSeconds = null; recovery.abandon()
+            pressureSince = null; healthySince = null
+            uploadQueueTrend.clear(); mergeQueueTrend.clear(); recovery.abandon()
         }
-        val previousQueue = queueSeconds
-        queueSeconds = queueSeconds * 0.5 + pending * 0.5
-        val growth = (queueSeconds - previousQueue) / seconds
+        val uploadPaths = upload.servers.count { it.consecutiveFailures == 0 }.coerceAtLeast(1)
+        val uploadTrend = uploadQueueTrend.sample(nowNs, pending, uploadPaths)
         if (upload.acknowledgedBytes > acknowledged) lastAckNs = nowNs
         acknowledged = upload.acknowledgedBytes
         if (upload.originalDroppedBlocks > dropped) lastDropNs = nowNs
@@ -67,22 +66,27 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
         val currentReports = reports.filter { newestAge != null && it.ageMs <= newestAge + 1_000 }
         val mergePending = currentReports.maxOfOrNull { it.pendingDurationUs / 1_000_000.0 }
         val mergeWait = currentReports.maxOfOrNull { it.headWaitMs } ?: 0
-        val previousMergeQueue = mergeQueueSeconds
-        mergeQueueSeconds = mergePending?.let { (previousMergeQueue ?: it) * 0.5 + it * 0.5 }
-        val mergeGrowth = if (mergePending != null && previousMergeQueue != null)
-            (checkNotNull(mergeQueueSeconds) - previousMergeQueue) / seconds else 0.0
+        // A parallel download pipeline can retain many seconds at steady throughput.
+        // Observe at least one one-second-chunk cycle across the reporting paths.
+        val mergePaths = currentReports.size.coerceAtLeast(1)
+        val mergeTrend = mergePending?.let { mergeQueueTrend.sample(nowNs, it, mergePaths) }
+            ?: run { mergeQueueTrend.clear(); null }
+        val mergeGrowing = mergeTrend?.growing == true
+        val mergeStalled = mergePending != null && mergePending >= 2.0 &&
+            mergeWait >= maxOf(3_000L, (mergePaths + 2) * 1_000L)
+        val mergeHealthy = mergePending == null ||
+            mergeWait <= maxOf(1_500L, mergePaths * 1_000L) &&
+            (mergePending <= 1.5 || mergeTrend?.stable == true)
         val reason = when {
             lastDropNs?.let { nowNs - it <= 5_000_000_000L } == true -> "上传缓存发生淘汰"
-            pending >= 2.0 && nowNs - lastAckNs >= 3_000_000_000L -> "上传确认停滞"
-            recovery.probing && pending >= 2.0 && growth > 0.1 -> "试探提升后分段排队"
-            recovery.probing && mergePending != null && mergePending >= 2.0 && mergeGrowth > 0.1 -> "试探提升后 merge 下载积压"
-            mergePending != null && mergePending >= 2.0 && mergeWait >= 3_000 -> "merge 连续分段交付停滞"
-            mergePending != null && mergePending >= 3.0 && mergeGrowth > 0.1 -> "store → merge 下载积压持续增加"
-            mergePending != null && mergePending >= 6.0 && mergeGrowth >= -0.1 -> "store → merge 下载积压未消退"
-            measuredBudget != null && target > measuredBudget * 1.1 && pending >= 2.0 && growth > 0.1 -> "测速低于当前码率，分段持续排队"
-            pending >= 3.0 && growth > 0.1 -> "待上传分段持续增加"
-            pending >= 6.0 && growth >= -0.1 -> "上传积压未消退"
-            repeatedRescue -> "接收端连续请求慢块补传"
+            pending >= 2.0 && nowNs - lastAckNs >= maxOf(3_000_000_000L, (uploadPaths + 2) * 1_000_000_000L) -> "上传确认停滞"
+            recovery.probing && pending >= 2.0 && uploadTrend.growing -> "试探提升后分段排队"
+            recovery.probing && mergePending != null && mergePending >= 2.0 && mergeGrowing -> "试探提升后 merge 下载积压"
+            mergeStalled -> "merge 连续分段交付停滞"
+            mergePending != null && mergePending >= 3.0 && mergeGrowing -> "store → merge 下载积压持续增加"
+            measuredBudget != null && target > measuredBudget * 1.1 && pending >= 2.0 && uploadTrend.growing -> "测速低于当前码率，分段持续排队"
+            pending >= 3.0 && uploadTrend.growing -> "待上传分段持续增加"
+            repeatedRescue && (mergePending == null || mergeStalled || mergeGrowing) -> "接收端连续请求慢块补传"
             else -> null
         }
         if (reason != null) {
@@ -108,9 +112,11 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
             return null
         }
         pressureSince = null
-        val healthy = pending <= 1.5 && nowNs - lastAckNs <= 2_500_000_000L &&
-            (mergePending == null || mergePending <= 1.5 && mergeWait <= 1_500) &&
-            !recentRescue && (lastDropNs?.let { nowNs - it > 15_000_000_000L } ?: true) &&
+        val healthy = (pending <= 1.5 || uploadTrend.stable) &&
+            nowNs - lastAckNs <= maxOf(2_500_000_000L, uploadPaths * 1_000_000_000L) &&
+            mergeHealthy &&
+            (!recentRescue || mergePending != null && mergeHealthy) &&
+            (lastDropNs?.let { nowNs - it > 15_000_000_000L } ?: true) &&
             (upload.servers.isEmpty() || upload.servers.any { it.consecutiveFailures == 0 })
         if (healthy && effectiveBitrate >= target) {
             if (healthySince == null) healthySince = nowNs
