@@ -1253,7 +1253,7 @@ private fun UsbCameraScreen() {
                             enabled = !recording && outputControlsEnabled, singleLine = true,
                             label = { Text("最低视频码率（kbps）") }, modifier = Modifier.fillMaxWidth(),
                             isError = minimum == null || minimum !in 100..maximum)
-                        Text("视频码率设置作为上限。稳定 5 秒后，按上传与 merge 下载测速预留余量提码；测速不完整时大幅试探。持续排队后回退并细调。分辨率和帧率保持当前设置，同时录像或 RTMP 也会使用调整后的码率。",
+                        Text("视频码率设置作为上限。稳定 5 秒后，按上传与 merge 下载测速预留余量提码；测速不完整时大幅试探。手机上传或 merge 下载持续积压时降低码率，提码失败后回退并细调。merge 积压反馈需更新 store 和 merge。分辨率和帧率保持当前设置，同时录像或 RTMP 也会使用调整后的码率。",
                             style = MaterialTheme.typography.bodySmall)
                         Text("码率模式选默认时优先使用编码器支持的 CBR；显式选择 VBR 时，实际输出可能偏离目标码率。",
                             style = MaterialTheme.typography.bodySmall)
@@ -1365,6 +1365,11 @@ private fun UsbCameraScreen() {
                             if (stats.httpAutoBitrate != null) {
                                 val upstream = server.uploadBitsPerSecond?.let { String.format(Locale.US, "%.2f Mbps", it / 1_000_000.0) } ?: "待评估"
                                 Text("上传测速：$upstream · merge 下载测速：$bandwidth", style = MaterialTheme.typography.bodySmall)
+                                server.mergeFeedback?.takeIf { it.sessionId == upload.sessionId }?.let { feedback ->
+                                    Text(String.format(Locale.US, "merge 下载积压：%.1f 秒 · 当前分段等待：%.1f 秒",
+                                        feedback.pendingDurationUs / 1_000_000.0, feedback.headWaitMs / 1_000.0),
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
                             }
                             Text(String.format(Locale.US, "累计上传（已确认）：%.2f MiB · %d 块",
                                 server.acknowledgedBytes / (1024.0 * 1024.0), server.acknowledgedBlocks),

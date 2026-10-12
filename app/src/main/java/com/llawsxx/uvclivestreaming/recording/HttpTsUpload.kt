@@ -232,6 +232,7 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     private var measuredRate: Long? = null
     private var measuredNs = 0L
     private val uploadRate = HttpUploadRateMeter()
+    private val mergeFeedback = HttpMergeFeedbackMeter()
     private val thread: Thread
     override val pendingBlocks: Int get() = queue.size
     data class Stats(val queue: TsUploadQueue.Stats, val uploadingSequence: Long?,
@@ -247,7 +248,8 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
         val upstream = uploadRate.reading(now)
         Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get(),
             servers = listOf(HttpUploadServerStats(url, measuredRate?.takeIf { age != null }, uploadingSequence != null, consecutiveFailures,
-                bytesAcknowledged.get(), acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs)))
+                bytesAcknowledged.get(), acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs,
+                mergeFeedback.reading(now))))
     }
 
     init {
@@ -338,6 +340,7 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
             }
             synchronized(wake) {
                 uploadRate.record(block.data.size, response.transferNs, System.nanoTime())
+                mergeFeedback.record(response.headers, System.nanoTime())
                 measuredRate = response.headers["x-download-rate-bps"]?.toLongOrNull()?.takeIf {
                     response.headers["x-relay-mode"] == "store" && it in 1_000..125_000_000
                 }?.times(8)

@@ -34,6 +34,62 @@ def merge_args(a, b=None, gap=2):
     return result
 
 
+def merge_feedback(binary):
+    with relay(binary, extra_args=["--mode", "store"]) as source:
+        assert "X-Merge-Pending-Us" not in get(source, "/status/live")[1]
+        assert upload(source, "ordered", 0, ts(1), 1_000_000, False,
+                      {"X-Session-Started-Ms": "1000", "X-Start-Us": "0"})[0] == 200
+        headers = {"X-Merge-Session": "ordered", "X-Merge-Pending-Us": "1000000",
+                   "X-Merge-Cursor-Us": "0", "X-Merge-Wait-Ms": "4000"}
+        assert get(source, "/feedback/live", headers)[0] == 200
+        result = upload(source, "ordered", 1, ts(2), 1_000_000, False,
+                        {"X-Session-Started-Ms": "1000", "X-Start-Us": "1000000"})
+        assert result[1]["X-Merge-Pending-Us"] == "2000000", result
+        assert result[1]["X-Merge-Wait-Ms"] == "4000", result
+        assert int(result[1]["X-Merge-Feedback-Age-Ms"]) < 1000
+        headers.update({"X-Merge-Cursor-Us": "2000000", "X-Merge-Pending-Us": "0", "X-Merge-Wait-Ms": "0"})
+        assert get(source, "/feedback/live", headers)[0] == 200
+        assert get(source, "/status/live")[1]["X-Merge-Pending-Us"] == "0"
+        assert upload(source, "new-session", 0, ts(3), 1_000_000, False,
+                      {"X-Session-Started-Ms": "2000", "X-Start-Us": "0"})[0] == 200
+        assert "X-Merge-Pending-Us" not in get(source, "/status/live")[1]
+    print("PASS: store forwards merge backlog in ACKs, includes new uploads during blocked indexes, and isolates sessions", flush=True)
+
+    with relay(binary, delay=12, extra_args=["--mode", "store"]) as source:
+        with relay(binary, delay=12, extra_args=merge_args(source)):
+            for seq in range(12):
+                assert upload(source, "ordered", seq, ts(seq + 1), 1_000_000, False,
+                              {"X-Session-Started-Ms": "1000", "X-Start-Us": str(seq * 1_000_000)})[0] == 200
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                headers = get(source, "/status/live")[1]
+                if headers.get("X-Merge-Session") == "ordered" and headers.get("X-Merge-Pending-Us") == "0":
+                    break
+                time.sleep(.05)
+            else:
+                raise AssertionError(headers)
+    print("PASS: 12-second intentional playback delay is excluded from merge download backlog", flush=True)
+
+
+def production_adaptive_merge(binary, classes, stdlib, java, javac):
+    with contextlib.ExitStack() as stack:
+        source = stack.enter_context(relay(binary, extra_args=["--mode", "store"]))
+        proxy, state = stack.enter_context(capped_proxy(source, rate=375_000))
+        state["keep_alive"] = True
+        stack.enter_context(relay(binary, delay=12, extra_args=merge_args(proxy, gap=30)))
+        build = Path(__file__).resolve().parents[1] / "build"
+        temporary = stack.enter_context(tempfile.TemporaryDirectory(dir=build))
+        cp = os.pathsep.join([str(classes.resolve()), str(stdlib.resolve()), temporary])
+        subprocess.run([str(javac), "-encoding", "UTF-8", "-cp", cp, "-d", temporary,
+                        str(Path(__file__).with_name("AdaptiveMergeHarness.java"))], check=True)
+        completed = subprocess.run([str(java), "-Dfile.encoding=UTF-8", "-cp", cp, "AdaptiveMergeHarness",
+                                    f"http://127.0.0.1:{source}/upload/live"],
+                                   capture_output=True, text=True, encoding="utf-8", timeout=40)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert completed.stdout and "PASS: single-store fast uploads" in completed.stdout, completed.stderr
+        print(completed.stdout, flush=True)
+
+
 def store_status(binary):
     logs = []
 
@@ -496,7 +552,7 @@ if __name__ == "__main__":
     parser.add_argument("--kotlin-stdlib", type=Path)
     parser.add_argument("--java", type=Path, default=Path("java"))
     parser.add_argument("--javac", type=Path, default=Path("javac"))
-    parser.add_argument("--case", choices=["all", "status", "protocol", "network", "join", "single", "normal", "slow", "unreachable"], default="all")
+    parser.add_argument("--case", choices=["all", "status", "protocol", "network", "join", "single", "normal", "slow", "unreachable", "feedback", "adaptive"], default="all")
     args = parser.parse_args()
     if args.case in ("all", "status"):
         store_status(args.binary.resolve())
@@ -506,6 +562,8 @@ if __name__ == "__main__":
         upstream_network(args.binary.resolve())
     if args.case in ("all", "join"):
         live_join(args.binary.resolve())
+    if args.case in ("all", "feedback", "adaptive"):
+        merge_feedback(args.binary.resolve())
     if args.android_classes and args.case not in ("status", "protocol", "network", "join"):
         assert args.kotlin_stdlib
         if args.case in ("all", "single"):
@@ -516,3 +574,5 @@ if __name__ == "__main__":
             production(args.binary.resolve(), args.android_classes, args.kotlin_stdlib, True, args.java, args.javac)
         if args.case in ("all", "unreachable"):
             production_unreachable(args.binary.resolve(), args.android_classes, args.kotlin_stdlib, args.java, args.javac)
+        if args.case in ("all", "adaptive"):
+            production_adaptive_merge(args.binary.resolve(), args.android_classes, args.kotlin_stdlib, args.java, args.javac)

@@ -25,6 +25,7 @@ class DistributedHttpTsUploadTest {
         val disconnected = CountDownLatch(1)
         val rescue = AtomicLong(-1)
         @Volatile var rescueSession = "test"
+        @Volatile var mergeHeaders = ""
         private val sockets = CopyOnWriteArrayList<Socket>()
         private val pool = Executors.newCachedThreadPool { Thread(it).apply { isDaemon = true } }
         private val listener = Thread {
@@ -68,6 +69,7 @@ class DistributedHttpTsUploadTest {
                                 socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\nConnection: " +
                                     (if (keepAlive) "keep-alive" else "close") + "\r\nX-Relay-Mode: store\r\n" +
                                     (if (rate.get() > 0) "X-Download-Rate-Bps: ${rate.get()}\r\n" else "") +
+                                    mergeHeaders +
                                     (if (!post && rescue.get() >= 0) "X-Rescue-Session: $rescueSession\r\nX-Rescue-Sequence: ${rescue.get()}\r\n" else "") +
                                     (sequence?.let { "X-Ack-Sequence: $it\r\n" } ?: "") + "\r\n" + body).toByteArray())
                                 if (!keepAlive || (post && disconnectAfterAck)) break
@@ -122,6 +124,30 @@ class DistributedHttpTsUploadTest {
                 val rate = checkNotNull(server.uploadBitsPerSecond)
                 assertTrue("ACK wait must be included in upload measurement", rate in 1..(188L * 128 * 8 * 5))
                 assertTrue(checkNotNull(server.uploadRateAgeMs) < 1_000)
+            }
+        }
+    }
+
+    @Test fun singleStoreAckAndDistributedStatusCarryMergeBacklogIndependentlyOfRescueCopies() {
+        Store(keepAlive = true).use { store ->
+            store.mergeHeaders = "X-Merge-Session: test\r\nX-Merge-Pending-Us: 6000000\r\n" +
+                "X-Merge-Wait-Ms: 4000\r\nX-Merge-Feedback-Age-Ms: 0\r\n"
+            HttpTsUploadWorker(store.url, 60, onNotice = {}).use { worker ->
+                worker.enqueue(block(0), 60)
+                await { worker.bytesAcknowledged.get() > 0 }
+                val feedback = worker.snapshot().servers.single().mergeFeedback!!
+                assertEquals(6_000_000L, feedback.pendingDurationUs)
+                assertEquals(4_000L, feedback.headWaitMs)
+                assertEquals(0L, worker.snapshot().slowDownloadRescues)
+                assertEquals(0L, worker.snapshot().unacknowledgedDurationUs)
+            }
+            Store(keepAlive = true).use { other ->
+                DistributedHttpTsUploadWorker(listOf(store.url, other.url), 60) {}.use { worker ->
+                    await { worker.snapshot().servers.first().mergeFeedback != null }
+                    assertEquals(6_000_000L, worker.snapshot().servers.first().mergeFeedback!!.pendingDurationUs)
+                    assertEquals(0L, worker.bytesAcknowledged.get())
+                    assertEquals(0L, worker.snapshot().slowDownloadRescues)
+                }
             }
         }
     }

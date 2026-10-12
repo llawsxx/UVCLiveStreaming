@@ -20,6 +20,7 @@ internal class DistributedHttpTsUploadWorker(
         var measuredRate: Double? = null
         var measuredNs = 0L
         val uploadRate = HttpUploadRateMeter()
+        val mergeFeedback = HttpMergeFeedbackMeter()
         var availableNs = 0L
         var busy = false
         var failures = 0
@@ -71,7 +72,8 @@ internal class DistributedHttpTsUploadWorker(
                 val age = ((now - it.measuredNs) / 1_000_000).takeIf { age -> it.measuredRate != null && age in 0..10_000 }
                 val upstream = it.uploadRate.reading(now)
                 HttpUploadServerStats(it.url, it.measuredRate?.takeIf { age != null }?.let { rate -> (rate * 8).toLong() },
-                    it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs)
+                    it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs,
+                    it.mergeFeedback.reading(now))
             },
             history.values.sumOf { it.block.data.size.toLong() }, redirectAttempts, redirectAcknowledged, recentRedirects.toList(),
             pending.values.filter { !it.alreadyAcknowledged }.sumOf { it.block.durationUs }, slowDownloadRescues, originalDropped)
@@ -211,6 +213,7 @@ internal class DistributedHttpTsUploadWorker(
                     synchronized(lock) {
                         if (closed) return
                         expire()
+                        target.mergeFeedback.record(response.headers, System.nanoTime())
                         if (rate != null && rate > 0) {
                             target.rate = rate.toDouble().coerceIn(1_000.0, 125_000_000.0)
                             target.measuredRate = target.rate
@@ -260,8 +263,10 @@ internal class DistributedHttpTsUploadWorker(
         }
         check(response.headers["x-relay-mode"] == "store") { "多服务器上传需要服务端 --mode store" }
         synchronized(lock) {
-            if (!closed && pending[block.sequence] === item)
+            if (!closed && pending[block.sequence] === item) {
                 destination.uploadRate.record(block.data.size, response.transferNs, System.nanoTime())
+                destination.mergeFeedback.record(response.headers, System.nanoTime())
+            }
         }
         return response.headers["x-download-rate-bps"]?.toLongOrNull()?.coerceAtLeast(0) ?: 0
     }

@@ -188,6 +188,95 @@ class HttpAdaptiveBitrateControllerTest {
         assertEquals(500_000, controller.target)
     }
 
+    private fun mergeServer(pending: Double, waitMs: Long = 500, ageMs: Long = 0, session: String = "test",
+                            rate: Long = 3_000_000) = HttpUploadServerStats("A", rate, false, 0,
+        feedbackAgeMs = 0, uploadBitsPerSecond = 30_000_000, uploadRateAgeMs = 0,
+        mergeFeedback = HttpMergeFeedback(session, (pending * 1_000_000).toLong(), waitMs, ageMs))
+
+    @Test fun singleStoreMergeBacklogReducesUsingDownloadBudgetWithFastPhoneUploads() {
+        val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 192_000)
+        val changes = mutableListOf<Int>()
+        repeat(35) { second ->
+            sample(controller, second, upload(second, servers = listOf(mergeServer(second.toDouble()))))
+                ?.let { changes += second }
+        }
+        assertTrue(changes.isNotEmpty())
+        assertEquals(6, changes.first())
+        assertTrue(changes.zipWithNext().all { (a, b) -> b - a >= 5 })
+        assertEquals(1_000_000, controller.target)
+    }
+
+    @Test fun mergeHeadStallDoesNotRequireGrowingPhoneOrMergeQueues() {
+        val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(7) { sample(controller, it, upload(it, servers = listOf(mergeServer(2.0, 4_000)))) }
+        assertEquals(3_000_000, controller.target)
+    }
+
+    @Test fun drainingMergeHistoryBriefSpikesAndDuplicateStoreReportsDoNotCauseCongestion() {
+        val draining = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(20) { second ->
+            assertNull(sample(draining, second, upload(second,
+                servers = listOf(mergeServer((15.0 - second).coerceAtLeast(0.0))))))
+        }
+        val normal = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(30) { second ->
+            val server = mergeServer(if (second in 8..9) 4.0 else 1.0)
+            assertNull(sample(normal, second, upload(second, servers = listOf(server, server.copy(url = "B")))))
+        }
+        assertEquals(6_000_000, normal.target)
+    }
+
+    @Test fun staleOrOtherSessionMergeFeedbackCannotReduceBitrate() {
+        for (server in listOf(mergeServer(20.0, 20_000, ageMs = 10_001),
+            mergeServer(20.0, 20_000, session = "old-session"))) {
+            val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+            repeat(30) { assertNull(sample(controller, it, upload(it, servers = listOf(server)))) }
+        }
+    }
+
+    @Test fun mergeBacklogPreventsPrematureRecoveryAndFailedProbeRollsBack() {
+        val controller = HttpAdaptiveBitrateController(6_000_000, 1_000_000, 0)
+        repeat(10) { sample(controller, it, upload(it,
+            servers = listOf(mergeServer(10.0, rate = 10_000_000)))) }
+        val stable = controller.target
+        for (second in 10..20) assertNull(sample(controller, second,
+            upload(second, servers = listOf(mergeServer(3.0, rate = 10_000_000)))))
+        for (second in 21..26) sample(controller, second,
+            upload(second, servers = listOf(mergeServer(0.5, rate = 10_000_000))))
+        assertTrue(controller.target > stable)
+        for (second in 27..29) sample(controller, second,
+            upload(second, servers = listOf(mergeServer(2.0 + second - 27, rate = 10_000_000))))
+        assertEquals(stable, controller.target)
+    }
+
+    @Test fun storeToMergeOnlyBandwidthDropConvergesAndRecoversWhilePhoneQueueStaysEmpty() {
+        val controller = HttpAdaptiveBitrateController(5_500_000, 1_000_000, 192_000)
+        val chunks = ArrayDeque<Double>()
+        var remaining = 0.0
+        var maximumQueue = 0
+        var reduced = 0
+        var recoveredAt: Int? = null
+        for (second in 0..200) {
+            chunks.addLast((controller.target + 192_000) * 1.06 / 8)
+            val capacity = if (second < 80) 3_000_000L else 8_000_000L
+            var budget = capacity / 8.0
+            while (chunks.isNotEmpty() && budget > 0) {
+                if (remaining == 0.0) remaining = chunks.first()
+                val sent = minOf(budget, remaining)
+                budget -= sent; remaining -= sent
+                if (remaining == 0.0) chunks.removeFirst()
+            }
+            maximumQueue = maxOf(maximumQueue, chunks.size)
+            sample(controller, second, upload(second,
+                servers = listOf(mergeServer(chunks.size.toDouble(), rate = capacity))))
+            if (second == 79) reduced = controller.target
+            if (second >= 80 && controller.target == 5_500_000 && recoveredAt == null) recoveredAt = second
+        }
+        assertTrue(reduced < 3_000_000)
+        assertTrue("Unbounded merge backlog: $maximumQueue", maximumQueue < 15)
+        assertTrue("Recovery stalled: $recoveredAt", checkNotNull(recoveredAt) <= 105)
+    }
+
     @Test fun aBandwidthDropConvergesAndRecoveryProbesReturnToTheCeiling() {
         val controller = HttpAdaptiveBitrateController(5_500_000, 1_000_000, 192_000)
         val chunks = ArrayDeque<Double>()

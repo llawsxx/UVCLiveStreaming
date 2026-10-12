@@ -65,6 +65,10 @@ class ChunkStore {
     std::atomic<uint64_t> downloaded_bytes{0};
     std::string latest_session;
     uint64_t latest_epoch = 0, latest_sequence = 0;
+    uint64_t latest_end_us = 0;
+    std::string merge_session;
+    uint64_t merge_pending_us = 0, merge_cursor_us = 0, merge_wait_ms = 0;
+    Time merge_feedback_time = Clock::now();
     std::optional<Key> last_rescue;
     Time feedback_time = Clock::now(), rescue_time = Clock::now();
     bool reporting_stopped = false;
@@ -84,6 +88,14 @@ class ChunkStore {
             headers += "X-Download-Rate-Bps: " + std::to_string(static_cast<uint64_t>(download_rate)) + "\r\n";
         if (rescue_sequence && Clock::now() - rescue_time < std::chrono::seconds(3))
             headers += "X-Rescue-Session: " + rescue_session + "\r\nX-Rescue-Sequence: " + std::to_string(*rescue_sequence) + "\r\n";
+        const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - merge_feedback_time).count();
+        if (!merge_session.empty() && merge_session == latest_session && age < 10000) {
+            // Uploads continue while merge is blocked downloading a chunk, so its last index can be old.
+            const auto local_pending = latest_end_us > merge_cursor_us ? latest_end_us - merge_cursor_us : 0;
+            headers += "X-Merge-Session: " + merge_session + "\r\nX-Merge-Pending-Us: " +
+                std::to_string(std::min<uint64_t>(3600000000ULL, std::max(merge_pending_us, local_pending))) + "\r\nX-Merge-Wait-Ms: " +
+                std::to_string(merge_wait_ms) + "\r\nX-Merge-Feedback-Age-Ms: " + std::to_string(age) + "\r\n";
+        }
         return headers;
     }
     void report() {
@@ -164,8 +176,10 @@ public:
             // Keep the latest session's highest accepted sequence even when old rescue copies arrive.
             if (latest_session.empty() || std::tie(chunk.epoch, chunk.session) > std::tie(latest_epoch, latest_session)) {
                 latest_epoch = chunk.epoch; latest_session = chunk.session; latest_sequence = chunk.sequence;
+                latest_end_us = chunk.start + chunk.duration;
             } else if (chunk.epoch == latest_epoch && chunk.session == latest_session) {
                 latest_sequence = std::max(latest_sequence, chunk.sequence);
+                latest_end_us = std::max(latest_end_us, chunk.start + chunk.duration);
             }
             uploaded_bytes += chunk.size;
             if (!duplicate) {
@@ -185,6 +199,18 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex);
             prune();
+            const auto merge = request.headers.find("x-merge-session");
+            const auto pending = request.headers.find("x-merge-pending-us");
+            const auto cursor = request.headers.find("x-merge-cursor-us");
+            const auto wait = request.headers.find("x-merge-wait-ms");
+            if (merge != request.headers.end() && pending != request.headers.end() &&
+                cursor != request.headers.end() && wait != request.headers.end() && identifier(merge->second)) {
+                const auto pending_us = number(pending->second, 3600000000ULL);
+                const auto cursor_us = number(cursor->second, std::numeric_limits<int64_t>::max() / 2);
+                const auto wait_ms = number(wait->second, 3600000);
+                merge_session = merge->second; merge_pending_us = pending_us;
+                merge_cursor_us = cursor_us; merge_wait_ms = wait_ms; merge_feedback_time = Clock::now();
+            }
             const auto rate = request.headers.find("x-download-rate-bps");
             if (rate != request.headers.end()) {
                 const double sample = static_cast<double>(number(rate->second, 125000000));
@@ -397,6 +423,7 @@ class ChunkMerger {
     std::vector<bool> indexed;
     Time waiting_since = Clock::now();
     bool selected = false, finished = false, priming = false;
+    uint64_t cursor_us = 0;
     std::optional<std::pair<std::string, uint64_t>> last_rescue;
 
     std::string feedback_headers(size_t index) {
@@ -408,6 +435,17 @@ class ChunkMerger {
         // Do not repeatedly download the retained history directory on narrow egress links.
         if (selected) headers += "X-Index-Epoch: " + std::to_string(epoch) + "\r\nX-Index-Session: " + session +
             "\r\nX-Index-From: " + std::to_string(next) + "\r\n";
+        if (selected && !priming) {
+            uint64_t latest = cursor_us;
+            for (const auto& entry : entries)
+                latest = std::max(latest, entry.second.metadata.start + entry.second.metadata.duration);
+            const auto wait_ms = finished ? 0 : std::min<int64_t>(3600000,
+                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - waiting_since).count());
+            headers += "X-Merge-Session: " + session + "\r\nX-Merge-Pending-Us: " +
+                std::to_string(std::min<uint64_t>(3600000000ULL, latest - cursor_us)) +
+                "\r\nX-Merge-Cursor-Us: " + std::to_string(cursor_us) + "\r\nX-Merge-Wait-Ms: " +
+                std::to_string(wait_ms) + "\r\n";
+        }
         double rescue_after = 2;
         const auto head = entries.find(next);
         if (head != entries.end() && !head->second.claims.empty()) {
@@ -457,6 +495,7 @@ class ChunkMerger {
                 if (first == entries.end()) first = std::prev(entries.end());
             }
             next = first->first;
+            cursor_us = first->second.metadata.start;
             entries.erase(entries.begin(), first);
             priming = false; waiting_since = Clock::now();
             log_line("[merge] start seq=" + std::to_string(next) + " from retained live window");
@@ -468,6 +507,7 @@ class ChunkMerger {
             const auto entry = entries.find(next);
             if (entry != entries.end()) bytes -= entry->second.claims.size() * found->second.size;
             finished = found->second.final;
+            cursor_us = found->second.start + found->second.duration;
             relay.ingest(chunk_request(std::move(found->second)));
             complete.erase(found); entries.erase(next); ++next;
             waiting_since = Clock::now();
@@ -481,7 +521,7 @@ class ChunkMerger {
                 bytes -= it->second.claims.size() * it->second.metadata.size;
                 it = entries.erase(it);
             }
-            next = resume; waiting_since = Clock::now();
+            next = resume; cursor_us = later->second.metadata.start; waiting_since = Clock::now();
         }
     }
     void run(size_t index) {
@@ -515,7 +555,7 @@ class ChunkMerger {
                     std::lock_guard<std::mutex> lock(mutex);
                     for (const auto& chunk : available) {
                         if (!selected || std::tie(chunk.epoch, chunk.session) > std::tie(epoch, session)) {
-                            session = chunk.session; epoch = chunk.epoch; next = 0; bytes = 0;
+                            session = chunk.session; epoch = chunk.epoch; next = 0; bytes = 0; cursor_us = 0;
                             entries.clear(); complete.clear(); selected = true; finished = false; priming = true;
                             std::fill(indexed.begin(), indexed.end(), false); waiting_since = Clock::now();
                             log_line("[merge] session=" + session);

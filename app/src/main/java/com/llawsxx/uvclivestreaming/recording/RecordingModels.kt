@@ -561,7 +561,12 @@ data class HttpUploadServerStats(val url: String, val estimatedBitsPerSecond: Lo
     /** Monotonic age of server egress feedback; null means unmeasured/expired. */
     val feedbackAgeMs: Long? = null,
     /** Payload-to-valid-ACK speed on the phone-to-store leg, in bps; excludes deliberate pacing. */
-    val uploadBitsPerSecond: Long? = null, val uploadRateAgeMs: Long? = null)
+    val uploadBitsPerSecond: Long? = null, val uploadRateAgeMs: Long? = null,
+    val mergeFeedback: HttpMergeFeedback? = null)
+
+/** Undelivered media at merge, excluding its intentional playback-delay buffer. */
+data class HttpMergeFeedback(val sessionId: String, val pendingDurationUs: Long,
+    val headWaitMs: Long, val ageMs: Long)
 
 enum class HttpUploadRedirectReason(val label: String, val wireValue: String) {
     UPLOAD_FAILURE("上传失败", "upload-failed"), SLOW_DOWNLOAD("接收端下载慢", "download-slow")

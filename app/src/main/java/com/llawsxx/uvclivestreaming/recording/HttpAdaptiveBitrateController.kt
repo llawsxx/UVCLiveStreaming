@@ -24,6 +24,7 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
     private var rescueCount = 0L
     private val rescues = ArrayDeque<Pair<Long, Long>>()
     private var queueSeconds = 0.0
+    private var mergeQueueSeconds: Double? = null
     private var pressureSince: Long? = null
     private var healthySince: Long? = null
     private val recovery = BitrateRecoveryProbe()
@@ -40,7 +41,10 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
         }
         val seconds = (nowNs - previousNs) / 1_000_000_000.0
         lastNs = nowNs
-        if (seconds > 3.0) { pressureSince = null; healthySince = null; queueSeconds = pending; recovery.abandon() }
+        if (seconds > 3.0) {
+            pressureSince = null; healthySince = null; queueSeconds = pending
+            mergeQueueSeconds = null; recovery.abandon()
+        }
         val previousQueue = queueSeconds
         queueSeconds = queueSeconds * 0.5 + pending * 0.5
         val growth = (queueSeconds - previousQueue) / seconds
@@ -55,10 +59,26 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
         val repeatedRescue = recentRescue && rescues.sumOf { it.second } >= 2
         val measuredBudget = httpMeasuredVideoBudget(upload.servers, audioBitrate)
         measuredVideoBudget = measuredBudget
+        // Reports share a media timeline; never sum the same merge backlog across stores.
+        val reports = upload.servers.mapNotNull { it.mergeFeedback }.filter {
+            it.sessionId == upload.sessionId && it.ageMs in 0..10_000
+        }
+        val newestAge = reports.minOfOrNull { it.ageMs }
+        val currentReports = reports.filter { newestAge != null && it.ageMs <= newestAge + 1_000 }
+        val mergePending = currentReports.maxOfOrNull { it.pendingDurationUs / 1_000_000.0 }
+        val mergeWait = currentReports.maxOfOrNull { it.headWaitMs } ?: 0
+        val previousMergeQueue = mergeQueueSeconds
+        mergeQueueSeconds = mergePending?.let { (previousMergeQueue ?: it) * 0.5 + it * 0.5 }
+        val mergeGrowth = if (mergePending != null && previousMergeQueue != null)
+            (checkNotNull(mergeQueueSeconds) - previousMergeQueue) / seconds else 0.0
         val reason = when {
             lastDropNs?.let { nowNs - it <= 5_000_000_000L } == true -> "上传缓存发生淘汰"
             pending >= 2.0 && nowNs - lastAckNs >= 3_000_000_000L -> "上传确认停滞"
             recovery.probing && pending >= 2.0 && growth > 0.1 -> "试探提升后分段排队"
+            recovery.probing && mergePending != null && mergePending >= 2.0 && mergeGrowth > 0.1 -> "试探提升后 merge 下载积压"
+            mergePending != null && mergePending >= 2.0 && mergeWait >= 3_000 -> "merge 连续分段交付停滞"
+            mergePending != null && mergePending >= 3.0 && mergeGrowth > 0.1 -> "store → merge 下载积压持续增加"
+            mergePending != null && mergePending >= 6.0 && mergeGrowth >= -0.1 -> "store → merge 下载积压未消退"
             measuredBudget != null && target > measuredBudget * 1.1 && pending >= 2.0 && growth > 0.1 -> "测速低于当前码率，分段持续排队"
             pending >= 3.0 && growth > 0.1 -> "待上传分段持续增加"
             pending >= 6.0 && growth >= -0.1 -> "上传积压未消退"
@@ -89,6 +109,7 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
         }
         pressureSince = null
         val healthy = pending <= 1.5 && nowNs - lastAckNs <= 2_500_000_000L &&
+            (mergePending == null || mergePending <= 1.5 && mergeWait <= 1_500) &&
             !recentRescue && (lastDropNs?.let { nowNs - it > 15_000_000_000L } ?: true) &&
             (upload.servers.isEmpty() || upload.servers.any { it.consecutiveFailures == 0 })
         if (healthy && effectiveBitrate >= target) {
