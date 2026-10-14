@@ -32,7 +32,16 @@ internal fun httpMeasuredVideoBudget(servers: List<HttpUploadServerStats>, audio
         val download = server.estimatedBitsPerSecond?.takeIf {
             it > 0 && server.feedbackAgeMs?.let { age -> age in 0..10_000 } == true
         }
-        total += listOfNotNull(upload, download).minOrNull() ?: return null
+        total += listOfNotNull(upload, download, server.uploadThroughput?.bitsPerSecond,
+            server.downloadThroughput?.bitsPerSecond).minOrNull() ?: return null
     }
     return (total * 0.85 / 1.06 - audioBitrate).toInt().coerceIn(100_000, 100_000_000)
+}
+
+internal fun httpHasLongThroughput(servers: List<HttpUploadServerStats>): Boolean {
+    val usable = servers.filter { it.consecutiveFailures == 0 }
+    return usable.isNotEmpty() && usable.all {
+        (it.uploadBitsPerSecond == null || it.uploadThroughput?.let { window -> window.ageMs in 0..10_000 && window.longBitsPerSecond != null } == true) &&
+        (it.estimatedBitsPerSecond == null || it.downloadThroughput?.let { window -> window.ageMs in 0..10_000 && window.longBitsPerSecond != null } == true)
+    }
 }

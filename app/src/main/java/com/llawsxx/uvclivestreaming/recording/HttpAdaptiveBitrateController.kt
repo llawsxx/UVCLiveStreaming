@@ -122,7 +122,9 @@ internal class HttpAdaptiveBitrateController(maximum: Int, minimum: Int, private
             if (healthySince == null) healthySince = nowNs
             status = if (target == maximum) "网络稳定，使用最高码率" else "网络稳定，准备快速试探"
             if (nowNs - checkNotNull(healthySince) >= 5_000_000_000L && canChange(nowNs)) {
-                recovery.increase(nowNs, target, maximum, measuredBudget)?.let {
+                val recoveryBudget = if (httpHasLongThroughput(upload.servers)) measuredBudget else
+                    measuredBudget?.coerceAtMost(minOf(target.toLong() * 2, maximum.toLong()).toInt())
+                recovery.increase(nowNs, target, maximum, recoveryBudget)?.let {
                     return change(nowNs, it.bitrate, if (it.fine) "网络稳定，结合测速细调码率"
                         else if (measuredBudget != null) "网络稳定，按上传与接收测速提高码率" else "测速尚不完整，大幅试探提高码率")
                 }

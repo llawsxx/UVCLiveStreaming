@@ -229,9 +229,9 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
     private var acknowledgedSequence: Long? = null
     private var acknowledgedBlocks = 0L
     private var consecutiveFailures = 0
-    private var measuredRate: Long? = null
-    private var measuredNs = 0L
+    private val downloadRate = HttpDownloadRateMeter()
     private val uploadRate = HttpUploadRateMeter()
+    private val throughput = HttpThroughputMeter()
     private val mergeFeedback = HttpMergeFeedbackMeter()
     private val thread: Thread
     override val pendingBlocks: Int get() = queue.size
@@ -244,12 +244,12 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                      val originalDroppedBlocks: Long = queue.droppedBlocks)
     override fun snapshot(): Stats = synchronized(wake) {
         val now = System.nanoTime()
-        val age = ((now - measuredNs) / 1_000_000).takeIf { measuredRate != null && it in 0..10_000 }
+        val downstream = downloadRate.reading(now)
         val upstream = uploadRate.reading(now)
         Stats(queue.snapshot(), uploadingSequence, acknowledgedSequence, bytesAcknowledged.get(),
-            servers = listOf(HttpUploadServerStats(url, measuredRate?.takeIf { age != null }, uploadingSequence != null, consecutiveFailures,
-                bytesAcknowledged.get(), acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs,
-                mergeFeedback.reading(now))))
+            servers = listOf(HttpUploadServerStats(url, downstream?.bitsPerSecond, uploadingSequence != null, consecutiveFailures,
+                bytesAcknowledged.get(), acknowledgedBlocks, downstream?.ageMs, upstream?.bitsPerSecond, upstream?.ageMs,
+                mergeFeedback.reading(now), throughput.reading(now), downstream?.throughput)))
     }
 
     init {
@@ -288,9 +288,11 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
                 while (!closed) {
                     queue.expire(cacheSeconds)
                     if (queue.first() != null) break
+                    throughput.demand(System.nanoTime(), false)
                     wake.wait()
                 }
                 if (closed) return
+                throughput.demand(System.nanoTime(), true)
                 checkNotNull(queue.first()).also { activeBlock = it; uploadingSequence = it.sequence }
             }
             try {
@@ -340,11 +342,9 @@ internal class HttpTsUploadWorker(private val url: String, private val cacheSeco
             }
             synchronized(wake) {
                 uploadRate.record(block.data.size, response.transferNs, System.nanoTime())
+                throughput.record(block.data.size, System.nanoTime())
                 mergeFeedback.record(response.headers, System.nanoTime())
-                measuredRate = response.headers["x-download-rate-bps"]?.toLongOrNull()?.takeIf {
-                    response.headers["x-relay-mode"] == "store" && it in 1_000..125_000_000
-                }?.times(8)
-                measuredNs = System.nanoTime()
+                downloadRate.record(response.headers, System.nanoTime())
             }
         } catch (error: Exception) {
             connection.invalidate()

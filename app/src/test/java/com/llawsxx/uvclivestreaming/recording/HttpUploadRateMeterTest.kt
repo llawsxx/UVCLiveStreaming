@@ -31,6 +31,15 @@ class HttpUploadRateMeterTest {
         uploadBitsPerSecond = up, uploadRateAgeMs = up?.let { 0 })
     private fun budget(bits: Long, audio: Int = 192_000) = (bits * 0.85 / 1.06 - audio).toInt()
 
+    @Test fun sustainedWindowConstrainsBurstRatesButExpiredWindowsCannotLimitRecovery() {
+        val burst = server(20_000_000, 12_000_000).copy(downloadThroughput = HttpThroughput(3_000_000, 3_000_000, 0))
+        assertEquals(budget(3_000_000), httpMeasuredVideoBudget(listOf(burst), 192_000))
+        assertEquals(budget(12_000_000), httpMeasuredVideoBudget(listOf(burst.copy(
+            downloadThroughput = burst.downloadThroughput!!.copy(ageMs = 10_001))), 192_000))
+        val uplink = server(12_000_000, null).copy(uploadThroughput = HttpThroughput(3_000_000, null, 0))
+        assertEquals(budget(3_000_000), httpMeasuredVideoBudget(listOf(uplink), 192_000))
+    }
+
     @Test fun eachStoresUploadAndMergeLegsAreCombinedBeforeSummingAcrossStores() {
         // Summing each leg then taking min would incorrectly promise 21 Mbps for these paths.
         assertEquals(budget(2_000_000), httpMeasuredVideoBudget(listOf(

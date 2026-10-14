@@ -1364,7 +1364,10 @@ private fun UsbCameraScreen() {
                                 style = MaterialTheme.typography.bodySmall)
                             if (stats.httpAutoBitrate != null) {
                                 val upstream = server.uploadBitsPerSecond?.let { String.format(Locale.US, "%.2f Mbps", it / 1_000_000.0) } ?: "待评估"
-                                Text("上传测速：$upstream · merge 下载测速：$bandwidth", style = MaterialTheme.typography.bodySmall)
+                                Text("单块上传：$upstream · 单块下载：$bandwidth", style = MaterialTheme.typography.bodySmall)
+                                val uploadWindow = server.uploadThroughput?.bitsPerSecond?.let { String.format(Locale.US, "%.2f Mbps", it / 1_000_000.0) } ?: "待评估"
+                                val downloadWindow = server.downloadThroughput?.bitsPerSecond?.let { String.format(Locale.US, "%.2f Mbps", it / 1_000_000.0) } ?: "待评估"
+                                Text("持续上传：$uploadWindow · 持续下载：$downloadWindow", style = MaterialTheme.typography.bodySmall)
                                 server.mergeFeedback?.takeIf { it.sessionId == upload.sessionId }?.let { feedback ->
                                     Text(String.format(Locale.US, "merge 下载积压：%.1f 秒 · 当前分段等待：%.1f 秒",
                                         feedback.pendingDurationUs / 1_000_000.0, feedback.headWaitMs / 1_000.0),

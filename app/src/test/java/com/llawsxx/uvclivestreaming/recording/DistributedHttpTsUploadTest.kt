@@ -18,6 +18,7 @@ class DistributedHttpTsUploadTest {
         val server = ServerSocket(0)
         val url = "http://127.0.0.1:${server.localPort}/upload/live"
         val received = CopyOnWriteArrayList<Long>()
+        val receivedAtNs = CopyOnWriteArrayList<Long>()
         val uploads = CopyOnWriteArrayList<Map<String, String>>()
         val requests = CopyOnWriteArrayList<String>()
         val connections = AtomicLong()
@@ -26,6 +27,7 @@ class DistributedHttpTsUploadTest {
         val rescue = AtomicLong(-1)
         @Volatile var rescueSession = "test"
         @Volatile var mergeHeaders = ""
+        @Volatile var uploadStatus = 200
         private val sockets = CopyOnWriteArrayList<Socket>()
         private val pool = Executors.newCachedThreadPool { Thread(it).apply { isDaemon = true } }
         private val listener = Thread {
@@ -60,13 +62,15 @@ class DistributedHttpTsUploadTest {
                                 if (post) {
                                     DataInputStream(input).readFully(ByteArray(checkNotNull(headers["content-length"]).toInt()))
                                     received += checkNotNull(sequence).toLong()
+                                    receivedAtNs += System.nanoTime()
                                     uploads += headers.toMap()
                                     accepted.countDown()
                                     if (withholdAck) { while (input.read() >= 0) Unit; disconnected.countDown(); return@execute }
                                     if (ackDelayMs > 0) Thread.sleep(ackDelayMs)
                                 }
                                 val body = if (post) "Stored\n" else "OK\n"
-                                socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\nConnection: " +
+                                val status = if (post) uploadStatus else 200
+                                socket.getOutputStream().write(("HTTP/1.1 $status Result\r\nContent-Length: ${body.length}\r\nConnection: " +
                                     (if (keepAlive) "keep-alive" else "close") + "\r\nX-Relay-Mode: store\r\n" +
                                     (if (rate.get() > 0) "X-Download-Rate-Bps: ${rate.get()}\r\n" else "") +
                                     mergeHeaders +
@@ -147,6 +151,29 @@ class DistributedHttpTsUploadTest {
                     assertEquals(6_000_000L, worker.snapshot().servers.first().mergeFeedback!!.pendingDurationUs)
                     assertEquals(0L, worker.bytesAcknowledged.get())
                     assertEquals(0L, worker.snapshot().slowDownloadRescues)
+                }
+            }
+        }
+    }
+
+    @Test fun singleAckAndDistributedFeedbackPreserveRateAgeAndSustainedCapacity() {
+        Store(rate = AtomicLong(1_500_000), keepAlive = true).use { store ->
+            store.mergeHeaders = "X-Download-Rate-Age-Ms: 9000\r\nX-Download-Short-Rate-Bps: 375000\r\n" +
+                "X-Download-Long-Rate-Bps: 375000\r\nX-Download-Window-Age-Ms: 9000\r\n"
+            HttpTsUploadWorker(store.url, 60, {}).use { worker ->
+                worker.enqueue(block(0), 60)
+                await { worker.bytesAcknowledged.get() > 0 }
+                val server = worker.snapshot().servers.single()
+                assertEquals(12_000_000L, server.estimatedBitsPerSecond)
+                assertTrue(server.feedbackAgeMs!! >= 9_000)
+                assertEquals(3_000_000L, server.downloadThroughput!!.bitsPerSecond)
+            }
+            Store().use { other ->
+                DistributedHttpTsUploadWorker(listOf(store.url, other.url), 60) {}.use { worker ->
+                    await { worker.snapshot().servers[0].downloadThroughput != null }
+                    val server = worker.snapshot().servers[0]
+                    assertTrue(server.feedbackAgeMs!! >= 9_000)
+                    assertEquals(3_000_000L, server.downloadThroughput!!.bitsPerSecond)
                 }
             }
         }
@@ -262,6 +289,44 @@ class DistributedHttpTsUploadTest {
                 val headers = fast.uploads.single { it["x-sequence"] == "0" }
                 assertEquals(slow.url, headers["x-redirect-from"])
                 assertEquals("upload-failed", headers["x-redirect-reason"])
+            }
+        } }
+    }
+
+    @Test fun allFailedStoresKeepRotatingRetriesAndRecoverWithoutNewChunks() {
+        Store(keepAlive = true).use { first -> Store(keepAlive = true).use { second ->
+            first.uploadStatus = 503
+            second.uploadStatus = 503
+            DistributedHttpTsUploadWorker(listOf(first.url, second.url), 60) {}.use { worker ->
+                worker.enqueue(block(0), 60)
+                await(4_500) { worker.snapshot().servers.all { it.consecutiveFailures >= 3 } }
+                assertEquals(0L, worker.bytesAcknowledged.get())
+                assertEquals(1, worker.pendingBlocks)
+                val attempts = (first.receivedAtNs + second.receivedAtNs).sorted()
+                assertTrue("Recovery must wait between failed attempts instead of spinning",
+                    attempts.drop(2).zipWithNext().all { (a, b) -> b - a >= 400_000_000L })
+                second.uploadStatus = 200
+                await(2_000) { worker.bytesAcknowledged.get() == 188L * 128 }
+                val stats = worker.snapshot()
+                assertEquals(0, worker.pendingBlocks)
+                assertEquals(0L, stats.servers[0].acknowledgedBytes)
+                assertEquals(1L, stats.servers[1].acknowledgedBlocks)
+                assertEquals(0, stats.servers[1].consecutiveFailures)
+                assertEquals(188L * 128, stats.retainedBytes)
+            }
+        } }
+    }
+
+    @Test fun aHealthyStoreKeepsFailedStoresOnTheirNormalBackoff() {
+        Store(keepAlive = true).use { failed -> Store(keepAlive = true, ackDelayMs = 100).use { healthy ->
+            failed.uploadStatus = 503
+            DistributedHttpTsUploadWorker(listOf(failed.url, healthy.url), 60) {}.use { worker ->
+                repeat(24) { worker.enqueue(block(it.toLong()), 60) }
+                await { worker.bytesAcknowledged.get() == 24L * 188 * 128 }
+                assertTrue("Healthy uploads must not enable rapid retries of a failed store", failed.received.size <= 2)
+                assertTrue(failed.receivedAtNs.zipWithNext().all { (a, b) -> b - a >= 1_900_000_000L })
+                assertEquals(0L, worker.snapshot().servers[0].acknowledgedBytes)
+                assertEquals(24L, worker.snapshot().servers[1].acknowledgedBlocks)
             }
         } }
     }

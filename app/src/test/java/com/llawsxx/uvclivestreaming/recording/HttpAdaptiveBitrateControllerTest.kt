@@ -146,12 +146,24 @@ class HttpAdaptiveBitrateControllerTest {
         repeat(30) { sample(controller, it, upload(it, queue = it.toDouble())) }
         val previous = controller.target
         val server = HttpUploadServerStats("A", 9_000_000, false, 0, feedbackAgeMs = 0,
-            uploadBitsPerSecond = 8_000_000, uploadRateAgeMs = 0)
+            uploadBitsPerSecond = 8_000_000, uploadRateAgeMs = 0,
+            uploadThroughput = HttpThroughput(8_000_000, 8_000_000, 0),
+            downloadThroughput = HttpThroughput(9_000_000, 9_000_000, 0))
         for (second in 30..34) sample(controller, second, upload(second, servers = listOf(server)))
         val adjustment = checkNotNull(sample(controller, 35, upload(35, servers = listOf(server))))
         assertEquals((8_000_000 * 0.85 / 1.06 - 192_000).toInt(), adjustment.bitrate)
         assertTrue(adjustment.bitrate > previous * 2)
         assertEquals(adjustment.bitrate, controller.measuredVideoBudget)
+    }
+
+    @Test fun burstOnlyMeasurementsCannotMakeAnUnboundedRecoveryJump() {
+        val controller = HttpAdaptiveBitrateController(12_000_000, 1_000_000, 0)
+        repeat(30) { sample(controller, it, upload(it, queue = it.toDouble())) }
+        val previous = controller.target
+        val server = HttpUploadServerStats("A", 100_000_000, false, 0, feedbackAgeMs = 0,
+            uploadBitsPerSecond = 100_000_000, uploadRateAgeMs = 0)
+        for (second in 30..35) sample(controller, second, upload(second, servers = listOf(server)))
+        assertEquals(previous * 2, controller.target)
     }
 
     @Test fun failedLargeProbeRollsBackAtTwoPressureSecondsThenBisects() {

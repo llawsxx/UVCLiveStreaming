@@ -90,6 +90,64 @@ def production_adaptive_merge(binary, classes, stdlib, java, javac):
         print(completed.stdout, flush=True)
 
 
+def throughput_feedback(binary):
+    with relay(binary, extra_args=["--mode", "store"]) as source:
+        assert block(source, 0, ts(1))[0] == 200
+        measured = time.monotonic() - 9
+        deadline = time.monotonic() + 1.3
+        while time.monotonic() < deadline:
+            age = int((time.monotonic() - measured) * 1000)
+            headers = {"X-Download-Rate-Bps": "1500000", "X-Download-Rate-Age-Ms": str(age),
+                       "X-Download-Short-Rate-Bps": "375000", "X-Download-Long-Rate-Bps": "375000",
+                       "X-Download-Window-Age-Ms": str(age)}
+            assert get(source, "/feedback/live", headers)[0] == 200
+            forwarded = get(source, "/status/live")[1]
+            if "X-Download-Rate-Age-Ms" in forwarded:
+                assert int(forwarded["X-Download-Rate-Age-Ms"]) >= 8990, forwarded
+            time.sleep(.05)
+        assert "X-Download-Rate-Bps" not in get(source, "/status/live")[1]
+        fresh = {"X-Merge-Session": "ordered", "X-Download-Rate-Bps": "375000", "X-Download-Rate-Age-Ms": "0"}
+        assert get(source, "/feedback/live", fresh)[0] == 200
+        assert upload(source, "new-session", 0, ts(1), 1_000_000, False,
+                      {"X-Session-Started-Ms": "2000", "X-Start-Us": "0"})[0] == 200
+        assert get(source, "/feedback/live", fresh)[0] == 200
+        assert "X-Download-Rate-Bps" not in get(source, "/status/live")[1]
+    print("PASS: repeated cached rate reports retain original age and expire", flush=True)
+
+    with contextlib.ExitStack() as stack:
+        source = stack.enter_context(relay(binary, extra_args=["--mode", "store"]))
+        body = ts(1, packets=3990)
+        for seq in range(20):
+            assert upload(source, "ordered", seq, body, 1_000_000, False,
+                          {"X-Session-Started-Ms": "1000", "X-Start-Us": str(seq * 1_000_000)})[0] == 200
+        proxy, state = stack.enter_context(capped_proxy(source, rate=1_500_000))
+        state["keep_alive"] = True
+        state["index_delay_each"] = 1.5
+        stack.enter_context(relay(binary, delay=12, extra_args=merge_args(proxy, gap=30)))
+        deadline = time.monotonic() + 16
+        while time.monotonic() < deadline:
+            headers = get(source, "/status/live")[1]
+            if "X-Download-Short-Rate-Bps" in headers:
+                break
+            time.sleep(.05)
+        else:
+            raise AssertionError(headers)
+        single = int(headers["X-Download-Rate-Bps"]) * 8
+        window = int(headers["X-Download-Short-Rate-Bps"]) * 8
+        assert single > 8_000_000 and 2_400_000 < window < 4_200_000, headers
+        print(f"PASS: real burst downloads single={single} bps, sustained={window} bps including index gaps", flush=True)
+        state["fail_downloads"] = True
+        deadline = time.monotonic() + 14
+        while time.monotonic() < deadline:
+            headers = get(source, "/status/live")[1]
+            if "X-Download-Rate-Bps" not in headers:
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError(headers)
+        print("PASS: live merge feedback cannot refresh a completed-transfer rate during download failures", flush=True)
+
+
 def store_status(binary):
     logs = []
 
@@ -254,7 +312,7 @@ def protocol(binary):
 @contextlib.contextmanager
 def capped_proxy(upstream, rate=375_000, slow_first=False):
     state = {"slow": slow_first, "downloaded": 0, "rescued": False, "fail_downloads": False, "failed_downloads": 0,
-             "index_delay": 0, "keep_alive": False, "clients": set()}
+             "index_delay": 0, "index_delay_each": 0, "keep_alive": False, "clients": set()}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -271,8 +329,8 @@ def capped_proxy(upstream, rate=375_000, slow_first=False):
         def forward(self):
             try:
                 state["clients"].add(self.client_address)
-                if self.path.startswith("/index/") and state["index_delay"]:
-                    delay = state["index_delay"]
+                if self.path.startswith("/index/") and (state["index_delay"] or state["index_delay_each"]):
+                    delay = state["index_delay"] or state["index_delay_each"]
                     state["index_delay"] = 0
                     time.sleep(delay)
                 if self.path.startswith("/chunks/") and state["fail_downloads"]:
@@ -552,7 +610,7 @@ if __name__ == "__main__":
     parser.add_argument("--kotlin-stdlib", type=Path)
     parser.add_argument("--java", type=Path, default=Path("java"))
     parser.add_argument("--javac", type=Path, default=Path("javac"))
-    parser.add_argument("--case", choices=["all", "status", "protocol", "network", "join", "single", "normal", "slow", "unreachable", "feedback", "adaptive"], default="all")
+    parser.add_argument("--case", choices=["all", "status", "protocol", "network", "join", "single", "normal", "slow", "unreachable", "feedback", "adaptive", "throughput"], default="all")
     args = parser.parse_args()
     if args.case in ("all", "status"):
         store_status(args.binary.resolve())
@@ -564,6 +622,8 @@ if __name__ == "__main__":
         live_join(args.binary.resolve())
     if args.case in ("all", "feedback", "adaptive"):
         merge_feedback(args.binary.resolve())
+    if args.case in ("all", "throughput"):
+        throughput_feedback(args.binary.resolve())
     if args.android_classes and args.case not in ("status", "protocol", "network", "join"):
         assert args.kotlin_stdlib
         if args.case in ("all", "single"):

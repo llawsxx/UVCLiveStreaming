@@ -562,7 +562,14 @@ data class HttpUploadServerStats(val url: String, val estimatedBitsPerSecond: Lo
     val feedbackAgeMs: Long? = null,
     /** Payload-to-valid-ACK speed on the phone-to-store leg, in bps; excludes deliberate pacing. */
     val uploadBitsPerSecond: Long? = null, val uploadRateAgeMs: Long? = null,
-    val mergeFeedback: HttpMergeFeedback? = null)
+    val mergeFeedback: HttpMergeFeedback? = null,
+    val uploadThroughput: HttpThroughput? = null, val downloadThroughput: HttpThroughput? = null)
+
+/** Goodput over continuously supplied five- and thirty-second windows. */
+data class HttpThroughput(val shortBitsPerSecond: Long?, val longBitsPerSecond: Long?, val ageMs: Long) {
+    val bitsPerSecond: Long? get() = if (ageMs in 0..10_000)
+        listOfNotNull(shortBitsPerSecond, longBitsPerSecond).filter { it > 0 }.minOrNull() else null
+}
 
 /** Undelivered media at merge, excluding its intentional playback-delay buffer. */
 data class HttpMergeFeedback(val sessionId: String, val pendingDurationUs: Long,

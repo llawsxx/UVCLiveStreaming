@@ -17,13 +17,14 @@ internal class DistributedHttpTsUploadWorker(
             URI(uri.scheme, null, uri.host, uri.port, uri.rawPath.replace("/upload/", "/status/"), null, null).toString()
         }, watchdog)
         var rate = 375_000.0 // Bootstrap estimate; replaced by measured server egress feedback, not a cap.
-        var measuredRate: Double? = null
-        var measuredNs = 0L
+        val downloadRate = HttpDownloadRateMeter()
         val uploadRate = HttpUploadRateMeter()
+        val throughput = HttpThroughputMeter()
         val mergeFeedback = HttpMergeFeedbackMeter()
         var availableNs = 0L
         var busy = false
         var failures = 0
+        var failedNs = 0L
         var scheduledNs = 0L
         var scheduledBytes = 0
         var acknowledgedBytes = 0L
@@ -69,11 +70,11 @@ internal class DistributedHttpTsUploadWorker(
             pending.values.sumOf { it.block.data.size.toLong() }, pending.values.sumOf { it.block.durationUs }, dropped),
             pending.values.firstOrNull { it.destination != null }?.block?.sequence, acknowledged, bytesAcknowledged.get(),
             destinations.map {
-                val age = ((now - it.measuredNs) / 1_000_000).takeIf { age -> it.measuredRate != null && age in 0..10_000 }
+                val downstream = it.downloadRate.reading(now)
                 val upstream = it.uploadRate.reading(now)
-                HttpUploadServerStats(it.url, it.measuredRate?.takeIf { age != null }?.let { rate -> (rate * 8).toLong() },
-                    it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks, age, upstream?.bitsPerSecond, upstream?.ageMs,
-                    it.mergeFeedback.reading(now))
+                HttpUploadServerStats(it.url, downstream?.bitsPerSecond,
+                    it.busy, it.failures, it.acknowledgedBytes, it.acknowledgedBlocks, downstream?.ageMs, upstream?.bitsPerSecond, upstream?.ageMs,
+                    it.mergeFeedback.reading(now), it.throughput.reading(now), downstream?.throughput)
             },
             history.values.sumOf { it.block.data.size.toLong() }, redirectAttempts, redirectAcknowledged, recentRedirects.toList(),
             pending.values.filter { !it.alreadyAcknowledged }.sumOf { it.block.durationUs }, slowDownloadRescues, originalDropped)
@@ -118,6 +119,11 @@ internal class DistributedHttpTsUploadWorker(
             expire()
             val item = pending.values.firstOrNull { it.destination == null }
             val now = System.nanoTime()
+            destinations.forEach { target ->
+                target.throughput.demand(now, target.busy || pending.values.any {
+                    it.destination == null && (it.rescueDestination == null || it.rescueDestination === target)
+                })
+            }
             var free = destinations.filter { !it.busy }
             // Wait for a healthy alternative even when it is busy/paced; re-posting to the same store
             // cannot rescue a block whose download path is stalled.
@@ -128,10 +134,17 @@ internal class DistributedHttpTsUploadWorker(
                 it !== item.lastDestination && (it.failures == 0 || it.availableNs <= now)
             })
                 free = free.filter { it !== item.lastDestination }
-            val target = item?.let { block -> free.minByOrNull {
+            val normalTarget = item?.let { block -> free.minByOrNull {
                 max(now, it.availableNs).toDouble() + block.block.data.size / it.rate * 1e9
             } }
-            if (item != null && target != null && target.availableNs <= now) {
+            // Keep one recovery attempt moving when every destination has failed.
+            // Rotate the least recently attempted eligible store; preserve rescue routing.
+            val recoveryTarget = if (normalTarget != null && normalTarget.availableNs > now &&
+                destinations.all { it.failures > 0 && !it.busy } &&
+                now - destinations.maxOf { it.failedNs } >= 500_000_000L)
+                free.minByOrNull { it.scheduledNs } else null
+            val target = recoveryTarget ?: normalTarget
+            if (item != null && target != null && (target.availableNs <= now || recoveryTarget != null)) {
                 item.destination = target
                 val from = item.lastDestination
                 if (from != null && from !== target) {
@@ -153,7 +166,7 @@ internal class DistributedHttpTsUploadWorker(
         val started = System.nanoTime()
         var notice: String? = null
         try {
-            val rate = upload(item, target)
+            upload(item, target)
             synchronized(lock) {
                 if (closed || pending[item.block.sequence] !== item) return@synchronized
                 pending.remove(item.block.sequence)
@@ -166,11 +179,6 @@ internal class DistributedHttpTsUploadWorker(
                 if (!item.alreadyAcknowledged) bytesAcknowledged.addAndGet(item.block.data.size.toLong())
                 acknowledged = max(acknowledged ?: -1L, item.block.sequence)
                 history[item.block.sequence] = Delivered(item.block, target, item.rescuedNs)
-                if (rate > 0) {
-                    target.rate = rate.toDouble().coerceIn(1_000.0, 125_000_000.0)
-                    target.measuredRate = target.rate
-                    target.measuredNs = System.nanoTime()
-                }
                 if (target.failures > 0) notice = "HTTP 服务器已恢复：${target.url}"
                 target.failures = 0
             }
@@ -185,7 +193,8 @@ internal class DistributedHttpTsUploadWorker(
                     item.retry = true
                     item.redirectReason = HttpUploadRedirectReason.UPLOAD_FAILURE
                     target.failures++
-                    target.availableNs = System.nanoTime() + (1L shl target.failures.coerceAtMost(4)) * 1_000_000_000L
+                    target.failedNs = System.nanoTime()
+                    target.availableNs = target.failedNs + (1L shl target.failures.coerceAtMost(4)) * 1_000_000_000L
                     if (target.failures == 1) notice = "HTTP 分块 ${item.block.sequence} 上传失败，等待转投：${target.url}（${error.message}）"
                 }
             }
@@ -207,21 +216,19 @@ internal class DistributedHttpTsUploadWorker(
             try {
                 val response = target.feedback.request("GET", deadlineNs = System.nanoTime() + 5_000_000_000L)
                 if (response.status == 200 && response.headers["x-relay-mode"] == "store") {
-                    val rate = response.headers["x-download-rate-bps"]?.toLongOrNull()
                     val sequence = response.headers["x-rescue-sequence"]?.toLongOrNull()
                     val session = response.headers["x-rescue-session"]
                     synchronized(lock) {
                         if (closed) return
                         expire()
                         target.mergeFeedback.record(response.headers, System.nanoTime())
-                        if (rate != null && rate > 0) {
-                            target.rate = rate.toDouble().coerceIn(1_000.0, 125_000_000.0)
-                            target.measuredRate = target.rate
-                            target.measuredNs = System.nanoTime()
+                        target.downloadRate.record(response.headers, System.nanoTime())
+                        target.downloadRate.reading(System.nanoTime())?.let { reading ->
+                            target.rate = minOf(reading.bitsPerSecond, reading.throughput?.bitsPerSecond ?: Long.MAX_VALUE) / 8.0
                             if (!target.busy && target.failures == 0) target.availableNs = max(System.nanoTime(),
                                 target.scheduledNs + (target.scheduledBytes / target.rate * 1e9).toLong())
                             lock.notifyAll()
-                        } else target.measuredRate = null
+                        }
                         val saved = history[sequence]
                         val now = System.nanoTime()
                         if (saved != null && saved.block.session == session &&
@@ -244,7 +251,7 @@ internal class DistributedHttpTsUploadWorker(
             try { Thread.sleep(1_000) } catch (_: InterruptedException) { return }
         }
     }
-    private fun upload(item: Pending, destination: Destination): Long {
+    private fun upload(item: Pending, destination: Destination) {
         val block = item.block
         val (rate, generation) = synchronized(lock) {
             if (closed || pending[block.sequence] !== item) throw IOException("Block retired")
@@ -265,10 +272,14 @@ internal class DistributedHttpTsUploadWorker(
         synchronized(lock) {
             if (!closed && pending[block.sequence] === item) {
                 destination.uploadRate.record(block.data.size, response.transferNs, System.nanoTime())
+                destination.throughput.record(block.data.size, System.nanoTime())
+                destination.downloadRate.record(response.headers, System.nanoTime())
+                destination.downloadRate.reading(System.nanoTime())?.let { reading ->
+                    destination.rate = minOf(reading.bitsPerSecond, reading.throughput?.bitsPerSecond ?: Long.MAX_VALUE) / 8.0
+                }
                 destination.mergeFeedback.record(response.headers, System.nanoTime())
             }
         }
-        return response.headers["x-download-rate-bps"]?.toLongOrNull()?.coerceAtLeast(0) ?: 0
     }
     override fun close() {
         synchronized(lock) {

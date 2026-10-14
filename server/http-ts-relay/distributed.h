@@ -1,4 +1,5 @@
 // Included after Relay: uses the existing bounded HTTP parser, socket helpers and TS playback clock.
+#include "throughput.h"
 struct StoredChunk {
     std::string session;
     std::string redirect_from, redirect_reason;
@@ -57,6 +58,8 @@ class ChunkStore {
     size_t bytes = 0, maximum;
     Us retention;
     double download_rate = 0;
+    double download_short_rate = 0, download_long_rate = 0;
+    Time window_time = Clock::now();
     std::string rescue_session;
     std::optional<uint64_t> rescue_sequence;
     uint64_t redirect_received = 0;
@@ -84,8 +87,17 @@ class ChunkStore {
     std::string status_headers() const {
         std::string headers = "X-Relay-Mode: store\r\n";
         // Publish only measured feedback; missing/stale samples must not impose a guessed cap.
-        if (download_rate > 0 && Clock::now() - feedback_time < std::chrono::seconds(10))
-            headers += "X-Download-Rate-Bps: " + std::to_string(static_cast<uint64_t>(download_rate)) + "\r\n";
+        const auto rate_age = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - feedback_time).count();
+        if (download_rate > 0 && rate_age >= 0 && rate_age <= 10000) {
+            headers += "X-Download-Rate-Bps: " + std::to_string(static_cast<uint64_t>(download_rate)) +
+                "\r\nX-Download-Rate-Age-Ms: " + std::to_string(rate_age) + "\r\n";
+            const auto window_age = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - window_time).count();
+            if ((download_short_rate > 0 || download_long_rate > 0) && window_age >= 0 && window_age <= 10000) {
+                if (download_short_rate > 0) headers += "X-Download-Short-Rate-Bps: " + std::to_string(static_cast<uint64_t>(download_short_rate)) + "\r\n";
+                if (download_long_rate > 0) headers += "X-Download-Long-Rate-Bps: " + std::to_string(static_cast<uint64_t>(download_long_rate)) + "\r\n";
+                headers += "X-Download-Window-Age-Ms: " + std::to_string(window_age) + "\r\n";
+            }
+        }
         if (rescue_sequence && Clock::now() - rescue_time < std::chrono::seconds(3))
             headers += "X-Rescue-Session: " + rescue_session + "\r\nX-Rescue-Sequence: " + std::to_string(*rescue_sequence) + "\r\n";
         const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - merge_feedback_time).count();
@@ -175,6 +187,7 @@ public:
             }
             // Keep the latest session's highest accepted sequence even when old rescue copies arrive.
             if (latest_session.empty() || std::tie(chunk.epoch, chunk.session) > std::tie(latest_epoch, latest_session)) {
+                download_rate = download_short_rate = download_long_rate = 0;
                 latest_epoch = chunk.epoch; latest_session = chunk.session; latest_sequence = chunk.sequence;
                 latest_end_us = chunk.start + chunk.duration;
             } else if (chunk.epoch == latest_epoch && chunk.session == latest_session) {
@@ -212,12 +225,26 @@ public:
                 merge_cursor_us = cursor_us; merge_wait_ms = wait_ms; merge_feedback_time = Clock::now();
             }
             const auto rate = request.headers.find("x-download-rate-bps");
-            if (rate != request.headers.end()) {
+            if (rate != request.headers.end() && (merge == request.headers.end() || merge->second == latest_session)) {
                 const double sample = static_cast<double>(number(rate->second, 125000000));
-                if (sample >= 1000) {
-                    download_rate = download_rate == 0 || Clock::now() - feedback_time >= std::chrono::seconds(10) || sample < download_rate
+                const auto age_header = request.headers.find("x-download-rate-age-ms");
+                const auto age = age_header == request.headers.end() ? 0 : number(age_header->second, 3600000);
+                const auto now = Clock::now();
+                const auto original = now - std::chrono::milliseconds(age);
+                if (sample >= 1000 && age <= 10000 && (download_rate == 0 || original >= feedback_time)) {
+                    // New merge versions already smooth real transfers. Repeated feedback is not a new sample.
+                    download_rate = age_header != request.headers.end() || download_rate == 0 || sample < download_rate
                         ? sample : download_rate * .75 + sample * .25;
-                    feedback_time = Clock::now();
+                    feedback_time = original;
+                    auto window_rate = [&](const char* key) {
+                        const auto found = request.headers.find(key);
+                        return found == request.headers.end() ? 0.0 : static_cast<double>(number(found->second, 125000000));
+                    };
+                    const auto window_age_header = request.headers.find("x-download-window-age-ms");
+                    const auto window_age = window_age_header == request.headers.end() ? 3600000 : number(window_age_header->second, 3600000);
+                    download_short_rate = window_age <= 10000 ? window_rate("x-download-short-rate-bps") : 0;
+                    download_long_rate = window_age <= 10000 ? window_rate("x-download-long-rate-bps") : 0;
+                    window_time = now - std::chrono::milliseconds(window_age);
                 }
             }
             rescue_sequence.reset();
@@ -420,6 +447,8 @@ class ChunkMerger {
     double gap_seconds, delay_seconds, max_pending_seconds;
     static constexpr double initial_rate = 375000; // Bootstrap estimate, replaced by measured speed; not a cap.
     std::vector<double> rates;
+    std::vector<std::optional<Time>> rate_times;
+    std::vector<SustainedThroughput> throughputs;
     std::vector<bool> indexed;
     Time waiting_since = Clock::now();
     bool selected = false, finished = false, priming = false;
@@ -430,8 +459,16 @@ class ChunkMerger {
         std::lock_guard<std::mutex> lock(mutex);
         drain();
         std::string headers;
-        if (rates[index] > 0)
-            headers = "X-Download-Rate-Bps: " + std::to_string(static_cast<uint64_t>(rates[index])) + "\r\n";
+        const auto now = Clock::now();
+        if (rates[index] > 0 && rate_times[index] && now - *rate_times[index] <= std::chrono::seconds(10)) {
+            headers = "X-Download-Rate-Bps: " + std::to_string(static_cast<uint64_t>(rates[index])) +
+                "\r\nX-Download-Rate-Age-Ms: " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now - *rate_times[index]).count()) + "\r\n";
+            if (const auto window = throughputs[index].reading(now)) {
+                if (window->short_rate > 0) headers += "X-Download-Short-Rate-Bps: " + std::to_string(static_cast<uint64_t>(window->short_rate)) + "\r\n";
+                if (window->long_rate > 0) headers += "X-Download-Long-Rate-Bps: " + std::to_string(static_cast<uint64_t>(window->long_rate)) + "\r\n";
+                headers += "X-Download-Window-Age-Ms: " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now - window->measured).count()) + "\r\n";
+            }
+        }
         // Do not repeatedly download the retained history directory on narrow egress links.
         if (selected) headers += "X-Index-Epoch: " + std::to_string(epoch) + "\r\nX-Index-Session: " + session +
             "\r\nX-Index-From: " + std::to_string(next) + "\r\n";
@@ -528,6 +565,8 @@ class ChunkMerger {
         SocketOwner connection(invalid_socket);
         double rate = initial_rate;
         bool measured = false;
+        std::optional<Time> last_measurement;
+        std::string rate_session;
         unsigned failures = 0;
         while (!stopping) {
             std::optional<StoredChunk> chosen;
@@ -558,6 +597,9 @@ class ChunkMerger {
                             session = chunk.session; epoch = chunk.epoch; next = 0; bytes = 0; cursor_us = 0;
                             entries.clear(); complete.clear(); selected = true; finished = false; priming = true;
                             std::fill(indexed.begin(), indexed.end(), false); waiting_since = Clock::now();
+                            std::fill(rates.begin(), rates.end(), 0);
+                            std::fill(rate_times.begin(), rate_times.end(), std::nullopt);
+                            std::fill(throughputs.begin(), throughputs.end(), SustainedThroughput{});
                             log_line("[merge] session=" + session);
                         }
                         if (chunk.session != session || chunk.epoch != epoch || chunk.sequence < next || finished) continue;
@@ -582,8 +624,12 @@ class ChunkMerger {
                         if (entry.claims.count(index) || bytes + chunk.size > maximum - reserve) continue;
                         bytes += chunk.size; entry.claims[index] = Clock::now(); chosen = chunk; active = session; break;
                     }
+                    throughputs[index].demand(Clock::now(), chosen.has_value());
                 }
                 if (chosen) {
+                    if (rate_session != active || (measured && last_measurement && Clock::now() - *last_measurement > std::chrono::seconds(10))) {
+                        rate_session = active; rate = initial_rate; measured = false;
+                    }
                     const auto begin = Clock::now();
                     auto payload = fetch(upstreams[index], "/chunks/" + stream + '/' + chosen->session + '/' + std::to_string(chosen->sequence),
                         "", 16 * 1024 * 1024, std::min(15.0, std::max(3.0, chosen->size / rate * 2 + 2)), connection.socket);
@@ -597,10 +643,15 @@ class ChunkMerger {
                         const double sample = std::max(1000.0, std::min(125000000.0, chosen->size / elapsed));
                         rate = !measured || sample < rate ? sample : rate * .75 + sample * .25;
                         measured = true;
+                        last_measurement = Clock::now();
                     }
                     std::lock_guard<std::mutex> lock(mutex);
-                    if (measured) rates[index] = rate;
                     if (active == session) {
+                        if (chosen->size >= 188 * 32) {
+                            const auto completed = Clock::now();
+                            rates[index] = rate; rate_times[index] = completed;
+                            throughputs[index].record(chosen->size, completed);
+                        }
                         const auto found = entries.find(chosen->sequence);
                         if (found != entries.end() && found->second.claims.erase(index)) {
                             bytes -= chosen->size;
@@ -626,7 +677,6 @@ class ChunkMerger {
                 if (chosen) {
                     rate = std::max(1000.0, rate * .5);
                     std::lock_guard<std::mutex> lock(mutex);
-                    if (measured) rates[index] = rate;
                     if (active == session) {
                         const auto found = entries.find(chosen->sequence);
                         if (found != entries.end() && found->second.claims.erase(index)) bytes -= chosen->size;
@@ -641,7 +691,8 @@ class ChunkMerger {
 public:
     ChunkMerger(Relay& output, std::vector<Upstream> sources, std::string name, size_t limit, double gap, double delay, double max_pending)
         : relay(output), upstreams(std::move(sources)), stream(std::move(name)), maximum(limit), gap_seconds(gap),
-          delay_seconds(delay), max_pending_seconds(max_pending), rates(upstreams.size(), 0), indexed(upstreams.size(), false) {
+          delay_seconds(delay), max_pending_seconds(max_pending), rates(upstreams.size(), 0), rate_times(upstreams.size()),
+          throughputs(upstreams.size()), indexed(upstreams.size(), false) {
         for (size_t i = 0; i < upstreams.size(); ++i) {
             workers.emplace_back([this, i] { run(i); });
             workers.emplace_back([this, i] { feedback(i); });
